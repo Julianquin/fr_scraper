@@ -205,3 +205,86 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# === DATOS CRUDOS O PROCESADOS ===
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.xlsm
+*.parquet
+*.feather
+*.hdf5
+*.h5
+*.json
+*.xml
+*.zip
+*.tar.gz
+*.rar
+
+# === DIRECTORIOS DE DATOS ===
+/data/
+/datasets/
+/input/
+/outputs/
+/output/
+/results/
+/tmp/
+/logs/
+
+# === MODELOS ENTRENADOS ===
+*.joblib
+*.pkl
+*.pickle
+*.sav
+*.pt
+*.pth
+*.h5
+
+# === NOTEBOOKS TEMPORALES ===
+.ipynb_checkpoints/
+
+# === ENTORNOS VIRTUALES ===
+env/
+venv/
+.venv/
+
+# === PYTHON ===
+__pycache__/
+*.py[cod]
+*.so
+*.log
+
+# === IDEs ===
+.vscode/
+.idea/
+*.code-workspace
+
+# === ARCHIVOS DE CONTROL PERSONAL ===
+.DS_Store
+Thumbs.db
+
+# === TESTING ===
+.coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+
+# === JUPYTER NBS CON OUTPUTS ===
+*.nbconvert.ipynb
+*.out.ipynb
+
+# === OTROS FORMATOS BINARIOS ===
+*.model
+*.bin
+*.dat
+
+# === CONFIGURACIÓN LOCAL O SECRETA ===
+.env
+.env.*
+*.secret
+secrets.*
+config.yaml
+config_local.yaml
