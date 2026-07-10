@@ -1,6 +1,13 @@
-Dado que ya tienes el conjunto de datos preparado con información de Finca Raíz, tienes múltiples oportunidades para generar contenidos valiosos y atractivos comercialmente, especialmente enfocados en audiencias como inversores inmobiliarios, compradores de vivienda, agencias inmobiliarias y empresas fintech/proptech.
+```bash
+python -m src.scraper         # si scrapear
+python -m src.ingest          # produce data/processed/housing_preprocessed.parquet
+python -m src.features        # genera features
+python -m src.train           # entrena modelos
+streamlit run streamlit_dashboard.py
+```
 
-Te propongo **6 ideas concretas** que podrías desarrollar y presentar:
+
+**6 ideas concretas** que podrías desarrollar y presentar:
 
 ---
 

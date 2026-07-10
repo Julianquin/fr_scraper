@@ -1,7 +1,7 @@
 # src/ingest.py
 import pandas as pd, os, joblib
 from pathlib import Path
-from src.config import DATA_RAW, DATA_INT
+from src.config import DATA_RAW, DATA_PROC          
 from src.preprocessing import preprocesar_datos_finca_raiz   # lo movemos a preprocessing.py
 
 def run():
@@ -12,7 +12,7 @@ def run():
     df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
     df = preprocesar_datos_finca_raiz(df)
 
-    out = DATA_INT / "housing_clean.parquet"
+    out = DATA_PROC / "housing_clean.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out, index=False)
     print(f"✅ Datos limpios guardados en {out} — {len(df):,} filas")

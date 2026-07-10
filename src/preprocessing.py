@@ -1,4 +1,4 @@
-# streamlit_dashboard.py
+# preprocessing.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -224,7 +224,7 @@ def preprocesar_datos_finca_raiz(df):
         'Descripción breve', 'Descripción completa',  'Publicante',
         'Habitaciones', 'Baños', 'Area_m2', 'Tipo_propiedad',
         'Ciudad', 'Departamento', 'Barrio', 'Etiqueta_Proyecto',
-        'Etiqueta_Destacado', 'Etiqueta_Nuevo', 'Etiqueta_Oportunidad']
+        'Etiqueta_Destacado', 'Etiqueta_Nuevo', 'Etiqueta_Oportunidad', 'Latitud','Longitud']
     
     # 1. Eliminar registros con NA en 'Area_m2' o 'Precio'
     df = df.dropna(subset=['Area_m2', 'Precio'])
@@ -236,8 +236,5 @@ def preprocesar_datos_finca_raiz(df):
     # 3. Rellenar NA en 'Habitaciones' y 'Baños' con 0
     df['Habitaciones'] = df['Habitaciones'].fillna(0)
     df['Baños'] = df['Baños'].fillna(0)
-
-    
-
 
     return df[columnas].reset_index(drop=True)

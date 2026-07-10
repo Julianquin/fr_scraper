@@ -19,6 +19,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import requests
 from requests.adapters import HTTPAdapter, Retry
+import json
+
 
 # ───────────────────────────────────────── driver ──────────────────────────────────────────
 
@@ -95,6 +97,17 @@ def _parse_detail(soup_det: BeautifulSoup) -> Dict:
             u[label] = value
         units.append(u)
     detail["Unidades"] = units
+
+    # -- Coordenadas desde JSON-LD --
+    ld_json = soup_det.find("script", type="application/ld+json")
+    if ld_json:
+        try:
+            data = json.loads(ld_json.string)
+            geo = data.get("object", {}).get("geo", {})
+            detail["Latitud"] = geo.get("latitude")
+            detail["Longitud"] = geo.get("longitude")
+        except Exception as e:
+            detail["Error coordenadas"] = str(e)
 
     return detail
 
