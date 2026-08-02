@@ -25,8 +25,21 @@ def preprocesar_datos_finca_raiz(df):
         'Unidades', 'Error detalle'
     ]
     df = df.drop(columns=[col for col in columnas_desechar if col in df.columns], errors='ignore')
-    # Eliminar filas duplicadas
-    df = df.drop_duplicates(subset=['Título', 'URL detalle'], keep='first')
+
+    # ---- Retrocompatibilidad: id_inmueble y fecha_recoleccion ----
+    # Los CSV antiguos no traen estas columnas; las derivamos/creamos.
+    # id_inmueble = último segmento de la URL (idéntico al que guarda el scraper).
+    # Se recalcula para TODAS las filas: así se unifica el tipo al mezclar CSV
+    # nuevos (que ya traen la columna) y viejos (que no), evitando choques de dtype.
+    df['id_inmueble'] = (
+        df['URL detalle'].astype(str).str.rstrip('/').str.split('/').str[-1]
+    )
+    if 'fecha_recoleccion' not in df.columns:
+        df['fecha_recoleccion'] = pd.NaT
+
+    # Eliminar duplicados exactos del mismo inmueble en la misma fecha
+    # (conserva la historia: un mismo id en fechas distintas NO se elimina)
+    df = df.drop_duplicates(subset=['id_inmueble', 'fecha_recoleccion'], keep='first')
 
     # ---- 2. Transformar precio ----
     def extraer_precio(valor):
@@ -55,28 +68,22 @@ def preprocesar_datos_finca_raiz(df):
         
         if pd.isna(valor):
             return pd.Series(resultado)
-        
-        # Extraer números (enteros y decimales)
-        numeros = [float(x) for x in re.findall(r'\d+\.\d+|\d+', valor)]
-        
+
         # Patrones de búsqueda
         patrones = {
             'Habitaciones': r'(\d+)\s*(?:Habs?\.?|Habitaciones?)',
             'Baños': r'(\d+)\s*(?:Baños?|Banos?)',
             'Area_m2': r'(\d+\.\d+|\d+)\s*(?:m²|m2|metros)'
         }
-        
+
+        # Usar SIEMPRE el número que captura cada patrón (no el primero del string):
+        # "10 Habs. 4 Baños 432 m²" → Habitaciones=10, Baños=4, Area=432
         for key, pat in patrones.items():
             match = re.search(pat, valor, re.IGNORECASE)
             if match:
-                # Para áreas, usar el número capturado
-                if key == 'Area_m2':
-                    resultado[key] = float(match.group(1))
-                # Para habitaciones/baños, usar el primer número si existe
-                elif numeros:
-                    resultado[key] = numeros[0]
-        
-        return pd.Series(resultado)     
+                resultado[key] = float(match.group(1))
+
+        return pd.Series(resultado)
         
     # Aplicar y combinar resultados
     tipologia_df = df['Tipología listado'].apply(extraer_tipologia)
@@ -84,22 +91,33 @@ def preprocesar_datos_finca_raiz(df):
     # df = df.drop(columns=['Tipología listado'])
 
     # ---- 4. Normalizar ubicación ----
+    # Soporta dos formatos de 'Ubicación listado':
+    #   VIEJO (2 partes): "Ciudad, Departamento"            -> ["Armenia", "Quindio"]
+    #   NUEVO (3 partes): "{Tipo} en{Ciudad}, {Ciudad}, {Depto}"
+    #                     -> ["Apartamento enBogotá", "Bogotá", "d.c."]
+    #   En el nuevo, la ciudad es la penúltima parte y el departamento la última.
+    depto_norm = {'D.C.': 'Bogotá D.C.', 'Dc': 'Bogotá D.C.', 'Bogota D.C.': 'Bogotá D.C.'}
+
     def normalizar_ubicacion(ubicacion):
         if pd.isna(ubicacion):
-            return pd.Series({
-                'Ciudad': 'Desconocido',
-                'Departamento': 'Desconocido'
-            })
+            return pd.Series({'Ciudad': 'Desconocido', 'Departamento': 'Desconocido'})
 
-        partes = ubicacion.split(',')
+        partes = [p.strip() for p in str(ubicacion).split(',') if p.strip()]
+        if not partes:
+            return pd.Series({'Ciudad': 'Desconocido', 'Departamento': 'Desconocido'})
 
-        ciudad = partes[0].strip().title() if len(partes) > 0 else 'Desconocido'
-        departamento = partes[1].strip().title() if len(partes) > 1 else 'Desconocido'
+        if len(partes) >= 3:                       # formato nuevo
+            ciudad, departamento = partes[-2], partes[-1]
+        elif len(partes) == 2:                     # formato viejo
+            ciudad, departamento = partes[0], partes[1]
+        else:                                      # solo ciudad
+            ciudad, departamento = partes[0], 'Desconocido'
 
-        return pd.Series({
-            'Ciudad': ciudad,
-            'Departamento': departamento
-        })
+        ciudad = ciudad.title()
+        departamento = departamento.title()
+        departamento = depto_norm.get(departamento, departamento)
+
+        return pd.Series({'Ciudad': ciudad, 'Departamento': departamento})
 
     # Aplicar la función
     ubicacion_df = df['Ubicación listado'].apply(normalizar_ubicacion)
@@ -220,7 +238,7 @@ def preprocesar_datos_finca_raiz(df):
 
     df['Tipo_propiedad'] = df['Tipo_propiedad'].apply(normalizar_tipo_propiedad)
 
-    columnas = ['Precio', 'Título', 'URL detalle',
+    columnas = ['id_inmueble', 'fecha_recoleccion', 'Precio', 'Título', 'URL detalle',
         'Descripción breve', 'Descripción completa',  'Publicante',
         'Habitaciones', 'Baños', 'Area_m2', 'Tipo_propiedad',
         'Ciudad', 'Departamento', 'Barrio', 'Etiqueta_Proyecto',

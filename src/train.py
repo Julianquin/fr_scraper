@@ -7,12 +7,12 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
-from src.config import DATA_INT, MODEL_DIR
+from src.config import DATA_PROC, MODEL_DIR
 
 TARGET = "Precio"
 
 def main():
-    df = pd.read_parquet(DATA_INT / "housing_clean.parquet")
+    df = pd.read_parquet(DATA_PROC / "housing_clean.parquet")
 
     num_cols = ["Area_m2", "Habitaciones", "Baños"]
     cat_cols = ["Tipo_propiedad", "Ciudad", "Departamento",
