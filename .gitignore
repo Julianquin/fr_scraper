@@ -230,6 +230,8 @@ __marimo__/
 /outputs/
 /output/
 /results/
+# mapas HTML generados por src.viz_map (se regeneran con un comando)
+/reports/
 /tmp/
 /logs/
 

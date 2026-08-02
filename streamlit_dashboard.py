@@ -241,8 +241,8 @@ def preprocesar_datos_finca_raiz(df):
 # Carga tus datos
 @st.cache_data
 def load_data():
-    # Ruta de la carpeta que contiene los archivos CSV
-    folder_path = 'datos'
+    # Ruta de la carpeta que contiene los archivos CSV (relativa a este archivo)
+    folder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'raw')
 
     # Obtener la lista de archivos CSV en la carpeta
     csv_files = [f for f in os.listdir(folder_path) if f.endswith('.csv')]

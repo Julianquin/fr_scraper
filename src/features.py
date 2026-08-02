@@ -1,9 +1,3 @@
-from src.config import DATA_PROC
-import pandas as pd
-
-df = pd.read_parquet(DATA_PROC / "housing_preprocessed.parquet")
-
-
 def generar_urls_completas():
     # Lista de ciudades y departamentos (ampliada)
     ciudades_departamentos = [
@@ -91,3 +85,17 @@ def generar_urls_completas():
 
     # Eliminar duplicados y mantener orden
     return list(dict.fromkeys(urls))
+
+
+def main() -> None:
+    """Regenera el archivo de URLs que consume el scraper."""
+    from src.config import BASE_DIR
+
+    urls = generar_urls_completas()
+    out = BASE_DIR / "urls_fincaraiz.txt"
+    out.write_text("\n".join(urls) + "\n", encoding="utf-8")
+    print(f"✅ {len(urls)} URLs escritas en {out}")
+
+
+if __name__ == "__main__":
+    main()

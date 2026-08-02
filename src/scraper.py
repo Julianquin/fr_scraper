@@ -31,6 +31,11 @@ def make_driver(*, headless: bool = True) -> webdriver.Chrome:
     # acelerar: no cargar imágenes ni GPU
     opts.add_argument("--disable-gpu")
     opts.add_argument("--window-size=1920,1080")
+    # Estabilidad en WSL/Linux headless: evita "Timed out receiving message
+    # from renderer" por /dev/shm pequeño y problemas de sandbox.
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-extensions")
     opts.add_experimental_option(
         "prefs",
         {
@@ -148,29 +153,43 @@ def scrape_portal(
     datos: List[Dict] = []
     detail_urls: List[str] = []
 
+    def first(node, *selectors):
+        """Primer elemento que matchee alguno de los selectores (soporta cambios de HTML)."""
+        for s in selectors:
+            el = node.select_one(s)
+            if el:
+                return el
+        return None
+
     for itm in inmuebles:
         info: Dict[str, object] = {}
-        cover = itm.select_one("a.lc-cardCover")
-        if cover:
-            info["Título"] = cover.get("title", "").strip()
-            href = cover.get("href", "").strip()
-            full_url = f"https://www.fincaraiz.com.co{href}"
+        # Enlace principal: nuevo HTML usa a.lc-data (antes a.lc-cardCover)
+        link = first(itm, "a.lc-data", "a.lc-cardCover")
+        if link:
+            href = (link.get("href") or "").strip()
+            info["Título"] = (link.get("title") or link.get_text(" ", strip=True) or "").strip()
+            full_url = href if href.startswith("http") else f"https://www.fincaraiz.com.co{href}"
             info["URL detalle"] = full_url
-            detail_urls.append(full_url)
-        img = itm.select_one("img.card-image-gallery--img")
-        info["URL imagen"] = img["src"].strip() if img else None
+            # El ID del inmueble es el último segmento numérico de la URL
+            info["id_inmueble"] = full_url.rstrip("/").split("/")[-1] if href else None
+            if href:
+                detail_urls.append(full_url)
+        img = itm.select_one("div.gallery-image img") or itm.select_one("img")
+        info["URL imagen"] = (img.get("src") or "").strip() if img else None
         info["Etiquetas"] = [t.get_text(strip=True) for t in itm.select("span.property-tag")]
-        precio = itm.select_one("span.price")
+        precio = first(itm, "span.main-price", ".main-price", "span.price")
         info["Precio listado"] = precio.get_text(strip=True) if precio else None
-        tip = itm.select_one("div.lc-typologyTag span")
+        # La tipología viene en varios <span> (Habs / Baños / m²); tomamos el texto
+        # completo del contenedor → "10 Habs. 4 Baños 432 m²" (formato que espera la limpieza)
+        tip = itm.select_one("div.lc-typologyTag")
         info["Tipología listado"] = tip.get_text(" ", strip=True) if tip else None
-        desc = itm.select_one("span.lc-title")
+        desc = first(itm, "span.lc-title", ".lc-title")
         info["Descripción breve"] = desc.get_text(strip=True) if desc else None
-        loc = itm.select_one("strong.lc-location")
+        loc = first(itm, "strong.lc-location", ".lc-location")
         info["Ubicación listado"] = loc.get_text(strip=True) if loc else None
-        pub = itm.select_one("div.publisher strong")
+        pub = first(itm, ".lc-owner-name", "div.publisher strong")
         info["Publicante"] = pub.get_text(strip=True) if pub else None
-        btn = itm.select_one("div.property-lead-button button")
+        btn = first(itm, ".btn-text", "div.property-lead-button button")
         info["Acción disponible"] = btn.get_text(strip=True) if btn else None
         datos.append(info)
 
@@ -192,6 +211,8 @@ def scrape_portal(
     # 3) merge + fallback Selenium si falló el scraping rápido
     for info in datos:
         du = info.get("URL detalle")
+        if not du:  # sin URL no hay detalle que pedir (evita driver.get(None))
+            continue
         detail_data = detalles.get(du, {})
         # si hubo error o datos muy incompletos → Selenium fallback
         if not detail_data or (
@@ -262,10 +283,14 @@ def main() -> None:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--overwrite", action="store_true", help="Vuelve a scrapear aunque el CSV exista")
     parser.add_argument("--workers", type=int, default=8, help="Hilos para detalles en paralelo")
+    parser.add_argument("--recycle-every", type=int, default=25,
+                        help="Reinicia Chrome cada N URLs para evitar fugas de memoria (0 = nunca)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)s │ %(message)s")
-    out_dir = Path(args.out_dir)
+    run_date = pd.Timestamp.now().strftime("%Y-%m-%d")
+    # Cada corrida guarda su snapshot en data/raw/<fecha>/ → nunca se pisa la historia
+    out_dir = Path(args.out_dir) / run_date
     out_dir.mkdir(parents=True, exist_ok=True)
 
     driver = make_driver(headless=args.headless)
@@ -276,14 +301,29 @@ def main() -> None:
 
     scraper_fn = functools.partial(scrape_portal, workers=args.workers)
 
+    processed = 0
     for u in urls:
-        parts = u.split("/")
-        fname = "_".join(parts[-4:-1])  # venta_bogota_bogota-dc
+        # Nombre = ruta de la URL sin dominio. Funciona con cualquier profundidad:
+        #   .../venta/bogota/bogota-dc            -> venta_bogota_bogota-dc
+        #   .../venta/apartamentos/bogota/bogota-dc -> venta_apartamentos_bogota_bogota-dc
+        path = u.split("//", 1)[-1].split("/", 1)[-1] if "//" in u else u
+        fname = path.strip("/").replace("/", "_")
         csv_path = out_dir / f"{fname}.csv"
 
         if csv_path.exists() and not args.overwrite:
             logging.info("⏭️  %s ya existe (%s); omito scraping", fname, csv_path)
             continue
+
+        # Reciclar Chrome cada N URLs para liberar memoria (evita timeouts del renderer)
+        if processed and args.recycle_every and processed % args.recycle_every == 0:
+            logging.info("♻️  Reiniciando Chrome tras %d URLs para liberar memoria", processed)
+            try:
+                driver.quit()
+            except Exception:  # noqa: BLE001
+                pass
+            driver = make_driver(headless=args.headless)
+            wait = WebDriverWait(driver, WAIT_SECS)
+        processed += 1
 
         rows = scrape_multiple_pages(
             driver,
@@ -296,7 +336,9 @@ def main() -> None:
         if not rows:
             continue
 
-        pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8")
+        df_out = pd.DataFrame(rows)
+        df_out["fecha_recoleccion"] = run_date  # fecha en que se recolectó el dato
+        df_out.to_csv(csv_path, index=False, encoding="utf-8")
         logging.info("✅ %d filas → %s", len(rows), csv_path)
 
     driver.quit()
