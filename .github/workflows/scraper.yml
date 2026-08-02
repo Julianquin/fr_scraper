@@ -1,0 +1,107 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Scraper semanal de FincaRaíz en GitHub Actions.
+#
+# Qué hace:
+#   1. Levanta un runner Ubuntu con Chrome, instala dependencias.
+#   2. Corre el scraper (subconjunto acotado por defecto → cabe en el límite de
+#      tiempo del runner) y luego `ingest` para regenerar los Parquets.
+#   3. Commitea los snapshots (CSV por fecha + parquets) de vuelta al repo, para
+#      que la HISTORIA se acumule entre semanas, y los sube como artifact.
+#
+# ⚠️ Legal/uso aceptable: el scraping puede violar los Términos de Servicio de
+#    FincaRaíz y las políticas de uso de GitHub Actions. Mantén el volumen bajo
+#    y úsalo bajo tu responsabilidad. Para producción con clientes, migra a datos
+#    propios del cliente / datos licenciados (ver README).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Scraper semanal FincaRaíz
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"          # todos los lunes 06:00 UTC (01:00 Colombia)
+  workflow_dispatch:              # permite lanzarlo a mano desde la pestaña Actions
+    inputs:
+      max_pages:
+        description: "Páginas máximas por URL"
+        default: "10"
+      url_file:
+        description: "Archivo de URLs a scrapear"
+        default: "urls_demo.txt"
+      commit:
+        description: "¿Commitear los datos al repo? (true/false)"
+        default: "true"
+
+# Permite que el job haga push de los datos al repo
+permissions:
+  contents: write
+
+# Evita corridas solapadas (si una tarda, no arranca otra encima)
+concurrency:
+  group: scraper-semanal
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout del repo
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Los runners ubuntu-latest ya traen Google Chrome estable preinstalado;
+      # webdriver-manager descarga el chromedriver que empareja con esa versión.
+      # Si algún día el runner no lo trae, descomenta el bloque setup-chrome.
+      - name: Verificar Google Chrome
+        run: google-chrome --version || echo "Chrome no encontrado"
+      # - name: Instalar Chrome (fallback)
+      #   uses: browser-actions/setup-chrome@v1
+      #   with:
+      #     chrome-version: stable
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Scrapear
+        env:
+          MAX_PAGES: ${{ github.event.inputs.max_pages || '10' }}
+          URL_FILE: ${{ github.event.inputs.url_file || 'urls_demo.txt' }}
+        run: |
+          python -m src.scraper --headless \
+            --url-file "$URL_FILE" \
+            --max-pages "$MAX_PAGES" \
+            --workers 4 --delay 1 --recycle-every 10
+
+      - name: Consolidar y limpiar (Parquets)
+        run: python -m src.ingest
+
+      - name: Subir datos como artifact (respaldo, 90 días)
+        uses: actions/upload-artifact@v4
+        with:
+          name: datos-${{ github.run_id }}
+          path: |
+            data/raw/**/*.csv
+            data/processed/*.parquet
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Commitear snapshots al repo
+        if: ${{ (github.event.inputs.commit || 'true') == 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # -f porque data/ está en .gitignore; queremos versionar solo estos datos.
+          # Adición por directorio → git recorre recursivamente (sin depender de globstar).
+          git add -f data/raw data/processed
+          if git diff --cached --quiet; then
+            echo "Sin cambios en los datos; no hay nada que commitear."
+          else
+            git commit -m "chore(data): snapshot semanal $(date -u +%F)"
+            git push
+          fi
