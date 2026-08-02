@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inteligencia Inmobiliaria · Demo — Mapa de mercado de Cali</title>
+  <meta name="description" content="Demostración de inteligencia de mercado inmobiliario: mapa interactivo de precios por m² en Cali a partir de datos públicos.">
+  <style>
+    :root{
+      --bg:#f6f7fb; --card:#ffffff; --ink:#1a1a2e; --muted:#5b6472;
+      --brand:#2563eb; --brand2:#0ea5e9; --accent:#d7191c; --ok:#1a9850;
+      --line:#e6e9f0;
+    }
+    @media (prefers-color-scheme: dark){
+      :root{ --bg:#0f1220; --card:#171a2b; --ink:#eef1f7;
+             --muted:#9aa3b2; --line:#262a3d; }
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      background:var(--bg);color:var(--ink);line-height:1.55}
+    .wrap{max-width:1100px;margin:0 auto;padding:0 20px}
+    header.hero{
+      background:linear-gradient(135deg,var(--brand),var(--brand2));
+      color:#fff;padding:56px 0 64px}
+    .badge{display:inline-block;background:rgba(255,255,255,.18);
+      padding:4px 12px;border-radius:999px;font-size:13px;font-weight:600;
+      letter-spacing:.3px;margin-bottom:16px}
+    header.hero h1{margin:0 0 10px;font-size:34px;line-height:1.15}
+    header.hero p{margin:0;max-width:620px;font-size:17px;opacity:.95}
+    .stats{display:flex;gap:28px;flex-wrap:wrap;margin-top:28px}
+    .stat b{display:block;font-size:30px;font-weight:800;line-height:1}
+    .stat span{font-size:13px;opacity:.9}
+    main{margin-top:-36px;padding-bottom:56px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;
+      box-shadow:0 8px 30px rgba(20,30,60,.08);overflow:hidden}
+    .maphead{padding:18px 22px;border-bottom:1px solid var(--line);
+      display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+    .maphead h2{margin:0;font-size:18px}
+    .maphead a{color:var(--brand);text-decoration:none;font-weight:600;font-size:14px}
+    iframe{width:100%;height:76vh;min-height:520px;border:0;display:block}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+      gap:18px;margin-top:28px}
+    .feat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px}
+    .feat h3{margin:0 0 6px;font-size:16px}
+    .feat p{margin:0;color:var(--muted);font-size:14px}
+    .legend{font-size:13px;color:var(--muted);margin-top:14px}
+    footer{border-top:1px solid var(--line);padding:26px 0;color:var(--muted);font-size:13px}
+    footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <span class="badge">DEMO · Inteligencia de mercado inmobiliario</span>
+      <h1>Mapa de precios de vivienda — Cali</h1>
+      <p>Convertimos datos públicos del mercado en decisiones de <b>precio</b> y
+         <b>captación</b>. Esta es una muestra interactiva y 100% descriptiva.</p>
+      <div class="stats">
+        <div class="stat"><b>2.703</b><span>inmuebles en venta</span></div>
+        <div class="stat"><b>Precio/m²</b><span>coloreado por zona</span></div>
+        <div class="stat"><b>Interactivo</b><span>filtros, calor y clústeres</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <div class="card">
+        <div class="maphead">
+          <h2>🗺️ Explora el mercado de Cali</h2>
+          <a href="cali.html" target="_blank">Abrir en pantalla completa ↗</a>
+        </div>
+        <iframe src="cali.html" title="Mapa interactivo de precios en Cali" loading="lazy"></iframe>
+      </div>
+      <p class="legend">Verde = más económico por m² · Rojo = más caro. Usa el
+         control de capas (arriba a la derecha del mapa) para alternar
+         <b>precio por m²</b>, <b>densidad de oferta</b> y <b>agrupación por zona</b>.</p>
+
+      <div class="grid">
+        <div class="feat"><h3>💰 Precio por m²</h3>
+          <p>Detecta de un vistazo dónde está lo caro y dónde hay oportunidades.</p></div>
+        <div class="feat"><h3>🔥 Densidad de oferta</h3>
+          <p>Mapa de calor de dónde se concentra la competencia.</p></div>
+        <div class="feat"><h3>📍 Exploración por zona</h3>
+          <p>Clústeres con conteo por barrio y popups con el detalle de cada aviso.</p></div>
+        <div class="feat"><h3>⚙️ Reutilizable</h3>
+          <p>El mismo motor genera el mapa para cualquier ciudad del país.</p></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <span>Demostración con fines ilustrativos · datos de fuentes públicas · sin modelado predictivo.</span>
+      <span>Servicios de desarrollo de software, ciencia de datos e IA.</span>
+    </div>
+  </footer>
+</body>
+</html>
