@@ -106,6 +106,10 @@ def preprocesar_datos_finca_raiz(df):
         if not partes:
             return pd.Series({'Ciudad': 'Desconocido', 'Departamento': 'Desconocido'})
 
+        # El formato nuevo puede venir como "{Tipo} en{Ciudad}" pegado
+        # (p. ej. "Apartaestudio enBarranquilla"); quitamos ese prefijo.
+        partes[0] = re.sub(r'^.*\ben(?=[A-ZÁÉÍÓÚÑ])', '', partes[0]).strip() or partes[0]
+
         if len(partes) >= 3:                       # formato nuevo
             ciudad, departamento = partes[-2], partes[-1]
         elif len(partes) == 2:                     # formato viejo
