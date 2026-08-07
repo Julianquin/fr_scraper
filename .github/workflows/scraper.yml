@@ -1,107 +1,172 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Scraper semanal de FincaRaíz en GitHub Actions.
+# Scraper de FincaRaíz por MATRIZ de departamentos.
 #
-# Qué hace:
-#   1. Levanta un runner Ubuntu con Chrome, instala dependencias.
-#   2. Corre el scraper (subconjunto acotado por defecto → cabe en el límite de
-#      tiempo del runner) y luego `ingest` para regenerar los Parquets.
-#   3. Commitea los snapshots (CSV por fecha + parquets) de vuelta al repo, para
-#      que la HISTORIA se acumule entre semanas, y los sube como artifact.
+#   Job 1 (scrape): un job por departamento en paralelo (máx. N a la vez).
+#                   Cada uno scrapea urls/<depto>.txt y sube sus CSV como artifact.
+#   Job 2 (merge):  descarga todos los artifacts, corre ingest, reconstruye el
+#                   dataset del dashboard y lo commitea (un solo push).
 #
-# ⚠️ Legal/uso aceptable: el scraping puede violar los Términos de Servicio de
-#    FincaRaíz y las políticas de uso de GitHub Actions. Mantén el volumen bajo
-#    y úsalo bajo tu responsabilidad. Para producción con clientes, migra a datos
-#    propios del cliente / datos licenciados (ver README).
+# ⚠️ Cuanto más alto `max-parallel`, más rápido termina pero más agresivo es con
+#    FincaRaíz (mayor riesgo de bloqueo / ToS). También roza las políticas de uso
+#    de GitHub Actions. Mantén el paralelismo moderado.
 # ─────────────────────────────────────────────────────────────────────────────
-name: Scraper semanal FincaRaíz
+name: Scraper diario FincaRaíz (matriz por departamento)
 
 on:
   schedule:
-    - cron: "0 6 * * 1"          # todos los lunes 06:00 UTC (01:00 Colombia)
-  workflow_dispatch:              # permite lanzarlo a mano desde la pestaña Actions
+    - cron: "0 6 * * *"          # todos los días 06:00 UTC (01:00 Colombia)
+  workflow_dispatch:
     inputs:
       max_pages:
         description: "Páginas máximas por URL"
-        default: "10"
-      url_file:
-        description: "Archivo de URLs a scrapear"
-        default: "urls_demo.txt"
-      commit:
-        description: "¿Commitear los datos al repo? (true/false)"
-        default: "true"
+        default: "50"
 
-# Permite que el job haga push de los datos al repo
 permissions:
-  contents: write
+  contents: write     # commit del dataset
+  pages: write        # deploy a GitHub Pages
+  id-token: write     # requerido por actions/deploy-pages
 
-# Evita corridas solapadas (si una tarda, no arranca otra encima)
 concurrency:
-  group: scraper-semanal
+  group: scraper-matriz
   cancel-in-progress: false
 
 jobs:
+  # ── 1) Un job por departamento (en paralelo, con tope de concurrencia) ──
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350          # tope de GitHub es 360; cortamos justo antes
+    strategy:
+      fail-fast: false            # si un depto falla, los demás siguen
+      max-parallel: 4             # deptos scrapeando a la vez (súbelo/bájalo aquí)
+      matrix:
+        depto:
+          - amazonas
+          - antioquia
+          - atlantico
+          - bogota-dc
+          - bolivar
+          - caldas
+          - cordoba
+          - cundinamarca
+          - magdalena
+          - meta
+          - narino
+          - norte-de-santander
+          - quindio
+          - risaralda
+          - san-andres
+          - santander
+          - tolima
+          - valle-del-cauca
     steps:
-      - name: Checkout del repo
-        uses: actions/checkout@v4
-
-      - name: Configurar Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
-      # Los runners ubuntu-latest ya traen Google Chrome estable preinstalado;
-      # webdriver-manager descarga el chromedriver que empareja con esa versión.
-      # Si algún día el runner no lo trae, descomenta el bloque setup-chrome.
       - name: Verificar Google Chrome
         run: google-chrome --version || echo "Chrome no encontrado"
-      # - name: Instalar Chrome (fallback)
-      #   uses: browser-actions/setup-chrome@v1
-      #   with:
-      #     chrome-version: stable
-
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Scrapear
+      - name: Scrapear ${{ matrix.depto }}
         env:
-          MAX_PAGES: ${{ github.event.inputs.max_pages || '10' }}
-          URL_FILE: ${{ github.event.inputs.url_file || 'urls_demo.txt' }}
+          MAX_PAGES: ${{ github.event.inputs.max_pages || '50' }}
         run: |
           python -m src.scraper --headless \
-            --url-file "$URL_FILE" \
+            --url-file "urls/${{ matrix.depto }}.txt" \
             --max-pages "$MAX_PAGES" \
             --workers 4 --delay 1 --recycle-every 10
-
-      - name: Consolidar y limpiar (Parquets)
-        run: python -m src.ingest
-
-      - name: Subir datos como artifact (respaldo, 90 días)
+      - name: Subir resultados del depto
         uses: actions/upload-artifact@v4
         with:
-          name: datos-${{ github.run_id }}
+          name: raw-${{ matrix.depto }}
+          path: data/raw/**/*.csv
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── 2) Consolidar todo, limpiar y refrescar el dataset del dashboard ──
+  merge:
+    needs: scrape
+    if: always()                  # corre aunque algún depto falle/expire
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Descargar resultados de todos los deptos
+        uses: actions/download-artifact@v4
+        with:
+          path: _artifacts
+      - name: Consolidar CSV en data/raw/<fecha>/
+        run: |
+          DEST="data/raw/$(date -u +%F)"
+          mkdir -p "$DEST"
+          find _artifacts -name '*.csv' -exec cp -n {} "$DEST/" \; 2>/dev/null || true
+          echo "CSVs consolidados: $(ls "$DEST" 2>/dev/null | wc -l)"
+      - name: Limpiar y reconstruir el dataset del dashboard
+        run: |
+          python -m src.ingest
+          python -m src.build_app_dataset
+      - name: Subir dataset combinado (respaldo, 90 días)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataset-${{ github.run_id }}
           path: |
-            data/raw/**/*.csv
             data/processed/*.parquet
+            data/app/*.parquet
           retention-days: 90
           if-no-files-found: warn
-
-      - name: Commitear snapshots al repo
-        if: ${{ (github.event.inputs.commit || 'true') == 'true' }}
+      - name: Commitear el dataset del dashboard
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # -f porque data/ está en .gitignore; queremos versionar solo estos datos.
-          # Adición por directorio → git recorre recursivamente (sin depender de globstar).
-          git add -f data/raw data/processed
+          git add -f data/app/housing_clean.parquet
           if git diff --cached --quiet; then
-            echo "Sin cambios en los datos; no hay nada que commitear."
+            echo "Sin cambios en el dataset del dashboard."
           else
-            git commit -m "chore(data): snapshot semanal $(date -u +%F)"
+            git commit -m "chore(data): refrescar dataset del dashboard $(date -u +%F)"
+            git pull --rebase origin "${{ github.ref_name }}" || true
             git push
           fi
+
+  # ── 3) Regenerar el mapa con datos frescos y publicar en GitHub Pages ──
+  pages:
+    needs: merge                  # solo si el merge terminó OK (dataset fresco listo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout (rama con el commit fresco del merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Regenerar mapas en docs/ con datos frescos
+        run: python -m src.viz_map --ciudad Cali --out docs/cali.html
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+      - name: Empaquetar docs/ como artifact de Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Deploy a GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

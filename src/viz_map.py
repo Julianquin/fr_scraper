@@ -29,14 +29,25 @@ from src.preprocessing import preprocesar_datos_finca_raiz
 PALETA = ["#1a9850", "#66bd63", "#a6d96a", "#fee08b", "#fc8d59", "#d73027"]
 
 
-def cargar_ciudad(ciudad: str) -> pd.DataFrame:
-    """Consolida todos los CSV, limpia y deja solo la ciudad pedida con geo válida."""
+def _cargar_todo() -> pd.DataFrame:
+    """Devuelve el dataset limpio. Prefiere el parquet curado (rápido, y en CI
+    no hay CSV crudos); si no existe, lee y limpia todos los CSV de data/raw."""
+    parquets = [BASE_DIR / "data" / "app" / "housing_clean.parquet",
+                BASE_DIR / "data" / "processed" / "housing_clean.parquet"]
+    p = next((q for q in parquets if q.exists()), None)
+    if p is not None:
+        return pd.read_parquet(p)
+
     files = sorted(Path(DATA_RAW).rglob("*.csv"))
     if not files:
-        raise FileNotFoundError(f"No hay CSV en {DATA_RAW}")
-    df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    df = preprocesar_datos_finca_raiz(df)
+        raise FileNotFoundError(f"No hay parquet curado ni CSV en {DATA_RAW}")
+    return preprocesar_datos_finca_raiz(pd.concat([pd.read_csv(f) for f in files],
+                                                  ignore_index=True))
 
+
+def cargar_ciudad(ciudad: str) -> pd.DataFrame:
+    """Deja solo la ciudad pedida con geo válida y precio/m² saneado."""
+    df = _cargar_todo()
     df = df[df["Ciudad"].str.contains(ciudad, case=False, na=False)].copy()
     for c in ["Latitud", "Longitud", "Precio", "Area_m2", "Habitaciones", "Baños"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
