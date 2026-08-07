@@ -253,7 +253,11 @@ def preprocesar_datos_finca_raiz(df):
     # df['Area_m2'] = df['Area_m2'].fillna(df['Area_m2'].median())
 
     # 2. Rellenar NA en 'Descripción completa' usando 'Descripción breve'
-    df['Descripción completa'] = df['Descripción completa'].fillna(df['Descripción breve'])
+    #    (si no viene la columna —p. ej. desde el master liviano—, se crea a partir de la breve)
+    if 'Descripción completa' not in df.columns:
+        df['Descripción completa'] = df['Descripción breve']
+    else:
+        df['Descripción completa'] = df['Descripción completa'].fillna(df['Descripción breve'])
 
     # 3. Rellenar NA en 'Habitaciones' y 'Baños' con 0
     df['Habitaciones'] = df['Habitaciones'].fillna(0)

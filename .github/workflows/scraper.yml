@@ -74,7 +74,7 @@ jobs:
         env:
           MAX_PAGES: ${{ github.event.inputs.max_pages || '50' }}
         run: |
-          python -m src.scraper --headless \
+          python -m src.scraper --headless --incremental \
             --url-file "urls/${{ matrix.depto }}.txt" \
             --max-pages "$MAX_PAGES" \
             --workers 4 --delay 1 --recycle-every 10
@@ -112,30 +112,36 @@ jobs:
           mkdir -p "$DEST"
           find _artifacts -name '*.csv' -exec cp -n {} "$DEST/" \; 2>/dev/null || true
           echo "CSVs consolidados: $(ls "$DEST" 2>/dev/null | wc -l)"
-      - name: Limpiar y reconstruir el dataset del dashboard
+      - name: Upsert al master + reconstruir dataset del dashboard
         run: |
-          python -m src.ingest
-          python -m src.build_app_dataset
-      - name: Subir dataset combinado (respaldo, 90 días)
+          python -m src.ingest_master     # upsert incremental por id_inmueble
+          python -m src.build_app_dataset  # dataset del dashboard desde el master
+      - name: Subir master + dataset (respaldo, 90 días)
         uses: actions/upload-artifact@v4
         with:
           name: dataset-${{ github.run_id }}
           path: |
-            data/processed/*.parquet
+            data/master/*.parquet
             data/app/*.parquet
           retention-days: 90
           if-no-files-found: warn
-      - name: Commitear el dataset del dashboard
+      - name: Commitear master + dataset del dashboard
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/app/housing_clean.parquet
+          git add -f data/master/listings.parquet data/app/housing_clean.parquet
           if git diff --cached --quiet; then
-            echo "Sin cambios en el dataset del dashboard."
+            echo "Sin cambios en el master."
           else
-            git commit -m "chore(data): refrescar dataset del dashboard $(date -u +%F)"
-            git pull --rebase origin "${{ github.ref_name }}" || true
-            git push
+            git commit -m "chore(data): actualizar master incremental $(date -u +%F)"
+            # --autostash guarda cualquier cambio no stageado antes del rebase
+            # (evita "cannot pull with rebase: You have unstaged changes").
+            # Reintenta por si otro proceso empujó mientras tanto.
+            for intento in 1 2 3; do
+              git pull --rebase --autostash origin "${{ github.ref_name }}" \
+                && git push && break
+              echo "Push falló; reintento $intento…"; sleep 5
+            done
           fi
 
   # ── 3) Regenerar el mapa con datos frescos y publicar en GitHub Pages ──

@@ -227,6 +227,20 @@ def scrape_portal(
     return datos
 
 
+ORDEN_RECIENTE = "ordenListado=3"  # orden por "más recientes" en FincaRaíz
+
+
+def _page_url(base_url: str, page_num: int, *, orden: str | None = ORDEN_RECIENTE) -> str:
+    """URL de la página N con el parámetro de orden (recientes) al final.
+    Ej.: base/pagina2?ordenListado=3
+    """
+    path = base_url if page_num == 1 else f"{base_url}/pagina{page_num}"
+    if not orden:
+        return path
+    sep = "&" if "?" in path else "?"
+    return f"{path}{sep}{orden}"
+
+
 def scrape_multiple_pages(
     driver: webdriver.Chrome,
     wait: WebDriverWait,
@@ -237,6 +251,8 @@ def scrape_multiple_pages(
     stop_on_empty: bool = True,
     stop_on_error: bool = True,
     delay: float | None = None,
+    known_prices: Dict[str, str] | None = None,
+    stop_known_pages: int = 2,
 ) -> List[Dict]:
     logger = logging.getLogger("scraper")
     if not logger.handlers:
@@ -246,9 +262,10 @@ def scrape_multiple_pages(
         logger.addHandler(h)
 
     all_listings: List[Dict] = []
+    known_streak = 0  # páginas consecutivas 100% ya conocidas (para corte incremental)
 
     for page_num in range(1, max_pages + 1):
-        url = base_url if page_num == 1 else f"{base_url}/pagina{page_num}"
+        url = _page_url(base_url, page_num)
         logger.info("Scraping página %d: %s", page_num, url)
 
         try:
@@ -265,6 +282,23 @@ def scrape_multiple_pages(
                 break
 
         all_listings.extend(page_data)
+
+        # ── Corte temprano incremental ──
+        # Con orden por recientes, si una página no trae ningún inmueble nuevo ni
+        # con precio cambiado, lo de abajo también es viejo → cortamos.
+        if known_prices is not None and page_data:
+            nuevos_o_cambiados = sum(
+                1 for r in page_data
+                if known_prices.get(str(r.get("id_inmueble"))) != str(r.get("Precio listado"))
+            )
+            if nuevos_o_cambiados == 0:
+                known_streak += 1
+                if known_streak >= stop_known_pages:
+                    logger.info("Incremental: %d páginas seguidas ya conocidas → corto.",
+                                known_streak)
+                    break
+            else:
+                known_streak = 0
 
         if delay:
             time.sleep(delay)
@@ -285,10 +319,19 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8, help="Hilos para detalles en paralelo")
     parser.add_argument("--recycle-every", type=int, default=25,
                         help="Reinicia Chrome cada N URLs para evitar fugas de memoria (0 = nunca)")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Usa el master: orden por recientes + corta al llegar a lo ya conocido")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s │ %(levelname)s │ %(message)s")
     run_date = pd.Timestamp.now().strftime("%Y-%m-%d")
+
+    known_prices = None
+    if args.incremental:
+        from src import master as M
+        known_prices = M.precios_conocidos()
+        logging.info("🔁 Incremental ON — %d inmuebles conocidos (corta al llegar a lo conocido)",
+                     len(known_prices))
     # Cada corrida guarda su snapshot en data/raw/<fecha>/ → nunca se pisa la historia
     out_dir = Path(args.out_dir) / run_date
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -332,6 +375,7 @@ def main() -> None:
             scraper=scraper_fn,
             max_pages=args.max_pages,
             delay=args.delay,
+            known_prices=known_prices,
         )
         if not rows:
             continue
@@ -342,6 +386,8 @@ def main() -> None:
         logging.info("✅ %d filas → %s", len(rows), csv_path)
 
     driver.quit()
+    # El upsert del master se hace aparte con `python -m src.ingest_master`
+    # (así el job "merge" lo hace una sola vez desde los CSV de todos los deptos).
 
 
 if __name__ == "__main__":
