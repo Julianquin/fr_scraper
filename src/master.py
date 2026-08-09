@@ -18,10 +18,12 @@ MASTER_PATH = BASE_DIR / "data" / "master" / "listings.parquet"
 # Columnas pesadas o basura que no necesita ni el dashboard ni la limpieza.
 # (Descripción completa = texto largo; el resto se descarta en preprocessing.)
 DROP_COLS = {
-    "Descripción completa", "URL imagen", "Acción disponible", "Estado",
-    "Estrato", "Parqueaderos", "Financiación", "Formas de pago", "Cuota inicial",
+    "Descripción completa", "URL imagen", "Acción disponible",
+    "Financiación", "Formas de pago", "Cuota inicial",
     "Pisos interiores", "Aplica subsidio", "Unidades", "Error detalle",
 }
+# Nota: Estrato/Parqueaderos/Estado/Antiguedad/Piso ahora SÍ se conservan
+# (los captura la ficha técnica del detalle) → son features de alto valor.
 
 
 def cargar() -> pd.DataFrame:

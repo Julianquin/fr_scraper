@@ -5,7 +5,7 @@ Uso:
 """
 
 from __future__ import annotations
-import argparse, logging, time, csv, concurrent.futures, functools
+import argparse, logging, time, csv, concurrent.futures, functools, re
 from pathlib import Path
 from typing import Callable, Sequence, Dict, List
 
@@ -89,6 +89,26 @@ def _parse_detail(soup_det: BeautifulSoup) -> Dict:
     # -- Descripción completa --
     desc = soup_det.select_one("div.property-description")
     detail["Descripción completa"] = desc.get_text(strip=True) if desc else None
+
+    # -- Ficha técnica (listados regulares): Estrato, Antigüedad, Parqueaderos, Piso… --
+    ficha = {
+        "Estado": "Estado", "Antigüedad": "Antiguedad", "Parqueaderos": "Parqueaderos",
+        "Estrato": "Estrato", "Piso N°": "Piso",
+        "Área Construida": "Area_construida", "Área Privada": "Area_privada",
+    }
+    for row in soup_det.select("div.technical-sheet div.ant-row-space-between"):
+        items = row.select("div.ant-space-item")
+        val = row.select_one("[title]")
+        if len(items) >= 2 and val:
+            col = ficha.get(items[-1].get_text(strip=True))
+            if col:
+                detail[col] = (val.get("title") or "").strip()
+
+    # Estrato de respaldo desde la descripción (si no vino en la ficha)
+    if not detail.get("Estrato") and desc:
+        m = re.search(r"estrato\s*(\d+)", desc.get_text(), re.IGNORECASE)
+        if m:
+            detail["Estrato"] = m.group(1)
 
     # -- Unidades / Tipos --
     units = []

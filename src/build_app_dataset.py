@@ -15,7 +15,8 @@ from src.preprocessing import preprocesar_datos_finca_raiz
 # Solo las columnas que el dashboard necesita (mantiene el parquet pequeño)
 APP_COLS = ["id_inmueble", "Título", "URL detalle", "Precio", "Area_m2",
             "Habitaciones", "Baños", "Tipo_propiedad", "Ciudad",
-            "Departamento", "Barrio", "Latitud", "Longitud"]
+            "Departamento", "Barrio", "Latitud", "Longitud",
+            "Estrato", "Parqueaderos", "Piso", "Antiguedad", "Estado"]
 
 
 def run() -> None:

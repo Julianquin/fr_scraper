@@ -20,7 +20,7 @@ def preprocesar_datos_finca_raiz(df):
     # ---- 1. Limpieza inicial ----
     # Eliminar columnas no deseadas
     columnas_desechar = [
-        'Estrato', 'Parqueaderos', 'Financiación', 'Formas de pago',
+        'Financiación', 'Formas de pago',
         'Cuota inicial', 'Pisos interiores', 'Aplica subsidio',
         'Unidades', 'Error detalle'
     ]
@@ -242,10 +242,20 @@ def preprocesar_datos_finca_raiz(df):
 
     df['Tipo_propiedad'] = df['Tipo_propiedad'].apply(normalizar_tipo_propiedad)
 
+    # ---- Atributos de la ficha técnica del detalle (alto valor) ----
+    # Se crean si faltan (datos viejos) y se limpian a numérico donde aplica.
+    for c in ['Estrato', 'Parqueaderos', 'Piso', 'Antiguedad', 'Estado']:
+        if c not in df.columns:
+            df[c] = np.nan
+    for c in ['Estrato', 'Parqueaderos', 'Piso']:
+        df[c] = pd.to_numeric(df[c].astype(str).str.extract(r'(\d+)')[0], errors='coerce')
+
     columnas = ['id_inmueble', 'fecha_recoleccion', 'Precio', 'Título', 'URL detalle',
         'Descripción breve', 'Descripción completa',  'Publicante',
         'Habitaciones', 'Baños', 'Area_m2', 'Tipo_propiedad',
-        'Ciudad', 'Departamento', 'Barrio', 'Etiqueta_Proyecto',
+        'Ciudad', 'Departamento', 'Barrio',
+        'Estrato', 'Parqueaderos', 'Piso', 'Antiguedad', 'Estado',
+        'Etiqueta_Proyecto',
         'Etiqueta_Destacado', 'Etiqueta_Nuevo', 'Etiqueta_Oportunidad', 'Latitud','Longitud']
     
     # 1. Eliminar registros con NA en 'Area_m2' o 'Precio'
