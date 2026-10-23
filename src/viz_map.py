@@ -14,6 +14,7 @@ Uso:
 """
 from __future__ import annotations
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,7 @@ from src.preprocessing import preprocesar_datos_finca_raiz
 
 # Paleta verde → rojo (barato → caro) para el precio por m²
 PALETA = ["#1a9850", "#66bd63", "#a6d96a", "#fee08b", "#fc8d59", "#d73027"]
+ESRI_CANVAS = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas"
 
 
 def _cargar_todo() -> pd.DataFrame:
@@ -85,8 +87,13 @@ def construir_mapa(df: pd.DataFrame, ciudad: str) -> folium.Map:
     centro = [df["Latitud"].median(), df["Longitud"].median()]
     m = folium.Map(location=centro, zoom_start=12, tiles=None, control_scale=True)
 
-    folium.TileLayer("CartoDB positron", name="Claro").add_to(m)
-    folium.TileLayer("CartoDB dark_matter", name="Oscuro").add_to(m)
+    # Basemaps de Esri (sin API key; CARTO empezó a exigirla)
+    for nombre, capa in [("Claro", "World_Light_Gray_Base"), ("Oscuro", "World_Dark_Gray_Base")]:
+        folium.TileLayer(
+            tiles=f"{ESRI_CANVAS}/{capa}/MapServer/tile/{{z}}/{{y}}/{{x}}",
+            attr="Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors",
+            name=nombre, max_zoom=16,
+        ).add_to(m)
 
     # Escala de color robusta (percentiles 5-95) del precio/m² en millones
     pm = df["precio_m2"] / 1e6
@@ -152,6 +159,20 @@ def _añadir_panel(m: folium.Map, df: pd.DataFrame, ciudad: str) -> None:
     m.get_root().html.add_child(folium.Element(html))
 
 
+def estadisticas(df: pd.DataFrame, ciudad: str) -> dict:
+    """Cifras que muestra docs/index.html (se escriben como JSON junto al mapa)."""
+    pm = df["precio_m2"] / 1e6
+    return {
+        "ciudad": ciudad,
+        "avisos": int(len(df)),
+        "mediana_m2": round(float(pm.median()), 2),
+        "p25_m2": round(float(pm.quantile(.25)), 2),
+        "p75_m2": round(float(pm.quantile(.75)), 2),
+        "barrios": int(df["Barrio"].nunique()),
+        "actualizado": pd.Timestamp.now(tz="America/Bogota").strftime("%Y-%m-%d"),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ciudad", default="Cali", help="Ciudad a mapear (coincide con la columna Ciudad)")
@@ -165,7 +186,10 @@ def main() -> None:
 
     m = construir_mapa(df, args.ciudad)
     m.save(str(out))
-    print(f"✅ {len(df):,} inmuebles mapeados → {out}")
+    stats = out.with_suffix(".json")
+    stats.write_text(json.dumps(estadisticas(df, args.ciudad), ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+    print(f"✅ {len(df):,} inmuebles mapeados → {out} (+ {stats.name})")
     print(f"   Ábrelo en el navegador:  file://{out.resolve()}")
 
 

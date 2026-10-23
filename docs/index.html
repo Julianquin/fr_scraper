@@ -30,6 +30,7 @@
     .stats{display:flex;gap:28px;flex-wrap:wrap;margin-top:28px}
     .stat b{display:block;font-size:30px;font-weight:800;line-height:1}
     .stat span{font-size:13px;opacity:.9}
+    .updated{margin:18px 0 0;font-size:13px;opacity:.85}
     main{margin-top:-36px;padding-bottom:56px}
     .card{background:var(--card);border:1px solid var(--line);border-radius:16px;
       box-shadow:0 8px 30px rgba(20,30,60,.08);overflow:hidden}
@@ -56,10 +57,11 @@
       <p>Convertimos datos públicos del mercado en decisiones de <b>precio</b> y
          <b>captación</b>. Esta es una muestra interactiva y 100% descriptiva.</p>
       <div class="stats">
-        <div class="stat"><b>2.703</b><span>inmuebles en venta</span></div>
-        <div class="stat"><b>Precio/m²</b><span>coloreado por zona</span></div>
-        <div class="stat"><b>Interactivo</b><span>filtros, calor y clústeres</span></div>
+        <div class="stat"><b id="s-avisos">—</b><span>avisos de venta con ubicación</span></div>
+        <div class="stat"><b id="s-mediana">—</b><span>M COP/m² (mediana)</span></div>
+        <div class="stat"><b id="s-barrios">—</b><span>barrios</span></div>
       </div>
+      <p class="updated" id="s-actualizado">Datos actualizados a diario.</p>
     </div>
   </header>
 
@@ -95,5 +97,16 @@
       <span>Servicios de desarrollo de software, ciencia de datos e IA.</span>
     </div>
   </footer>
+  <script>
+    // Cifras generadas por src/viz_map.py en cada corrida del pipeline
+    fetch("cali.json", {cache: "no-store"}).then(r => r.json()).then(s => {
+      const n = x => x.toLocaleString("es-CO");
+      document.getElementById("s-avisos").textContent = n(s.avisos);
+      document.getElementById("s-mediana").textContent = n(s.mediana_m2);
+      document.getElementById("s-barrios").textContent = n(s.barrios);
+      document.getElementById("s-actualizado").textContent =
+        `Actualizado: ${s.actualizado} · rango típico ${n(s.p25_m2)}–${n(s.p75_m2)} M/m²`;
+    }).catch(() => {});
+  </script>
 </body>
 </html>
