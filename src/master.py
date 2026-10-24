@@ -114,19 +114,13 @@ FICHA = ["Estrato", "Antiguedad", "Parqueaderos", "Piso", "Estado",
 
 
 def reparar() -> None:
-    """Rehace el master desde sus fotos en git: por aviso, la versión con la
+    """Rehace el master desde sus fotos (git y R2): por aviso, la versión con la
     fecha_recoleccion más reciente (ignora reinyecciones de CSV viejos), la ficha
     técnica más reciente que se conozca y last_seen = última recolección real."""
     import io
-    import subprocess
-    commits = eventos._git("log", "--reverse", "--format=%H", "--",
-                           eventos.MASTER_REL).decode().split()
     mejor, ficha = pd.DataFrame(), pd.DataFrame()
-    for sha in commits:
-        try:
-            foto = pd.read_parquet(io.BytesIO(eventos._git("show", f"{sha}:{eventos.MASTER_REL}")))
-        except subprocess.CalledProcessError:
-            continue
+    for _, _, contenido in eventos.fotos_master():     # git hasta la migración, R2 después
+        foto = pd.read_parquet(io.BytesIO(contenido))
         if "id_inmueble" not in foto or "fecha_recoleccion" not in foto:
             continue
         foto["id_inmueble"] = foto["id_inmueble"].astype(str)
