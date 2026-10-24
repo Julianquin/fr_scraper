@@ -120,19 +120,26 @@ def reconstruir() -> pd.DataFrame:
         if "id_inmueble" not in foto or "Precio listado" not in foto:
             continue
         foto["id_inmueble"] = foto["id_inmueble"].astype(str)
+        foto = foto.drop_duplicates("id_inmueble", keep="last").reset_index(drop=True)
         ids = foto["id_inmueble"]
+        foto["_f"] = (foto["fecha_recoleccion"].fillna(fecha_commit).astype(str).str[:10]
+                      if "fecha_recoleccion" in foto else fecha_commit)
+
+        # Una versión más vieja que la ya vista es una reinyección (CSV viejos en el CI
+        # hasta oct-2026): se ignora y el aviso conserva su precio anterior.
+        if not previo.empty:
+            p = previo.set_index("id_inmueble")
+            f_prev = ids.map(p["_f"])
+            vieja = f_prev.notna() & (foto["_f"] < f_prev)
+            foto.loc[vieja, "Precio listado"] = ids[vieja].map(p["Precio listado"])
+            foto.loc[vieja, "_f"] = f_prev[vieja]
 
         # Alta: first_seen si existe; cambio: cuándo se recolectó el precio nuevo
-        def _col(nombre):
-            if nombre not in foto:
-                s = pd.Series(fecha_commit, index=ids.values)
-            else:
-                s = pd.Series(foto[nombre].fillna(fecha_commit).astype(str).str[:10].values,
-                              index=ids.values)
-            return s[~s.index.duplicated(keep="last")]
-
-        partes.append(detectar(previo, foto, _col("first_seen"), _col("fecha_recoleccion")))
-        previo = foto[["id_inmueble", "Precio listado"]]
+        fs = (foto["first_seen"].fillna(fecha_commit).astype(str).str[:10]
+              if "first_seen" in foto else pd.Series(fecha_commit, index=foto.index))
+        partes.append(detectar(previo, foto, pd.Series(fs.values, index=ids.values),
+                               pd.Series(foto["_f"].values, index=ids.values)))
+        previo = foto[["id_inmueble", "Precio listado", "_f"]]
         print(f"  {fecha_commit} {sha[:7]}: {len(partes[-1]):>7,} eventos")
 
     ev = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=COLUMNAS)
