@@ -19,21 +19,33 @@ APP_COLS = ["id_inmueble", "Título", "URL detalle", "Precio", "Area_m2",
             "Estrato", "Parqueaderos", "Piso", "Antiguedad", "Estado"]
 
 
-def run() -> None:
+def dataset(incluir_historico: bool = False) -> pd.DataFrame:
+    """Dataset limpio desde el master.
+
+    Por defecto excluye los avisos HISTÓRICOS: los de julio de 2025 que entraron con la
+    siembra del master (8-ago-2026) y nunca se volvieron a ver, así que no tienen
+    fecha_recoleccion. Siguen en el master; `incluir_historico=True` los trae
+    (p. ej. para comparar contra 2025 en notebooks/terremoto_cali.ipynb).
+    """
     # Prioridad: master incremental (crudo → se limpia) > parquet ya limpio de ingest
     if MASTER_PATH.exists():
-        df = preprocesar_datos_finca_raiz(pd.read_parquet(MASTER_PATH))
-    else:
-        src = DATA_PROC / "housing_clean.parquet"
-        if not src.exists():
-            raise FileNotFoundError(
-                f"No hay master ni {src}. Corre el scraper (--incremental) o `python -m src.ingest`.")
-        df = pd.read_parquet(src)
+        m = pd.read_parquet(MASTER_PATH)
+        if not incluir_historico and "fecha_recoleccion" in m:
+            m = m[m["fecha_recoleccion"].notna()]
+        return preprocesar_datos_finca_raiz(m)
+    src = DATA_PROC / "housing_clean.parquet"
+    if not src.exists():
+        raise FileNotFoundError(
+            f"No hay master ni {src}. Corre el scraper (--incremental) o `python -m src.ingest`.")
+    return pd.read_parquet(src)
 
+
+def run() -> None:
+    df = dataset()
     out = BASE_DIR / "data" / "app" / "housing_clean.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     df[[c for c in APP_COLS if c in df.columns]].to_parquet(out, index=False)
-    print(f"✅ {len(df):,} filas → {out}")
+    print(f"✅ {len(df):,} filas → {out} (sin avisos históricos de 2025 no vueltos a ver)")
 
 
 if __name__ == "__main__":
