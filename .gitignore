@@ -292,3 +292,6 @@ htmlcov/
 secrets.*
 config.yaml
 config_local.yaml
+
+# === NOTAS PRIVADAS (no se publican) ===
+/TELEGRAM_AGENTES.md

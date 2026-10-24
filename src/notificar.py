@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -53,10 +54,14 @@ def telegram(texto: str, token: str, chat_id: str) -> None:
         datos = urllib.parse.urlencode({"chat_id": chat_id, "text": _a_html(parte),
                                         "parse_mode": "HTML",
                                         "disable_web_page_preview": "true"}).encode()
-        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
-                                    data=datos, timeout=60) as r:
-            if not json.load(r).get("ok"):
-                raise RuntimeError("Telegram rechazó el mensaje")
+        try:
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
+                                        data=datos, timeout=60) as r:
+                json.load(r)
+        except urllib.error.HTTPError as e:
+            # p. ej. 403 "bot was blocked by the user", 400 "chat not found"
+            detalle = json.loads(e.read() or b"{}").get("description", str(e))
+            raise RuntimeError(detalle) from None
 
 
 def whatsapp(texto: str, phone: str, apikey: str) -> None:
@@ -74,13 +79,19 @@ def main() -> None:
     texto = open(sys.argv[1], encoding="utf-8").read()
     env = os.environ.get
 
-    enviados = []
+    enviados, fallos = [], []
     if env("TELEGRAM_BOT_TOKEN") and env("TELEGRAM_CHAT_ID"):
-        # Varios destinos separados por coma: tu chat, el canal de agentes, etc.
+        # Varios destinos separados por coma: tu chat, cada agente, un canal…
+        # Si uno falla (p. ej. bloqueó el bot) se sigue con los demás.
         chats = [c.strip() for c in env("TELEGRAM_CHAT_ID").split(",") if c.strip()]
+        ok = 0
         for chat in chats:
-            telegram(texto, env("TELEGRAM_BOT_TOKEN"), chat)
-        enviados.append(f"Telegram ({len(chats)} destinos)")
+            try:
+                telegram(texto, env("TELEGRAM_BOT_TOKEN"), chat)
+                ok += 1
+            except RuntimeError as e:
+                fallos.append(f"Telegram {chat}: {e}")
+        enviados.append(f"Telegram ({ok}/{len(chats)} destinos)")
     if env("CALLMEBOT_PHONE") and env("CALLMEBOT_APIKEY"):
         whatsapp(texto, env("CALLMEBOT_PHONE"), env("CALLMEBOT_APIKEY"))
         enviados.append("WhatsApp")
@@ -88,6 +99,8 @@ def main() -> None:
         sys.exit("❌ No hay credenciales: define TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID "
                  "o CALLMEBOT_PHONE/CALLMEBOT_APIKEY.")
     print(f"✅ Enviado por {' y '.join(enviados)}")
+    if fallos:
+        sys.exit("❌ Fallaron algunos envíos:\n  " + "\n  ".join(fallos))
 
 
 if __name__ == "__main__":
