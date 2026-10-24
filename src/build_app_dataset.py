@@ -9,6 +9,7 @@ Uso:
 from pathlib import Path
 import pandas as pd
 from src.config import DATA_PROC, BASE_DIR
+from src.almacen import COMPRESION
 from src.master import MASTER_PATH
 from src.preprocessing import preprocesar_datos_finca_raiz
 
@@ -44,7 +45,7 @@ def run() -> None:
     df = dataset()
     out = BASE_DIR / "data" / "app" / "housing_clean.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
-    df[[c for c in APP_COLS if c in df.columns]].to_parquet(out, index=False)
+    df[[c for c in APP_COLS if c in df.columns]].to_parquet(out, index=False, compression=COMPRESION)
     print(f"✅ {len(df):,} filas → {out} (sin avisos históricos de 2025 no vueltos a ver)")
 
 

@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import BASE_DIR
+from src.almacen import COMPRESION
 
 EVENTOS_PATH = BASE_DIR / "data" / "master" / "events.parquet"
 MASTER_REL = "data/master/listings.parquet"
@@ -92,7 +93,7 @@ def _guardar(ev: pd.DataFrame) -> None:
                     "precio_antes": float, "precio_despues": float})
     ev = ev.drop_duplicates(subset=["id_inmueble", "evento", "fecha", "precio_despues"])
     EVENTOS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ev.sort_values(["fecha", "id_inmueble"]).to_parquet(EVENTOS_PATH, index=False)
+    ev.sort_values(["fecha", "id_inmueble"]).to_parquet(EVENTOS_PATH, index=False, compression=COMPRESION)
 
 
 def registrar(nuevos: pd.DataFrame) -> int:
@@ -112,8 +113,9 @@ def fotos_master(nombre: str = "listings.parquet"):
     """(fecha, etiqueta, contenido en bytes) de cada foto del master, en orden.
 
     Hasta oct-2026 el CI commiteaba el master a diario, así que las fotos viven en git.
-    Desde la migración a R2 (src/almacen.py) están en respaldos/fecha=AAAA-MM-DD/.
-    Se usa git hasta su último día y R2 para los días posteriores.
+    Desde la migración a R2 (src/almacen.py) están en respaldos/{diario,semanal,historico}/
+    (o en respaldos/fecha=…/, el formato previo a la retención). Se usa git hasta su
+    último día y R2 para los días posteriores; un día en varias carpetas cuenta una vez.
     """
     ruta = f"data/master/{nombre}"
     ultimo_git = ""
@@ -130,13 +132,16 @@ def fotos_master(nombre: str = "listings.parquet"):
     if not almacen.configurado():
         return
     s3, bucket = almacen._cliente()
-    claves = sorted(o["Key"] for pag in s3.get_paginator("list_objects_v2")
-                    .paginate(Bucket=bucket, Prefix="respaldos/")
-                    for o in pag.get("Contents", []) if o["Key"].endswith(f"/{nombre}"))
-    for clave in claves:
-        dia = clave.split("fecha=")[1][:10]
-        if dia > ultimo_git:
-            yield dia, "R2", s3.get_object(Bucket=bucket, Key=clave)["Body"].read()
+    por_dia = {}                               # día → objeto más reciente con esa fecha
+    for pag in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix="respaldos/"):
+        for o in pag.get("Contents", []):
+            if o["Key"].endswith(f"/{nombre}") and "fecha=" in o["Key"]:
+                dia = o["Key"].split("fecha=")[1][:10]
+                if dia not in por_dia or o["LastModified"] > por_dia[dia]["LastModified"]:
+                    por_dia[dia] = o
+    # >= : el último día de git puede tener en R2 una foto posterior (corrida tras el último commit)
+    for dia in sorted(d for d in por_dia if d >= ultimo_git):
+        yield dia, "R2", s3.get_object(Bucket=bucket, Key=por_dia[dia]["Key"])["Body"].read()
 
 
 def reconstruir() -> pd.DataFrame:

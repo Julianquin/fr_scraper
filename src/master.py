@@ -13,6 +13,7 @@ from typing import Dict, List
 import pandas as pd
 from src.config import BASE_DIR
 from src import eventos
+from src.almacen import COMPRESION
 
 MASTER_PATH = BASE_DIR / "data" / "master" / "listings.parquet"
 
@@ -104,7 +105,7 @@ def upsert(rows: List[Dict] | pd.DataFrame, run_date: str) -> Dict[str, int]:
 
 def _guardar(df: pd.DataFrame) -> None:
     MASTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(MASTER_PATH, index=False)
+    df.to_parquet(MASTER_PATH, index=False, compression=COMPRESION)
 
 
 # Ficha técnica del detalle: un CSV del listado no la trae, así que al reemplazar una fila
