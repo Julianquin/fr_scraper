@@ -1,4 +1,4 @@
-# streamlit_dashboard.py
+# train.py — modelo opcional de precio (RandomForest)
 # src/train.py
 import joblib, pandas as pd
 from sklearn.compose import ColumnTransformer
