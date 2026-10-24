@@ -2,7 +2,8 @@
 Envía un mensaje de texto (p. ej. la alerta de src/oportunidades.py) por Telegram y/o WhatsApp.
 
 Usa los canales que tengan credenciales en variables de entorno (secrets en GitHub Actions):
-  - Telegram:  TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+  - Telegram:  TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (uno o varios, separados por coma;
+               un canal privado con el bot como admin también es un chat id, -100…)
   - WhatsApp:  CALLMEBOT_PHONE + CALLMEBOT_APIKEY   (CallMeBot, solo uso personal)
 
 El texto viene con formato de WhatsApp (*negrita*, _cursiva_); para Telegram se convierte
@@ -75,8 +76,11 @@ def main() -> None:
 
     enviados = []
     if env("TELEGRAM_BOT_TOKEN") and env("TELEGRAM_CHAT_ID"):
-        telegram(texto, env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID"))
-        enviados.append("Telegram")
+        # Varios destinos separados por coma: tu chat, el canal de agentes, etc.
+        chats = [c.strip() for c in env("TELEGRAM_CHAT_ID").split(",") if c.strip()]
+        for chat in chats:
+            telegram(texto, env("TELEGRAM_BOT_TOKEN"), chat)
+        enviados.append(f"Telegram ({len(chats)} destinos)")
     if env("CALLMEBOT_PHONE") and env("CALLMEBOT_APIKEY"):
         whatsapp(texto, env("CALLMEBOT_PHONE"), env("CALLMEBOT_APIKEY"))
         enviados.append("WhatsApp")
