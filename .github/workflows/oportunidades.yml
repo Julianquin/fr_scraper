@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Alerta semanal de oportunidades (Cali).
+#
+#   Corre cuando termina el scraper diario, pero solo sigue si en Colombia es
+#   lunes: así usa siempre los datos recién actualizados. Genera la alerta con
+#   src/oportunidades.py y la envía con src/notificar.py a los canales que
+#   tengan secrets configurados (Settings → Secrets and variables → Actions):
+#     - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#     - WhatsApp: CALLMEBOT_PHONE, CALLMEBOT_APIKEY
+#
+# ⚠️ El repo es público: el informe NO se sube como artifact (cualquiera con
+#    cuenta de GitHub podría descargarlo). Solo viaja por el mensaje.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Alerta semanal de oportunidades
+
+on:
+  workflow_run:
+    workflows: ["Scraper diario FincaRaíz (matriz por departamento)"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ciudad:
+        description: "Ciudad"
+        default: "Cali"
+
+permissions:
+  contents: read
+
+jobs:
+  alerta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: ¿Es lunes en Colombia?
+        id: dia
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=America/Bogota date +%u)" = "1" ]; then
+            echo "seguir=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Hoy no es lunes en Colombia; no se envía alerta."
+          fi
+      - uses: actions/checkout@v4
+        if: steps.dia.outputs.seguir == 'true'
+        with:
+          ref: ${{ github.event.repository.default_branch }}   # incluye el commit fresco del scraper
+      - uses: actions/setup-python@v5
+        if: steps.dia.outputs.seguir == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        if: steps.dia.outputs.seguir == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Generar alerta
+        if: steps.dia.outputs.seguir == 'true'
+        run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}"
+      - name: Enviar alerta
+        if: steps.dia.outputs.seguir == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: |
+          shopt -s nullglob
+          archivos=(reports/oportunidades/*_whatsapp.txt)
+          if [ ${#archivos[@]} -eq 0 ]; then echo "No se generó alerta (sin datos en el periodo)."; exit 0; fi
+          python -m src.notificar "${archivos[0]}"

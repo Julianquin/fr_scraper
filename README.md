@@ -47,7 +47,8 @@ fr_scraper/
 │   ├── preprocessing.py     # Lógica de limpieza (precio, área, ciudad, barrio…)
 │   ├── ingest.py            # (alt) Consolida CSV → housing_history + housing_clean
 │   ├── changes.py           # Cambios de precio / nuevas / eliminadas
-│   ├── viz_map.py           # Mapas interactivos por ciudad (Folium)
+│   ├── viz_map.py           # Mapas interactivos por ciudad (Folium): comunas → barrios → avisos
+│   ├── zonas.py             # Barrios/comunas oficiales de Cali (IDESC) + asignación de avisos
 │   ├── features.py          # Regenera urls_fincaraiz.txt (catálogo ciudades/tipos)
 │   ├── train.py / app.py    # Modelo opcional (RandomForest) + dashboard del modelo
 │   └── OLD/                 # Versiones antiguas

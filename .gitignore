@@ -224,7 +224,9 @@ __marimo__/
 *.rar
 
 # === DIRECTORIOS DE DATOS ===
-/data/
+/data/*
+# polígonos oficiales de Cali (src/zonas.py): se versionan para que el CI no dependa de la IDESC
+!/data/geo/
 /datasets/
 /input/
 /outputs/
