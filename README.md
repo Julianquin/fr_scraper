@@ -42,6 +42,7 @@ fr_scraper/
 │   ├── config.py            # Rutas base (data/raw, data/processed, models)
 │   ├── scraper.py           # ⭐ Scraper (CLI). --incremental usa el master
 │   ├── master.py            # Store maestro por id_inmueble (upsert, first/last seen)
+│   ├── eventos.py           # Bitácora de altas y cambios de precio (data/master/events.parquet)
 │   ├── ingest_master.py     # Upsert de los CSV al master (deriva id para CSV viejos)
 │   ├── build_app_dataset.py # Dataset curado del dashboard desde el master
 │   ├── preprocessing.py     # Lógica de limpieza (precio, área, ciudad, barrio…)

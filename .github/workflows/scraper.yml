@@ -129,7 +129,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/master/listings.parquet data/app/housing_clean.parquet
+          git add -f data/master/listings.parquet data/master/events.parquet data/app/housing_clean.parquet
           if git diff --cached --quiet; then
             echo "Sin cambios en el master."
           else

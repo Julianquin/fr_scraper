@@ -12,6 +12,7 @@ from typing import Dict, List
 
 import pandas as pd
 from src.config import BASE_DIR
+from src import eventos
 
 MASTER_PATH = BASE_DIR / "data" / "master" / "listings.parquet"
 
@@ -57,6 +58,8 @@ def upsert(rows: List[Dict] | pd.DataFrame, run_date: str) -> Dict[str, int]:
     nuevos["last_seen"] = run_date
 
     master = cargar()
+    # Antes de sobrescribir: altas y cambios de precio a la bitácora (src/eventos.py)
+    eventos.registrar(eventos.detectar(master, nuevos, run_date, run_date))
     if master.empty:
         nuevos["first_seen"] = run_date
         combinado, n_new, n_upd = nuevos, len(nuevos), 0
