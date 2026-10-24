@@ -11,7 +11,8 @@ El master (data/master/listings.parquet) es una FOTO: una fila por inmueble con 
 
   - `detectar()` + `registrar()` los usa `master.upsert` en cada corrida.
   - `reconstruir()` rehace la bitácora completa comparando las fotos diarias del
-    master guardadas en git (hay una por commit del CI desde agosto de 2026).
+    master: las de git (commits del CI de ago a oct de 2026) y, desde la migración,
+    las de R2 (respaldos/ en src/almacen.py).
     Las bajas no se pueden reconstruir: hacen falta barridos completos.
 
 Uso:
@@ -107,16 +108,42 @@ def _git(*args: str) -> bytes:
                           check=True, capture_output=True).stdout
 
 
-def reconstruir() -> pd.DataFrame:
-    """Rehace la bitácora comparando cada foto del master en git con la anterior."""
-    commits = [linea.split() for linea in
-               _git("log", "--reverse", "--format=%H %cs", "--", MASTER_REL).decode().splitlines()]
-    partes, previo = [], pd.DataFrame()
-    for sha, fecha_commit in commits:
+def fotos_master(nombre: str = "listings.parquet"):
+    """(fecha, etiqueta, contenido en bytes) de cada foto del master, en orden.
+
+    Hasta oct-2026 el CI commiteaba el master a diario, así que las fotos viven en git.
+    Desde la migración a R2 (src/almacen.py) están en respaldos/fecha=AAAA-MM-DD/.
+    Se usa git hasta su último día y R2 para los días posteriores.
+    """
+    ruta = f"data/master/{nombre}"
+    ultimo_git = ""
+    for linea in _git("log", "--reverse", "--format=%H %cs", "--", ruta).decode().splitlines():
+        sha, dia = linea.split()
         try:
-            foto = pd.read_parquet(io.BytesIO(_git("show", f"{sha}:{MASTER_REL}")))
+            contenido = _git("show", f"{sha}:{ruta}")
         except subprocess.CalledProcessError:
             continue                                   # commit que borró el archivo
+        ultimo_git = dia
+        yield dia, sha[:7], contenido
+
+    from src import almacen
+    if not almacen.configurado():
+        return
+    s3, bucket = almacen._cliente()
+    claves = sorted(o["Key"] for pag in s3.get_paginator("list_objects_v2")
+                    .paginate(Bucket=bucket, Prefix="respaldos/")
+                    for o in pag.get("Contents", []) if o["Key"].endswith(f"/{nombre}"))
+    for clave in claves:
+        dia = clave.split("fecha=")[1][:10]
+        if dia > ultimo_git:
+            yield dia, "R2", s3.get_object(Bucket=bucket, Key=clave)["Body"].read()
+
+
+def reconstruir() -> pd.DataFrame:
+    """Rehace la bitácora comparando cada foto del master con la anterior (git + R2)."""
+    partes, previo = [], pd.DataFrame()
+    for fecha_commit, etiqueta, contenido in fotos_master():
+        foto = pd.read_parquet(io.BytesIO(contenido))
         if "id_inmueble" not in foto or "Precio listado" not in foto:
             continue
         foto["id_inmueble"] = foto["id_inmueble"].astype(str)
@@ -140,7 +167,7 @@ def reconstruir() -> pd.DataFrame:
         partes.append(detectar(previo, foto, pd.Series(fs.values, index=ids.values),
                                pd.Series(foto["_f"].values, index=ids.values)))
         previo = foto[["id_inmueble", "Precio listado", "_f"]]
-        print(f"  {fecha_commit} {sha[:7]}: {len(partes[-1]):>7,} eventos")
+        print(f"  {fecha_commit} {etiqueta}: {len(partes[-1]):>7,} eventos")
 
     ev = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=COLUMNAS)
     if EVENTOS_PATH.exists():

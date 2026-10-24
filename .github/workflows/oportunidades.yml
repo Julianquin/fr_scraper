@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.dia.outputs.seguir == 'true'
         with:
-          ref: ${{ github.event.repository.default_branch }}   # incluye el commit fresco del scraper
+          ref: ${{ github.event.repository.default_branch }}   # el código; los datos vienen de R2
       - uses: actions/setup-python@v5
         if: steps.dia.outputs.seguir == 'true'
         with:
@@ -54,6 +54,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Bajar datos actuales desde R2
+        if: steps.dia.outputs.seguir == 'true'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m src.almacen bajar
       - name: Generar alerta
         if: steps.dia.outputs.seguir == 'true'
         run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}"
