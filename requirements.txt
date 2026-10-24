@@ -14,9 +14,7 @@ boto3>=1.34            # datos en Cloudflare R2 (src/almacen.py)
 scikit-learn>=1.4
 joblib>=1.3
 
-# --- Dashboard y mapas ---
-streamlit>=1.50
-plotly>=6.0
+# --- Mapas ---
 folium>=0.16          # mapas interactivos (src/viz_map.py)
 shapely>=2.0          # barrios/comunas oficiales de Cali (src/zonas.py)
 

@@ -24,6 +24,7 @@ Uso:
     python -m src.almacen bajar
     python -m src.almacen subir
     python -m src.almacen raw --fecha 2026-10-24
+    python -m src.almacen raw --fecha 2025-07-07 --carpeta data/raw   # CSV sueltos de jul-2025
     python -m src.almacen historial
     python -m src.almacen listar
 """
@@ -123,11 +124,18 @@ def subir(fecha: str, claves: list[str] | None = None, respaldo: bool = True) ->
             print(f"   ↳ respaldo {copia}")
 
 
-def subir_raw(fecha: str) -> None:
-    """Junta los CSV scrapeados en data/raw/<fecha>/ en un parquet y lo sube."""
-    archivos = sorted((Path(DATA_RAW) / fecha).rglob("*.csv"))
+def subir_raw(fecha: str, carpeta: Path | None = None) -> None:
+    """Junta los CSV scrapeados en data/raw/<fecha>/ en un parquet y lo sube.
+
+    Con `carpeta`, toma solo los CSV sueltos de esa carpeta (sin subcarpetas): así se
+    suben los scrapeos viejos que no están en una carpeta con fecha (los de julio de 2025).
+    """
+    if carpeta:
+        archivos = sorted(Path(carpeta).glob("*.csv"))
+    else:
+        archivos = sorted((Path(DATA_RAW) / fecha).rglob("*.csv"))
     if not archivos:
-        print(f"⚠️  No hay CSV en data/raw/{fecha}; nada que subir")
+        print(f"⚠️  No hay CSV en {carpeta or f'data/raw/{fecha}'}; nada que subir")
         return
     df = pd.concat([pd.read_csv(f, dtype=str).assign(archivo_origen=f.name) for f in archivos],
                    ignore_index=True)
@@ -193,6 +201,7 @@ if __name__ == "__main__":
     s.add_argument("--sin-respaldo", action="store_true")
     r = sub.add_parser("raw", help="sube lo scrapeado en data/raw/<fecha>/")
     r.add_argument("--fecha", default=hoy)
+    r.add_argument("--carpeta", type=Path, help="CSV sueltos de esta carpeta (p. ej. data/raw para julio de 2025)")
     sub.add_parser("historial", help="sube las fotos del master guardadas en git (migración)")
     sub.add_parser("listar", help="qué hay en el bucket y cuánto pesa")
     a = p.parse_args()
@@ -202,7 +211,7 @@ if __name__ == "__main__":
     elif a.accion == "subir":
         subir(a.fecha, a.solo, respaldo=not a.sin_respaldo)
     elif a.accion == "raw":
-        subir_raw(a.fecha)
+        subir_raw(a.fecha, a.carpeta)
     elif a.accion == "historial":
         subir_historial()
     else:
