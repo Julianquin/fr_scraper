@@ -158,6 +158,13 @@ def subir_raw(fecha: str, carpeta: Path | None = None) -> None:
     print(f"⬆️  {len(archivos)} CSV ({len(df):,} filas) → {clave} ({buf.tell() / 1e6:.1f} MB)")
 
 
+def subir_archivo(origen: Path, clave: str) -> None:
+    """Sube un archivo local a `clave` (la usa src/scraper_http.py para su crudo)."""
+    s3, bucket = _cliente()
+    s3.upload_file(str(origen), bucket, clave)
+    print(f"⬆️  {Path(origen).name} → {clave} ({Path(origen).stat().st_size / 1e6:.1f} MB)")
+
+
 def _git(*args: str) -> bytes:
     return subprocess.run(["git", "-C", str(BASE_DIR), *args], check=True, capture_output=True).stdout
 

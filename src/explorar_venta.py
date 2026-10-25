@@ -15,99 +15,15 @@ Acciones (resultados en data/analisis/e1/, que no se versiona):
 """
 from __future__ import annotations
 import argparse
-import json
-import re
 import time
-from pathlib import Path
 
 import pandas as pd
 import requests
 
 from src.config import BASE_DIR
+from src.fincaraiz_http import MAX_RESULTADOS, POR_PAGINA, aplanar, pedir
 
-BASE = "https://www.fincaraiz.com.co"
-ORDEN_RECIENTE = "ordenListado=3"
-POR_PAGINA = 21
-MAX_RESULTADOS = 10_000          # tope del buscador por consulta
 OUT_DIR = BASE_DIR / "data" / "analisis" / "e1"
-UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
-_NEXT = re.compile(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
-
-
-def url_pagina(ruta: str, n: int) -> str:
-    """ruta = 'venta' o 'venta/cali/valle-del-cauca'."""
-    return f"{BASE}/{ruta.strip('/')}" + (f"/pagina{n}" if n > 1 else "") + f"?&{ORDEN_RECIENTE}"
-
-
-def pedir(sesion: requests.Session, ruta: str, n: int) -> tuple[list[dict], dict, float]:
-    """(avisos crudos del JSON, paginatorInfo, segundos) de la página n de `ruta`."""
-    t = time.time()
-    r = sesion.get(url_pagina(ruta, n), headers=UA, timeout=30)
-    r.raise_for_status()
-    m = _NEXT.search(r.text)
-    if not m:
-        raise ValueError(f"Sin __NEXT_DATA__ en {r.url}")
-    sf = json.loads(m.group(1))["props"]["pageProps"]["fetchResult"]["searchFast"]
-    return sf.get("data") or [], sf.get("paginatorInfo") or {}, time.time() - t
-
-
-def _nombres(loc: dict, nivel: str) -> str | None:
-    vals = loc.get(nivel) or []
-    return ", ".join(v.get("name", "") for v in vals) or None
-
-
-def aplanar(a: dict) -> dict:
-    """Un aviso del JSON → una fila plana con los campos útiles."""
-    loc = a.get("locations") or {}
-    precio = a.get("price") or {}
-    admin = a.get("commonExpenses") or {}
-    ficha = {f.get("field"): f.get("value") for f in (a.get("technicalSheet") or [])}
-    return {
-        "id_inmueble": str(a.get("id")),
-        "titulo": a.get("title"),
-        "url": BASE + (a.get("link") or ""),
-        "tipo": (a.get("property_type") or {}).get("name"),
-        "operacion": (a.get("operation_type") or {}).get("name"),
-        "precio": precio.get("amount"),
-        "precio_oculto": precio.get("hidePrice"),
-        "moneda": (precio.get("currency") or {}).get("name"),
-        "administracion": admin.get("amount"),
-        "variacion_precio": json.dumps(a.get("price_variation"), ensure_ascii=False) if a.get("price_variation") else None,
-        "descuento": a.get("discount"),
-        "fecha_publicacion": a.get("created_at"),
-        "fecha_actualizacion": a.get("updated_at"),
-        "habitaciones": a.get("bedrooms") if a.get("bedrooms") is not None else a.get("rooms"),
-        "banos": a.get("bathrooms"),
-        "parqueaderos": a.get("garage"),
-        "m2": a.get("m2"),
-        "m2_construido": a.get("m2Built"),
-        "m2_terreno": a.get("m2Terrain"),
-        "estrato": a.get("stratum"),
-        "piso": a.get("floor"),
-        "antiguedad": a.get("antiquity"),
-        "estado": ficha.get("construction_state_name"),
-        "latitud": a.get("latitude"),
-        "longitud": a.get("longitude"),
-        "departamento": _nombres(loc, "state"),
-        "ciudad": _nombres(loc, "city"),
-        "localidad": _nombres(loc, "locality"),
-        "comuna": _nombres(loc, "commune"),
-        "zona": _nombres(loc, "zone"),
-        "barrio": _nombres(loc, "neighbourhood"),
-        "direccion": a.get("address") if a.get("showAddress") else None,
-        "anunciante": (a.get("owner") or {}).get("name"),
-        "anunciante_id": (a.get("owner") or {}).get("id"),
-        "es_proyecto": a.get("isProject"),
-        "es_unidad_proyecto": a.get("isProjectUnit"),
-        "activo": a.get("active"),
-        "vendido": a.get("sold"),
-        "amenidades": "|".join(f.get("name", "") for f in (a.get("facilities") or [])) or None,
-        "n_imagenes": a.get("image_count"),
-        "duplicados": len(a.get("duplicated") or []),
-        "codigo_anunciante": a.get("code2"),
-        "descripcion": a.get("description"),
-    }
 
 
 def ventana(sesion: requests.Session) -> None:
