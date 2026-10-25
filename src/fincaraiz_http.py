@@ -50,6 +50,22 @@ def pedir(sesion: requests.Session, ruta: str, n: int, orden: int = ORDEN_RECIEN
     raise RuntimeError("inalcanzable")
 
 
+def _num(v) -> float | None:
+    """Número o None. El portal manda a veces números como texto ('4.688113') y otras como número."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Campos que deben ser numéricos en el parquet (un tipo mezclado rompe el guardado)
+NUMERICOS = ["precio", "administracion", "habitaciones", "banos", "parqueaderos", "m2", "m2_construido",
+             "m2_terreno", "estrato", "piso", "antiguedad", "latitud", "longitud", "destacado",
+             "n_imagenes", "anunciante_id"]
+
+
 def _nombres(loc: dict, nivel: str) -> str | None:
     vals = loc.get(nivel) or []
     return ", ".join(v.get("name", "") for v in vals) or None
@@ -66,7 +82,7 @@ def aplanar(a: dict) -> dict:
     # Etiquetas compatibles con las del scraper actual (las usa la alerta)
     etiquetas = [e for e in (estado, "Proyecto" if a.get("isProject") else None,
                              tag.get("tag_label")) if e]
-    return {
+    fila = {
         "id_inmueble": str(a.get("id")),
         "titulo": a.get("title"),
         "url": BASE + (a.get("link") or ""),
@@ -115,3 +131,20 @@ def aplanar(a: dict) -> dict:
         "descripcion": a.get("description"),
         "json_crudo": json.dumps(a, ensure_ascii=False),     # el aviso tal cual, por si mañana hace falta otro campo
     }
+    for c in NUMERICOS:
+        fila[c] = _num(fila[c])
+    return fila
+
+
+def guardar_parquet(df, destino, **kwargs) -> None:
+    """to_parquet que no falla por columnas de tipo mezclado: si pyarrow se queja, convierte a
+    texto los valores no nulos de las columnas 'object' y reintenta (no se pierde información)."""
+    import pyarrow as pa
+    try:
+        df.to_parquet(destino, index=False, **kwargs)
+    except (pa.ArrowInvalid, pa.ArrowTypeError):
+        df = df.copy()
+        for c in df.select_dtypes(include=["object"]).columns:
+            notna = df[c].notna()
+            df.loc[notna, c] = df.loc[notna, c].astype(str)
+        df.to_parquet(destino, index=False, **kwargs)

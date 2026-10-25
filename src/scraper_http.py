@@ -25,7 +25,7 @@ import pandas as pd
 import requests
 
 from src.config import BASE_DIR
-from src.fincaraiz_http import POR_PAGINA, ULTIMA_PAGINA, aplanar, pedir
+from src.fincaraiz_http import POR_PAGINA, ULTIMA_PAGINA, aplanar, guardar_parquet, pedir
 
 TRABAJO = BASE_DIR / "data" / "http"
 PLAN = TRABAJO / "plan.csv"
@@ -102,7 +102,7 @@ def barrer(grupo: int, pausa: float, solo: int | None = None) -> pd.DataFrame:
               f"{inf['errores']} errores · {(time.time() - t0) / 60:.0f} min", flush=True)
     df = pd.DataFrame(filas)
     TRABAJO.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(TRABAJO / f"barrido_{grupo}.parquet", index=False)
+    guardar_parquet(df, TRABAJO / f"barrido_{grupo}.parquet")
     pd.DataFrame(informe).to_csv(TRABAJO / f"informe_{grupo}.csv", index=False)
     print(f"Grupo {grupo}: {len(df):,} filas · {df['id_inmueble'].nunique() if len(df) else 0:,} avisos únicos · "
           f"{(time.time() - t0) / 60:.1f} min")
@@ -134,7 +134,7 @@ def juntar(subir: bool) -> dict:
     destino = SALIDA / fecha / "venta.parquet"
     destino.parent.mkdir(parents=True, exist_ok=True)
     from src.almacen import COMPRESION
-    df.to_parquet(destino, index=False, compression=COMPRESION)
+    guardar_parquet(df, destino, compression=COMPRESION)
     (destino.parent / "reporte.json").write_text(json.dumps(reporte, ensure_ascii=False, indent=2))
     print(json.dumps(reporte, ensure_ascii=False, indent=2))
     print(f"💾 {destino.relative_to(BASE_DIR)} ({destino.stat().st_size / 1e6:.1f} MB)")
