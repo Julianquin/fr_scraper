@@ -8,13 +8,16 @@
 #   Job 2 (barrer): 4 jobs en paralelo, cada uno recorre entero su grupo de segmentos
 #   Job 3 (juntar): une, deduplica, mide la cobertura real y sube el crudo + reporte a R2
 #
-# Horario: 03:00 UTC (22:00 Colombia), lejos del scraper actual, que corre de día.
+# Arranca cuando termina el scraper diario (como la alerta), así nunca leen el portal a la vez
+# aunque GitHub atrase las tareas programadas. Corre aunque el scraper diario falle: son
+# independientes. También se puede lanzar a mano.
 # ─────────────────────────────────────────────────────────────────────────────
 name: Barrido HTTP por segmentos (prueba E1)
 
 on:
-  schedule:
-    - cron: "0 3 * * *"
+  workflow_run:
+    workflows: ["Scraper diario FincaRaíz (matriz por departamento)"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
