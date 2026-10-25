@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Barrido diario de FincaRaíz por HTTP y por segmentos (bloque E1, EN PRUEBA).
+#
+# Corre en paralelo al scraper actual (scraper.yml) y NO lo toca: no escribe en
+# master/, events ni app/. Solo deja su crudo en R2: raw/venta_http/fecha=…/
+#
+#   Job 1 (plan):   arma el árbol de segmentos (src/segmentos.py) y lo reparte en 4 grupos
+#   Job 2 (barrer): 4 jobs en paralelo, cada uno recorre entero su grupo de segmentos
+#   Job 3 (juntar): une, deduplica, mide la cobertura real y sube el crudo + reporte a R2
+#
+# Horario: 03:00 UTC (22:00 Colombia), lejos del scraper actual, que corre de día.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Barrido HTTP por segmentos (prueba E1)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: barrido-http
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Árbol de segmentos repartido en 4 grupos
+        run: python -m src.scraper_http plan --grupos 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: http-plan
+          path: |
+            data/http/plan.csv
+            data/http/nacional.json
+          retention-days: 3
+
+  barrer:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false            # si un grupo falla, los demás siguen
+      max-parallel: 4
+      matrix:
+        grupo: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: http-plan
+          path: data/http
+      - name: Barrer el grupo ${{ matrix.grupo }}
+        run: python -m src.scraper_http barrer --grupo ${{ matrix.grupo }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: http-barrido-${{ matrix.grupo }}
+          path: |
+            data/http/barrido_${{ matrix.grupo }}.parquet
+            data/http/informe_${{ matrix.grupo }}.csv
+          retention-days: 3
+
+  juntar:
+    needs: barrer
+    if: always()                  # junta lo que haya, aunque algún grupo falle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: http-*
+          path: data/http
+          merge-multiple: true
+      - name: Juntar, medir cobertura y subir a R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m src.scraper_http juntar --subir
