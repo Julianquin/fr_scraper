@@ -80,7 +80,7 @@ def barrer_segmento(sesion: requests.Session, ruta: str, accion: str, pausa: flo
                     continue
                 time.sleep(pausa)
             paginas += 1
-            filas += [aplanar(a) | {"segmento": ruta, "pagina": n} for a in data]
+            filas += [aplanar(a) | {"segmento": ruta} for a in data]
     unicos = len({f["id_inmueble"] for f in filas})
     return filas, {"segmento": ruta, "declarado": declarado,
                    "paginas": paginas, "avisos": len(filas), "unicos": unicos, "errores": errores}
@@ -117,7 +117,6 @@ def juntar(subir: bool) -> dict:
     filas = len(df)
     df = df.drop_duplicates("id_inmueble", keep="first").reset_index(drop=True)
     fecha = hoy()
-    df["fecha_recoleccion"] = fecha
 
     nacional = json.loads((TRABAJO / "nacional.json").read_text())["total_nacional"]
     reporte = {

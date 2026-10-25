@@ -33,6 +33,7 @@ Uso:
     python -m src.almacen raw --fecha 2025-07-07 --carpeta data/raw   # CSV sueltos de jul-2025
     python -m src.almacen historial
     python -m src.almacen retencion
+    python -m src.almacen traer raw/venta_http/       # baja esa carpeta a data/r2/
     python -m src.almacen listar
 """
 from __future__ import annotations
@@ -158,6 +159,24 @@ def subir_raw(fecha: str, carpeta: Path | None = None) -> None:
     print(f"⬆️  {len(archivos)} CSV ({len(df):,} filas) → {clave} ({buf.tell() / 1e6:.1f} MB)")
 
 
+def traer(prefijo: str, destino: Path) -> None:
+    """Descarga todo lo que esté bajo `prefijo` en el bucket a `destino`, con la misma estructura
+    de carpetas (p. ej. raw/venta_http/ → data/r2/raw/venta_http/). Lo que ya existe con el mismo
+    tamaño no se vuelve a bajar."""
+    s3, bucket = _cliente()
+    n = 0
+    for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefijo):
+        for o in pagina.get("Contents", []):
+            local = Path(destino) / o["Key"]
+            if local.exists() and local.stat().st_size == o["Size"]:
+                continue
+            local.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, o["Key"], str(local))
+            n += 1
+            print(f"⬇️  {o['Key']} ({o['Size'] / 1e6:.1f} MB)")
+    print(f"✅ {n} archivos nuevos en {destino}")
+
+
 def subir_archivo(origen: Path, clave: str) -> None:
     """Sube un archivo local a `clave` (la usa src/scraper_http.py para su crudo)."""
     s3, bucket = _cliente()
@@ -252,6 +271,9 @@ if __name__ == "__main__":
     r.add_argument("--fecha", default=hoy)
     r.add_argument("--carpeta", type=Path, help="CSV sueltos de esta carpeta (p. ej. data/raw para julio de 2025)")
     sub.add_parser("historial", help="sube las fotos del master guardadas en git (migración)")
+    tr = sub.add_parser("traer", help="descarga una carpeta del bucket a data/r2/ (p. ej. raw/venta_http/)")
+    tr.add_argument("prefijo")
+    tr.add_argument("--destino", type=Path, default=BASE_DIR / "data" / "r2")
     t = sub.add_parser("retencion", help="pasa los respaldos viejos a respaldos/historico/ (una vez)")
     t.add_argument("--aplicar", action="store_true", help="sin esto solo simula")
     sub.add_parser("listar", help="qué hay en el bucket y cuánto pesa")
@@ -265,6 +287,8 @@ if __name__ == "__main__":
         subir_raw(a.fecha, a.carpeta)
     elif a.accion == "historial":
         subir_historial()
+    elif a.accion == "traer":
+        traer(a.prefijo, a.destino)
     elif a.accion == "retencion":
         migrar_retencion(a.aplicar)
     else:

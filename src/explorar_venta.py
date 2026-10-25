@@ -90,8 +90,8 @@ def muestra(sesion: requests.Session, paginas: int, pausa: float) -> pd.DataFram
               "estrato", "piso", "antiguedad", "latitud", "barrio", "comuna", "amenidades", "descripcion"]
     llenos = {c: df[c].notna() & (df[c].astype(str).str.strip() != "") & (df[c].astype(str) != "0") for c in campos}
     print(pd.Series({c: f"{v.mean():.0%}" for c, v in llenos.items()}).to_string())
-    print(f"\nProyectos: {df['es_proyecto'].mean():.0%} · unidades de proyecto: {df['es_unidad_proyecto'].mean():.0%} · "
-          f"con duplicados declarados: {(df['duplicados'] > 0).mean():.0%}")
+    proyectos = df["etiquetas"].str.contains('"Proyecto"|"Unidad de proyecto"', regex=True)
+    print(f"\nProyectos o unidades de proyecto: {proyectos.mean():.0%}")
     print("Tipos:", df["tipo"].value_counts().head(6).to_dict())
 
     master = BASE_DIR / "data" / "master" / "listings.parquet"

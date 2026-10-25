@@ -72,29 +72,33 @@ def _nombres(loc: dict, nivel: str) -> str | None:
 
 
 def aplanar(a: dict) -> dict:
-    """Un aviso del JSON → una fila plana con los campos útiles + el JSON original completo."""
+    """Un aviso del JSON → una fila plana con los campos que se conservan.
+
+    Esquema acordado el 26-oct-2026 tras analizar el primer barrido
+    (notebooks/analisis_barrido_http.ipynb): fuera el JSON original (79% del peso, casi todo ya
+    aplanado o sin valor) y los campos constantes, vacíos o redundantes. Lo que se pierde de
+    moneda y proyecto queda en `etiquetas`.
+    """
     loc = a.get("locations") or {}
     precio = a.get("price") or {}
     admin = a.get("commonExpenses") or {}
     ficha = {f.get("field"): f.get("value") for f in (a.get("technicalSheet") or [])}
     tag = a.get("tag") or {}
     estado = ficha.get("construction_state_name")
-    # Etiquetas compatibles con las del scraper actual (las usa la alerta)
-    etiquetas = [e for e in (estado, "Proyecto" if a.get("isProject") else None,
+    # Sin columna de moneda: un precio en dólares se leería como pesos (falsa "ganga")
+    en_dolares = (precio.get("currency") or {}).get("name") not in (None, "$")
+    # Etiquetas compatibles con las del scraper actual (las usa la alerta) + las que reemplazan columnas
+    etiquetas = [e for e in (estado,
+                             "Proyecto" if a.get("isProject") else None,
+                             "Unidad de proyecto" if a.get("isProjectUnit") else None,
+                             "Precio en dólares" if en_dolares else None,
                              tag.get("tag_label")) if e]
     fila = {
         "id_inmueble": str(a.get("id")),
-        "titulo": a.get("title"),
         "url": BASE + (a.get("link") or ""),
-        "imagen": a.get("img"),
         "tipo": (a.get("property_type") or {}).get("name"),
-        "operacion": (a.get("operation_type") or {}).get("name"),
-        "precio": precio.get("amount"),
-        "precio_oculto": precio.get("hidePrice"),
-        "moneda": (precio.get("currency") or {}).get("name"),
+        "precio": None if en_dolares else precio.get("amount"),
         "administracion": admin.get("amount"),
-        "variacion_precio": json.dumps(a.get("price_variation"), ensure_ascii=False) if a.get("price_variation") else None,
-        "descuento": a.get("discount"),
         "fecha_publicacion": a.get("created_at"),
         "fecha_actualizacion": a.get("updated_at"),
         "habitaciones": a.get("bedrooms") if a.get("bedrooms") is not None else a.get("rooms"),
@@ -118,18 +122,12 @@ def aplanar(a: dict) -> dict:
         "direccion": a.get("address") if a.get("showAddress") else None,
         "anunciante": (a.get("owner") or {}).get("name"),
         "anunciante_id": (a.get("owner") or {}).get("id"),
-        "es_proyecto": a.get("isProject"),
-        "es_unidad_proyecto": a.get("isProjectUnit"),
-        "activo": a.get("active"),
-        "vendido": a.get("sold"),
+        "codigo_anunciante": a.get("code2"),
         "destacado": a.get("highlight"),
         "etiquetas": json.dumps(etiquetas, ensure_ascii=False),
         "amenidades": "|".join(f.get("name", "") for f in (a.get("facilities") or [])) or None,
         "n_imagenes": a.get("image_count"),
-        "duplicados": len(a.get("duplicated") or []),
-        "codigo_anunciante": a.get("code2"),
         "descripcion": a.get("description"),
-        "json_crudo": json.dumps(a, ensure_ascii=False),     # el aviso tal cual, por si mañana hace falta otro campo
     }
     for c in NUMERICOS:
         fila[c] = _num(fila[c])
