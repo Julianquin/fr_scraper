@@ -6,7 +6,7 @@ copia diaria, se mantiene:
 
   avisos     estado/avisos.parquet                 1 fila por aviso que haya existido alguna vez:
                                                    datos más recientes + primera_vez, ultima_vez,
-                                                   estado (activo | retirado), fecha_baja
+                                                   estado_aviso (activo | retirado), fecha_baja
   historial  estado/historial/fecha=AAAA-MM-DD.parquet   solo lo que cambió ese día (nunca se reescribe):
                                                    alta · descubierto · cambio_precio ·
                                                    cambio_administracion · cambio_descripcion ·
@@ -45,7 +45,8 @@ META = ESTADO / "meta.json"
 VIGILADOS = {"precio": "cambio_precio", "administracion": "cambio_administracion"}
 AUSENCIAS_PARA_BAJA = 3
 MIN_COBERTURA_RELATIVA = 0.90
-CONTROL = ["primera_vez", "ultima_vez", "estado", "fecha_baja", "ausencias", "primera_ausencia"]
+# `estado` (sin sufijo) es el estado físico del inmueble ("Usado"…); el de control es `estado_aviso`
+CONTROL = ["primera_vez", "ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia"]
 
 
 def ruta_barrido(fecha: str) -> Path:
@@ -114,7 +115,7 @@ def consolidar(fecha: str) -> dict:
         es_alta = (publicado >= meta["ultimo_barrido"]).to_numpy()
         for ids, nombre in ((nuevos[es_alta], "alta"), (nuevos[~es_alta], "descubierto")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
-        volvieron = comunes[previo.loc[comunes, "estado"].eq("retirado").to_numpy()]
+        volvieron = comunes[previo.loc[comunes, "estado_aviso"].eq("retirado").to_numpy()]
         eventos.append(_evento(fecha, volvieron, "reaparece", despues=hoy.loc[volvieron, "precio"].to_numpy()))
 
         # Cambios en los campos vigilados (subidas y bajadas)
@@ -131,28 +132,28 @@ def consolidar(fecha: str) -> dict:
                                texto_antes=previo.loc[ids, "descripcion"].tolist()))
 
         # Estado nuevo: lo de hoy pisa los datos; los que faltan conservan su última versión
-        activos_previos = previo["estado"].eq("activo").sum()
+        activos_previos = previo["estado_aviso"].eq("activo").sum()
         ausencias_contadas = len(vistos) >= MIN_COBERTURA_RELATIVA * activos_previos
         faltan = previo.index.difference(vistos)
         estado = pd.concat([hoy, previo.loc[faltan, hoy.columns.intersection(previo.columns)]])
         estado["primera_vez"] = previo["primera_vez"].reindex(estado.index).fillna(fecha)
-        for c in ("ultima_vez", "estado", "fecha_baja", "ausencias", "primera_ausencia"):
+        for c in ("ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia"):
             estado.loc[faltan, c] = previo.loc[faltan, c]
 
-        f = faltan[previo.loc[faltan, "estado"].eq("activo").to_numpy()]      # activos que faltaron hoy
+        f = faltan[previo.loc[faltan, "estado_aviso"].eq("activo").to_numpy()]      # activos que faltaron hoy
         if ausencias_contadas and len(f):
             estado.loc[f, "ausencias"] = previo.loc[f, "ausencias"].fillna(0) + 1
             primera = estado.loc[f, "ausencias"].eq(1)
             estado.loc[f[primera.to_numpy()], "primera_ausencia"] = fecha
             baja = f[estado.loc[f, "ausencias"].ge(AUSENCIAS_PARA_BAJA).to_numpy()]
-            estado.loc[baja, "estado"] = "retirado"
+            estado.loc[baja, "estado_aviso"] = "retirado"
             estado.loc[baja, "fecha_baja"] = estado.loc[baja, "primera_ausencia"]
             eventos.append(_evento(fecha, baja, "baja", antes=pd.to_numeric(estado.loc[baja, "precio"]).to_numpy()))
 
     # Los vistos hoy quedan activos y con el contador en cero
     vistos = hoy.index
     estado.loc[vistos, "ultima_vez"] = fecha
-    estado.loc[vistos, "estado"] = "activo"
+    estado.loc[vistos, "estado_aviso"] = "activo"
     estado.loc[vistos, "fecha_baja"] = None
     estado.loc[vistos, "ausencias"] = 0
     estado.loc[vistos, "primera_ausencia"] = None
@@ -168,8 +169,8 @@ def consolidar(fecha: str) -> dict:
     META.write_text(json.dumps(meta, indent=2))
 
     resumen = {"fecha": fecha, "vistos": len(vistos), "avisos_total": len(estado),
-               "activos": int(estado["estado"].eq("activo").sum()),
-               "retirados": int(estado["estado"].eq("retirado").sum()),
+               "activos": int(estado["estado_aviso"].eq("activo").sum()),
+               "retirados": int(estado["estado_aviso"].eq("retirado").sum()),
                "ausencias_contadas": bool(ausencias_contadas),
                **hist["evento"].value_counts().to_dict()}
     print(json.dumps(resumen, ensure_ascii=False))

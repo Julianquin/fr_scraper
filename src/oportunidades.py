@@ -52,12 +52,24 @@ def _etiquetas(s) -> list[str]:
         return []
 
 
+FUENTE = "master"     # "master": scraper actual · "http": barrido por segmentos (src/fuente_http.py)
+
+
+def _eventos() -> pd.DataFrame:
+    if FUENTE == "http":
+        from src import fuente_http
+        return fuente_http.eventos()
+    return eventos.cargar()
+
+
 def cargar(ciudad: str) -> pd.DataFrame:
-    """Avisos de vivienda de la ciudad, con zona oficial y first_seen/etiquetas del master."""
+    """Avisos de vivienda de la ciudad, con zona oficial y first_seen/etiquetas.
+    Con la fuente http, first_seen es la fecha real de publicación y ya viene en el dataset."""
     df = cargar_ciudad(ciudad)
     df = df[df["Tipo_propiedad"].isin(TIPOS)].copy()
-    m = master.cargar()[["id_inmueble", "first_seen", "Etiquetas"]]
-    df = df.merge(m.astype({"id_inmueble": str}), on="id_inmueble", how="left")
+    if FUENTE != "http":
+        m = master.cargar()[["id_inmueble", "first_seen", "Etiquetas"]]
+        df = df.merge(m.astype({"id_inmueble": str}), on="id_inmueble", how="left")
     df["first_seen"] = pd.to_datetime(df["first_seen"])
     df["etiquetas"] = df["Etiquetas"].map(_etiquetas)
     for c in ["Estrato", "Habitaciones", "Baños"]:
@@ -68,7 +80,7 @@ def cargar(ciudad: str) -> pd.DataFrame:
 def historial(hasta: pd.Timestamp) -> pd.DataFrame:
     """Por inmueble, cambios de precio reales hasta `hasta`: bajadas y variación acumulada.
     Las correcciones de digitación (src/eventos.py) no cuentan."""
-    ev = eventos.cargar()
+    ev = _eventos()
     c = ev[(ev["evento"] == "cambio_precio") & (ev["fecha"] <= f"{hasta:%Y-%m-%d}")].copy()
     c["factor"] = c["precio_despues"] / c["precio_antes"]
     g = c.sort_values("fecha").groupby("id_inmueble")
@@ -158,7 +170,7 @@ def seleccionar(ev: pd.DataFrame, umbral: float, top: int) -> pd.DataFrame:
 def bajadas(df: pd.DataFrame, hist: pd.DataFrame, desde: pd.Timestamp,
             hasta: pd.Timestamp) -> pd.DataFrame:
     """Avisos de la ciudad que bajaron de precio en la semana (última bajada de cada uno)."""
-    ev = eventos.cargar()
+    ev = _eventos()
     b = ev[(ev["evento"] == "cambio_precio") & (ev["precio_despues"] < ev["precio_antes"])
            & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
     b = b.sort_values("fecha").drop_duplicates("id_inmueble", keep="last")
@@ -328,13 +340,21 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
 
 
 def main() -> None:
+    global FUENTE, INICIO_DATOS
     p = argparse.ArgumentParser()
     p.add_argument("--ciudad", default="Cali")
     p.add_argument("--fecha", default=None, help="Último día de la semana (YYYY-MM-DD); por defecto, el último dato")
     p.add_argument("--dias", type=int, default=7)
     p.add_argument("--umbral", type=float, default=0.20)
     p.add_argument("--top", type=int, default=10)
+    p.add_argument("--fuente", choices=["master", "http"], default="master",
+                   help="datos del scraper actual (master) o del barrido por segmentos (http)")
     args = p.parse_args()
+    FUENTE = args.fuente
+    import src.viz_map as viz_map
+    viz_map.FUENTE = args.fuente
+    if FUENTE == "http":       # first_seen es la fecha real de publicación: no hay "siembra" que ocultar
+        INICIO_DATOS = pd.Timestamp("1900-01-01")
 
     df = cargar(args.ciudad)
     hasta = pd.Timestamp(args.fecha) if args.fecha else df["first_seen"].max()
@@ -363,7 +383,7 @@ def main() -> None:
     }
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    base = OUT_DIR / f"{args.ciudad.lower()}_{hasta:%Y-%m-%d}"
+    base = OUT_DIR / (f"{args.ciudad.lower()}_{hasta:%Y-%m-%d}" + ("_http" if FUENTE == "http" else ""))
     cols = ["id_inmueble", "first_seen", "Tipo_propiedad", "barrio_oficial", "Barrio", "Estrato",
             "Area_m2", "Habitaciones", "Precio", "precio_m2", "nivel_comps", "n_comps", "med_comps",
             "descuento", "confianza", "verificar", "motivo_descarte", "n_bajadas", "var_total",
