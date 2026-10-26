@@ -1,21 +1,22 @@
 """
-Árbol de segmentos para barrer FincaRaíz completo (bloque E1). SOLO LECTURA: pide la página 1
-de cada segmento para leer su total; no barre nada.
+Árbol de segmentos para barrer FincaRaíz completo (bloques E1 y E3). SOLO LECTURA: pide la
+página 1 de cada segmento para leer su total; no barre nada. Sirve igual para venta y arriendo
+(la raíz de la URL: /venta/… o /arriendo/…).
 
 El buscador solo deja recorrer 10.000 resultados por consulta, así que el país se parte en
 segmentos públicos (URLs normales del sitio) que quepan, con margen, en ese tope:
 
-    Departamento (33, lista fija)
-      └─ si no cabe → Tipo de inmueble (15, lista fija del portal)   /venta/<tipo>/<depto>
-           └─ si no cabe → Ciudad (descubierta en los avisos)        /venta/<tipo>/<ciudad>/<depto>
-                └─ si no cabe → Zona (descubierta en los avisos)     /venta/<tipo>/<zona>/<ciudad>
+    Departamento (33, lista fija)                                    /<raíz>/<depto>
+      └─ si no cabe → Tipo de inmueble (15, lista fija del portal)   /<raíz>/<tipo>/<depto>
+           └─ si no cabe → Ciudad (descubierta en los avisos)        /<raíz>/<tipo>/<ciudad>/<depto>
+                └─ si no cabe → Zona (descubierta en los avisos)     /<raíz>/<tipo>/<zona>/<ciudad>
 
 Al partir un segmento, compara la suma de sus hijos con su total: la diferencia ("hueco") son
 avisos que ningún hijo cubre (sin tipo, ciudad o zona reconocible). El resultado dice cuántas
 páginas cuesta un barrido completo y qué cobertura nacional lograría.
 
 Uso:
-    python -m src.segmentos                  # arma el árbol → data/analisis/e1/segmentos_arbol.csv
+    python -m src.segmentos [--raiz arriendo]   # arma el árbol → data/analisis/e1/segmentos_arbol[_arriendo].csv
 """
 from __future__ import annotations
 import argparse
@@ -30,7 +31,8 @@ from src.config import BASE_DIR
 from src.fincaraiz_http import POR_PAGINA, ULTIMA_PAGINA, pedir
 
 LIMITE = 9_500                   # margen bajo el tope de 10.000 para que el crecimiento no lo rompa
-OUT = BASE_DIR / "data" / "analisis" / "e1" / "segmentos_arbol.csv"
+OUT = BASE_DIR / "data" / "analisis" / "e1"
+RAICES = ("venta", "arriendo")
 
 DEPARTAMENTOS = [
     "amazonas", "antioquia", "arauca", "atlantico", "bogota-dc", "bolivar", "boyaca", "caldas",
@@ -54,9 +56,10 @@ def slug(texto: str) -> str:
 
 
 class Arbol:
-    def __init__(self, pausa: float):
+    def __init__(self, pausa: float, raiz: str = "venta"):
         self.s = requests.Session()
         self.pausa = pausa
+        self.raiz = raiz
         self.filas: list[dict] = []
         self.huecos: list[dict] = []
         self.descartados: list[str] = []
@@ -111,7 +114,7 @@ class Arbol:
 
     # ── Niveles ──────────────────────────────────────────────────────────────
     def departamento(self, d: str) -> int:
-        ruta = f"venta/{d}"
+        ruta = f"{self.raiz}/{d}"
         t = self.total(ruta)
         if t == 0:
             return 0
@@ -123,7 +126,7 @@ class Arbol:
         return min(t, suma)
 
     def tipo(self, tp: str, d: str, padre: str) -> int:
-        ruta = f"venta/{tp}/{d}"
+        ruta = f"{self.raiz}/{tp}/{d}"
         t = self.total(ruta)
         if t == 0:
             return 0
@@ -138,7 +141,7 @@ class Arbol:
         return min(t, suma)
 
     def ciudad(self, tp: str, c: str, d: str, padre: str) -> int:
-        ruta = f"venta/{tp}/{c}/{d}"
+        ruta = f"{self.raiz}/{tp}/{c}/{d}"
         t = self.total(ruta)
         if t == 0:
             return 0
@@ -153,7 +156,7 @@ class Arbol:
         for nombre, slug_portal in sorted(zonas.items()):
             # slug del portal: 'zone-colombia-bogota-zona-norte' → 'zona-norte'
             z = slug_portal.split(f"-{c}-", 1)[-1] if f"-{c}-" in slug_portal else slug(nombre)
-            rz = f"venta/{tp}/{z}/{c}"
+            rz = f"{self.raiz}/{tp}/{z}/{c}"
             tz = self.total(rz)
             if tz == 0:
                 continue
@@ -164,14 +167,14 @@ class Arbol:
         return min(t, suma)
 
 
-def construir(pausa: float) -> pd.DataFrame:
-    arbol = Arbol(pausa)
+def construir(pausa: float, raiz: str = "venta") -> pd.DataFrame:
+    arbol = Arbol(pausa, raiz)
     t0 = time.time()
-    nacional = arbol.total("venta")
+    nacional = arbol.total(raiz)
     cubiertos = sum(arbol.departamento(d) for d in DEPARTAMENTOS)
     df = pd.DataFrame(arbol.filas)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUT, index=False)
+    OUT.mkdir(parents=True, exist_ok=True)
+    df.to_csv(OUT / ("segmentos_arbol.csv" if raiz == "venta" else f"segmentos_arbol_{raiz}.csv"), index=False)
 
     hojas = df[df["accion"] != "partido"]
     solape = hojas["total"].sum() - cubiertos
@@ -197,4 +200,6 @@ def construir(pausa: float) -> pd.DataFrame:
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Arma el árbol de segmentos de FincaRaíz (solo lectura)")
     p.add_argument("--pausa", type=float, default=0.6)
-    construir(p.parse_args().pausa)
+    p.add_argument("--raiz", choices=RAICES, default="venta")
+    a = p.parse_args()
+    construir(a.pausa, a.raiz)

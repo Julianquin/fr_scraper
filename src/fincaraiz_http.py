@@ -18,6 +18,7 @@ BASE = "https://www.fincaraiz.com.co"
 ORDEN_RECIENTE = 3              # ordenListado: 0 mayor precio, 1 menor precio, 2 popularidad,
                                 #               3 más recientes, 4 menor m², 5 mayor m²
 POR_PAGINA = 21
+OPERACION_ARRIENDO = 2          # operation_type_id: 1 venta, 2 arriendo
 MAX_RESULTADOS = 10_000         # tope del buscador por consulta
 ULTIMA_PAGINA = MAX_RESULTADOS // POR_PAGINA          # 476
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -78,6 +79,9 @@ def aplanar(a: dict) -> dict:
     (notebooks/analisis_barrido_http.ipynb): fuera el JSON original (79% del peso, casi todo ya
     aplanado o sin valor) y los campos constantes, vacíos o redundantes. Lo que se pierde de
     moneda y proyecto queda en `etiquetas`.
+
+    Arriendos (E3): `precio` es el canon mensual y se agrega `admin_incluida` (si el canon ya
+    incluye la administración). "Amoblado" llega como una amenidad más.
     """
     loc = a.get("locations") or {}
     precio = a.get("price") or {}
@@ -99,6 +103,8 @@ def aplanar(a: dict) -> dict:
         "tipo": (a.get("property_type") or {}).get("name"),
         "precio": None if en_dolares else precio.get("amount"),
         "administracion": admin.get("amount"),
+        **({"admin_incluida": bool(a.get("include_administration"))}
+           if a.get("operation_type_id") == OPERACION_ARRIENDO else {}),
         "fecha_publicacion": a.get("created_at"),
         "fecha_actualizacion": a.get("updated_at"),
         "habitaciones": a.get("bedrooms") if a.get("bedrooms") is not None else a.get("rooms"),

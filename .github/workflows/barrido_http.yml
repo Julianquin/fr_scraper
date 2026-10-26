@@ -8,6 +8,9 @@
 #   Job 2 (barrer): 4 jobs en paralelo, cada uno recorre entero su grupo de segmentos
 #   Job 3 (juntar): une, deduplica, mide la cobertura real y sube el crudo + reporte a R2;
 #                   luego consolida avisos + historial (src/consolidar.py: solo lo que cambió)
+#   Jobs 4–6 (E3):  lo mismo para arriendos (--raiz arriendo: ~77 segmentos, ~4.900 páginas,
+#                   ~30 min), DESPUÉS de venta para no leer el portal dos veces a la vez.
+#                   Corren aunque venta falle. R2: raw/arriendo_http/ y estado_arriendo/
 #
 # Arranca cuando termina el scraper diario (como la alerta), así nunca leen el portal a la vez
 # aunque GitHub atrase las tareas programadas. Corre aunque el scraper diario falle: son
@@ -121,3 +124,99 @@ jobs:
         run: |
           FECHA=$(ls data/raw_http | sort | tail -1)      # la fecha que acaba de escribir "juntar"
           python -m src.consolidar --bajar --fecha "$FECHA" --subir
+
+  # ── Arriendos (E3) ─────────────────────────────────────────────────────────
+  plan_arriendo:
+    needs: juntar
+    if: ${{ !cancelled() }}       # independiente de que venta salga bien
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Árbol de segmentos de arriendo repartido en 4 grupos
+        run: python -m src.scraper_http --raiz arriendo plan --grupos 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arriendo-plan
+          path: |
+            data/http_arriendo/plan.csv
+            data/http_arriendo/nacional.json
+          retention-days: 3
+
+  barrer_arriendo:
+    needs: plan_arriendo
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        grupo: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: arriendo-plan
+          path: data/http_arriendo
+      - name: Barrer el grupo ${{ matrix.grupo }} de arriendos
+        run: python -m src.scraper_http --raiz arriendo barrer --grupo ${{ matrix.grupo }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arriendo-barrido-${{ matrix.grupo }}
+          path: |
+            data/http_arriendo/barrido_${{ matrix.grupo }}.parquet
+            data/http_arriendo/informe_${{ matrix.grupo }}.csv
+          retention-days: 3
+
+  juntar_arriendo:
+    needs: [plan_arriendo, barrer_arriendo]
+    if: ${{ !cancelled() && needs.plan_arriendo.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: arriendo-*
+          path: data/http_arriendo
+          merge-multiple: true
+      - name: Juntar, medir cobertura y subir a R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m src.scraper_http --raiz arriendo juntar --subir
+      - name: Consolidar arriendos (solo lo que cambió)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          FECHA=$(ls data/raw_http_arriendo | sort | tail -1)
+          python -m src.consolidar --raiz arriendo --bajar --fecha "$FECHA" --subir

@@ -4,6 +4,7 @@ el formato que ya usan la alerta (src/oportunidades.py) y el mapa (src/viz_map.p
 
 Permite correr ambos con los datos nuevos (`--fuente http`) en paralelo a los del scraper viejo,
 para comparar antes del cambio de fuente (cierre de E1). No modifica nada del pipeline actual.
+Con `raiz="arriendo"` entrega los arriendos activos (E3, src/rentabilidad.py): `Precio` es el canon.
 
 Traducciones (validadas el 26-oct-2026 con los ~86.000 avisos presentes en ambas fuentes):
   - Area_m2      = m2 (coincide con el área del scraper viejo en el 99%)
@@ -17,17 +18,17 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.consolidar import AVISOS, HISTORIAL
+from src.consolidar import HISTORIAL, rutas
 
 ANTIGUEDAD = {1: "menor a 1 año", 2: "1 a 8 años", 3: "9 a 15 años", 4: "16 a 30 años", 5: "más de 30 años"}
 
 
-def dataset_activo() -> pd.DataFrame:
+def dataset_activo(raiz: str = "venta") -> pd.DataFrame:
     """Avisos activos en el formato de data/app/housing_clean.parquet (+ first_seen y Etiquetas)."""
-    a = pd.read_parquet(AVISOS)
+    a = pd.read_parquet(rutas(raiz).avisos)
     a = a[a["estado_aviso"] == "activo"]
     n = lambda c: pd.to_numeric(a[c], errors="coerce")
-    titulo = a["tipo"].fillna("Inmueble") + " en venta en " + a["barrio"].fillna(a["ciudad"]).fillna("")
+    titulo = a["tipo"].fillna("Inmueble") + f" en {raiz} en " + a["barrio"].fillna(a["ciudad"]).fillna("")
     return pd.DataFrame({
         "id_inmueble": a["id_inmueble"].astype(str),
         "Título": titulo,
@@ -42,13 +43,17 @@ def dataset_activo() -> pd.DataFrame:
         "Barrio": a["barrio"],
         "Latitud": n("latitud"),
         "Longitud": n("longitud"),
-        "Estrato": n("estrato").where(n("estrato") > 0),
+        "Estrato": n("estrato").where(n("estrato").between(1, 6)),     # hay avisos con 0, 7 o 110
         "Parqueaderos": n("parqueaderos"),
         "Piso": n("piso"),
         "Antiguedad": n("antiguedad").map(ANTIGUEDAD),
         "Estado": a["estado"],                      # estado físico: "Usado", "Excelente estado"…
         "first_seen": pd.to_datetime(a["fecha_publicacion"], errors="coerce"),
         "Etiquetas": a["etiquetas"],
+        "Administracion": n("administracion"),
+        "Admin_incluida": a["admin_incluida"] if "admin_incluida" in a else None,
+        "Amenidades": a["amenidades"],
+        "Descripcion": a["descripcion"],
     }).reset_index(drop=True)
 
 

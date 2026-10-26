@@ -1,18 +1,21 @@
 """
-Barrido diario de FincaRaíz por HTTP y por segmentos (bloque E1). Corre EN PARALELO al scraper
-actual y NO toca el master, la bitácora ni el dataset activo: escribe solo su propio crudo.
+Barrido diario de FincaRaíz por HTTP y por segmentos (bloques E1 y E3). Corre EN PARALELO al
+scraper actual y NO toca el master, la bitácora ni el dataset activo: escribe solo su propio crudo.
+Sirve para venta (por defecto) y arriendo (`--raiz arriendo`).
 
 Por qué por segmentos: el buscador solo deja recorrer 10.000 resultados por consulta, y las
 búsquedas grandes se saltan avisos (la caché del portal "corre" las páginas). Recorrer entero
 cada segmento chico capta ~98% de sus avisos, y con eso: nuevos, cambios de precio y bajas.
 
 Tres pasos (en el CI, tres jobs; ver .github/workflows/barrido_http.yml):
-    python -m src.scraper_http plan --grupos 4      # árbol de segmentos repartido en grupos
-    python -m src.scraper_http barrer --grupo 0     # recorre los segmentos de un grupo
-    python -m src.scraper_http juntar [--subir]     # une, deduplica, mide cobertura, sube a R2
+    python -m src.scraper_http [--raiz arriendo] plan --grupos 4    # árbol de segmentos en grupos
+    python -m src.scraper_http [--raiz arriendo] barrer --grupo 0   # recorre los segmentos de un grupo
+    python -m src.scraper_http [--raiz arriendo] juntar [--subir]   # une, deduplica, mide cobertura, sube a R2
 
 Archivos de trabajo en data/http/ y crudo final en data/raw_http/<fecha>/venta.parquet
-(en R2: raw/venta_http/fecha=<fecha>/scrape.parquet y reporte.json). Git ignora data/.
+(en R2: raw/venta_http/fecha=<fecha>/scrape.parquet y reporte.json). Arriendo, igual con sufijo:
+data/http_arriendo/, data/raw_http_arriendo/<fecha>/arriendo.parquet y raw/arriendo_http/.
+Git ignora data/.
 """
 from __future__ import annotations
 import argparse
@@ -27,10 +30,14 @@ import requests
 from src.config import BASE_DIR
 from src.fincaraiz_http import POR_PAGINA, ULTIMA_PAGINA, aplanar, guardar_parquet, pedir
 
-TRABAJO = BASE_DIR / "data" / "http"
-PLAN = TRABAJO / "plan.csv"
-SALIDA = BASE_DIR / "data" / "raw_http"
+RAICES = ("venta", "arriendo")
 ORDENES = {"barrer": [3], "barrer_dos_ordenes": [1, 0]}   # recientes; o menor y mayor precio
+
+
+def carpetas(raiz: str) -> tuple[Path, Path]:
+    """(trabajo, crudo) de cada raíz. Venta conserva las rutas con que arrancó E1."""
+    sufijo = "" if raiz == "venta" else f"_{raiz}"
+    return BASE_DIR / "data" / f"http{sufijo}", BASE_DIR / "data" / f"raw_http{sufijo}"
 
 
 def hoy() -> str:
@@ -38,10 +45,11 @@ def hoy() -> str:
 
 
 # ── 1. Plan ──────────────────────────────────────────────────────────────────
-def plan(grupos: int, pausa: float) -> pd.DataFrame:
+def plan(grupos: int, pausa: float, raiz: str = "venta") -> pd.DataFrame:
     """Arma el árbol de segmentos y reparte las hojas en `grupos` de páginas parecidas."""
     from src import segmentos
-    arbol = segmentos.construir(pausa)
+    trabajo, _ = carpetas(raiz)
+    arbol = segmentos.construir(pausa, raiz)
     hojas = arbol[arbol["accion"] != "partido"].copy()
     hojas["paginas_estimadas"] = hojas["paginas"] * hojas["accion"].map(lambda a: len(ORDENES[a]))
     hojas = hojas.sort_values("paginas_estimadas", ascending=False).reset_index(drop=True)
@@ -52,10 +60,10 @@ def plan(grupos: int, pausa: float) -> pd.DataFrame:
         asignado.append(g)
         carga[g] += p
     hojas["grupo"] = asignado
-    TRABAJO.mkdir(parents=True, exist_ok=True)
-    hojas.to_csv(PLAN, index=False)
-    nacional = segmentos.Arbol(pausa).total("venta")
-    (TRABAJO / "nacional.json").write_text(json.dumps({"total_nacional": nacional, "fecha": hoy()}))
+    trabajo.mkdir(parents=True, exist_ok=True)
+    hojas.to_csv(trabajo / "plan.csv", index=False)
+    nacional = segmentos.Arbol(pausa, raiz).total(raiz)
+    (trabajo / "nacional.json").write_text(json.dumps({"total_nacional": nacional, "fecha": hoy()}))
     print(f"Plan: {len(hojas)} segmentos en {grupos} grupos · páginas por grupo: {carga}")
     return hojas
 
@@ -86,8 +94,9 @@ def barrer_segmento(sesion: requests.Session, ruta: str, accion: str, pausa: flo
                    "paginas": paginas, "avisos": len(filas), "unicos": unicos, "errores": errores}
 
 
-def barrer(grupo: int, pausa: float, solo: int | None = None) -> pd.DataFrame:
-    hojas = pd.read_csv(PLAN)
+def barrer(grupo: int, pausa: float, solo: int | None = None, raiz: str = "venta") -> pd.DataFrame:
+    trabajo, _ = carpetas(raiz)
+    hojas = pd.read_csv(trabajo / "plan.csv")
     hojas = hojas[hojas["grupo"] == grupo]
     if solo:
         hojas = hojas.tail(solo)                         # para pruebas: los segmentos más chicos
@@ -101,26 +110,28 @@ def barrer(grupo: int, pausa: float, solo: int | None = None) -> pd.DataFrame:
               f"({inf['unicos'] / max(inf['declarado'], 1):.0%}) · {inf['paginas']} págs · "
               f"{inf['errores']} errores · {(time.time() - t0) / 60:.0f} min", flush=True)
     df = pd.DataFrame(filas)
-    TRABAJO.mkdir(parents=True, exist_ok=True)
-    guardar_parquet(df, TRABAJO / f"barrido_{grupo}.parquet")
-    pd.DataFrame(informe).to_csv(TRABAJO / f"informe_{grupo}.csv", index=False)
+    trabajo.mkdir(parents=True, exist_ok=True)
+    guardar_parquet(df, trabajo / f"barrido_{grupo}.parquet")
+    pd.DataFrame(informe).to_csv(trabajo / f"informe_{grupo}.csv", index=False)
     print(f"Grupo {grupo}: {len(df):,} filas · {df['id_inmueble'].nunique() if len(df) else 0:,} avisos únicos · "
           f"{(time.time() - t0) / 60:.1f} min")
     return df
 
 
 # ── 3. Juntar ────────────────────────────────────────────────────────────────
-def juntar(subir: bool) -> dict:
-    partes = sorted(TRABAJO.glob("barrido_*.parquet"))
+def juntar(subir: bool, raiz: str = "venta") -> dict:
+    trabajo, salida = carpetas(raiz)
+    partes = sorted(trabajo.glob("barrido_*.parquet"))
     df = pd.concat([pd.read_parquet(p) for p in partes], ignore_index=True)
-    informe = pd.concat([pd.read_csv(p) for p in sorted(TRABAJO.glob("informe_*.csv"))], ignore_index=True)
+    informe = pd.concat([pd.read_csv(p) for p in sorted(trabajo.glob("informe_*.csv"))], ignore_index=True)
     filas = len(df)
     df = df.drop_duplicates("id_inmueble", keep="first").reset_index(drop=True)
     fecha = hoy()
 
-    nacional = json.loads((TRABAJO / "nacional.json").read_text())["total_nacional"]
+    nacional = json.loads((trabajo / "nacional.json").read_text())["total_nacional"]
     reporte = {
         "fecha": fecha,
+        "raiz": raiz,
         "segmentos": int(len(informe)),
         "paginas": int(informe["paginas"].sum()),
         "errores_pagina": int(informe["errores"].sum()),
@@ -130,7 +141,7 @@ def juntar(subir: bool) -> dict:
         "cobertura": round(len(df) / nacional, 4),
         "segmentos_bajo_90pct": informe.loc[informe["unicos"] < 0.9 * informe["declarado"], "segmento"].tolist(),
     }
-    destino = SALIDA / fecha / "venta.parquet"
+    destino = salida / fecha / f"{raiz}.parquet"
     destino.parent.mkdir(parents=True, exist_ok=True)
     from src.almacen import COMPRESION
     guardar_parquet(df, destino, compression=COMPRESION)
@@ -139,14 +150,15 @@ def juntar(subir: bool) -> dict:
     print(f"💾 {destino.relative_to(BASE_DIR)} ({destino.stat().st_size / 1e6:.1f} MB)")
     if subir:
         from src import almacen
-        almacen.subir_archivo(destino, f"raw/venta_http/fecha={fecha}/scrape.parquet")
-        almacen.subir_archivo(destino.parent / "reporte.json", f"raw/venta_http/fecha={fecha}/reporte.json")
+        almacen.subir_archivo(destino, f"raw/{raiz}_http/fecha={fecha}/scrape.parquet")
+        almacen.subir_archivo(destino.parent / "reporte.json", f"raw/{raiz}_http/fecha={fecha}/reporte.json")
     return reporte
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Barrido diario de FincaRaíz por segmentos (en paralelo al actual)")
     p.add_argument("--pausa", type=float, default=0.4, help="segundos entre páginas (cortesía)")
+    p.add_argument("--raiz", choices=RAICES, default="venta", help="venta o arriendo")
     sub = p.add_subparsers(dest="accion", required=True)
     a = sub.add_parser("plan")
     a.add_argument("--grupos", type=int, default=4)
@@ -158,8 +170,8 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     if args.accion == "plan":
-        plan(args.grupos, args.pausa)
+        plan(args.grupos, args.pausa, args.raiz)
     elif args.accion == "barrer":
-        barrer(args.grupo, args.pausa, args.solo)
+        barrer(args.grupo, args.pausa, args.solo, args.raiz)
     else:
-        juntar(args.subir)
+        juntar(args.subir, args.raiz)

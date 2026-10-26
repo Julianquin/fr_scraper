@@ -10,6 +10,9 @@ Alerta semanal de oportunidades, con dos secciones:
   B) Avisos que BAJARON DE PRECIO en la semana (bitácora de src/eventos.py), con su
      historial (días publicado, bajadas acumuladas) y dónde quedan frente a sus comparables.
 
+Si hay estado de arriendos en disco (E3), cada aviso trae además su arriendo estimado y su
+rentabilidad bruta (src/rentabilidad.py).
+
 Salidas en reports/oportunidades/ (no se versionan; son para revisión humana):
   - <ciudad>_<fecha>.csv           todos los avisos nuevos con métricas y motivo de descarte
   - <ciudad>_<fecha>_bajadas.csv   todas las bajadas de la semana
@@ -88,9 +91,10 @@ def historial(hasta: pd.Timestamp) -> pd.DataFrame:
                          "var_total": g["factor"].prod() - 1})
 
 
-def _comparables(c: pd.Series, pool: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+def _comparables(c: pd.Series, pool: pd.DataFrame, minimo: int = MIN_COMPS) -> tuple[pd.DataFrame, str | None]:
     """Comparables de `c` y el nivel donde se encontraron ('barrio' | '1 km' | 'comuna').
-    Si ningún nivel alcanza MIN_COMPS devuelve los del barrio (para diagnóstico) y None."""
+    Si ningún nivel alcanza `minimo` devuelve los del barrio (para diagnóstico) y None.
+    También busca arriendos comparables a un aviso de venta (src/rentabilidad.py)."""
     base = pool[(pool["Tipo_propiedad"] == c["Tipo_propiedad"])
                 & (pool["id_inmueble"] != c["id_inmueble"])
                 & pool["Area_m2"].between(c["Area_m2"] * (1 - TOL_AREA), c["Area_m2"] * (1 + TOL_AREA))]
@@ -100,18 +104,18 @@ def _comparables(c: pd.Series, pool: pd.DataFrame) -> tuple[pd.DataFrame, str | 
         base = base[base["Estrato"] == c["Estrato"]]
 
     en_barrio = base[base["barrio_oficial"] == c["barrio_oficial"]]
-    if len(en_barrio) >= MIN_COMPS:
+    if len(en_barrio) >= minimo:
         return en_barrio, "barrio"
     if pd.notna(c["Latitud"]):
         dy = (base["Latitud"] - c["Latitud"]) * 110_540
         dx = (base["Longitud"] - c["Longitud"]) * 111_320 * np.cos(np.radians(c["Latitud"]))
         cerca = base[np.hypot(dx, dy) <= RADIO_M]
-        if len(cerca) >= MIN_COMPS:
+        if len(cerca) >= minimo:
             return cerca, "1 km"
     # La comuna solo con estrato conocido: sin él mezclaría zonas muy distintas
     if pd.notna(c["Estrato"]) and pd.notna(c.get("comuna")):
         en_comuna = base[base["comuna"] == c["comuna"]]
-        if len(en_comuna) >= MIN_COMPS:
+        if len(en_comuna) >= minimo:
             return en_comuna, "comuna"
     return en_barrio, None
 
@@ -260,16 +264,21 @@ def _tarjeta(r: pd.Series, i: int, insignia: str, clase: str, precio: str, linea
 
 
 def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
+    from src.rentabilidad import texto as renta_txt
     nuevas = [_tarjeta(r, i, f"{r['descuento']:.0%} bajo comparables", "ok",
                        f"<b>{_millones(r['Precio'])}</b> · {_m2(r['precio_m2'])} M/m²",
-                       [f"{_comps_txt(r)} · confianza {r['confianza'].lower()}", _historia_txt(r, hasta)],
+                       [f"{_comps_txt(r)} · confianza {r['confianza'].lower()}", renta_txt(r),
+                        _historia_txt(r, hasta)],
                        _señales(r))
               for i, (_, r) in enumerate(sel.iterrows(), 1)]
     bajaron = [_tarjeta(r, i, f"Bajó {r['baja']:.0%}", "baja",
                         f"{_millones(r['precio_antes'])} → <b>{_millones(r['Precio'])}</b> · "
                         f"{_m2(r['precio_m2'])} M/m²",
-                        [_frente_comps(r), _historia_txt(r, hasta)], [])
+                        [_frente_comps(r), renta_txt(r), _historia_txt(r, hasta)], [])
                for i, (_, r) in enumerate(bj.iterrows(), 1)]
+    nota_renta = (" Arriendo estimado: mediana del canon/m² de arriendos similares publicados (sin amoblados "
+                  "ni por días); la rentabilidad bruta es ese canon × 12 ÷ precio, antes de administración, "
+                  "impuestos y vacancia." if resumen.get("con_arriendos") else "")
     seccion_bajadas = (f"""
   <h2>Bajaron de precio esta semana</h2>
   <p class="sub">{resumen['bajadas']} avisos de vivienda bajaron {BAJA_MIN:.0%} o más; estas son las mayores bajadas.</p>
@@ -308,11 +317,12 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
   {seccion_bajadas}
   <footer>Comparables: mismo tipo y estrato, área ±30% y ±1 habitación, en el mismo barrio oficial
     (o a menos de 1 km, o en la comuna). Es una herramienta para priorizar, no un avalúo: verifica siempre el
-    inmueble y su documentación. Fuente: avisos publicados en portales; barrios: IDESC – Alcaldía de Cali.</footer>
+    inmueble y su documentación.{nota_renta} Fuente: avisos publicados en portales; barrios: IDESC – Alcaldía de Cali.</footer>
 </div></body></html>"""
 
 
 def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
+    from src.rentabilidad import texto as renta_txt
     lineas = [f"*Oportunidades de la semana — {resumen['ciudad']}*", resumen["periodo"], "",
               "*🆕 Nuevos bajo sus comparables*", ""]
     for i, (_, r) in enumerate(sel.iterrows(), 1):
@@ -320,6 +330,8 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                    f"📍 {_zona(r)}",
                    f"💰 {_millones(r['Precio'])} ({_m2(r['precio_m2'])} M/m²)",
                    f"📊 {_comps_txt(r)} · confianza {r['confianza'].lower()}"]
+        if renta := renta_txt(r):
+            lineas.append(f"💵 {renta}")
         if historia := _historia_txt(r, hasta):
             lineas.append(f"🕒 {historia}")
         lineas += [f"🏷️ {s}" for s in _señales(r)]
@@ -332,6 +344,8 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                        f"💰 {_millones(r['precio_antes'])} → {_millones(r['Precio'])} ({_m2(r['precio_m2'])} M/m²)"]
             if frente := _frente_comps(r):
                 lineas.append(f"📊 {frente}")
+            if renta := renta_txt(r):
+                lineas.append(f"💵 {renta}")
             if historia := _historia_txt(r, hasta):
                 lineas.append(f"🕒 {historia}")
             lineas += [f"🔗 {r['URL detalle']}", ""]
@@ -366,6 +380,12 @@ def main() -> None:
     if ev.empty and bj.empty:
         print("No hay avisos nuevos ni bajadas de precio en el periodo.")
         return
+    from src import rentabilidad
+    con_arriendos = rentabilidad.disponible()
+    if con_arriendos:
+        arr = rentabilidad.arriendos(args.ciudad)
+        ev = rentabilidad.estimar(ev, arr) if not ev.empty else ev
+        bj = rentabilidad.estimar(bj, arr) if not bj.empty else bj
     sel = seleccionar(ev, args.umbral, args.top) if not ev.empty else ev
     sel_bj = seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) \
         if not bj.empty else bj
@@ -380,6 +400,7 @@ def main() -> None:
         "bajo_umbral": len(bajo),
         "descartados": int(bajo["motivo_descarte"].notna().sum()) if not bajo.empty else 0,
         "bajadas": len(bj),
+        "con_arriendos": con_arriendos,
     }
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -387,7 +408,7 @@ def main() -> None:
     cols = ["id_inmueble", "first_seen", "Tipo_propiedad", "barrio_oficial", "Barrio", "Estrato",
             "Area_m2", "Habitaciones", "Precio", "precio_m2", "nivel_comps", "n_comps", "med_comps",
             "descuento", "confianza", "verificar", "motivo_descarte", "n_bajadas", "var_total",
-            "Etiquetas", "URL detalle"]
+            "nivel_arr", "n_arr", "confianza_arr", "canon_est", "rentab_bruta", "Etiquetas", "URL detalle"]
     ev[[c for c in cols if c in ev]].to_csv(f"{base}.csv", index=False)
     cols_bj = ["fecha_baja", "precio_antes", "baja"] + cols
     bj[[c for c in cols_bj if c in bj]].to_csv(f"{base}_bajadas.csv", index=False)

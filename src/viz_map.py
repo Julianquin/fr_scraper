@@ -65,13 +65,18 @@ def cargar_ciudad(ciudad: str) -> pd.DataFrame:
     """Avisos de la ciudad con precio/m² saneado. Las coordenadas son opcionales:
     sin ellas el aviso no se pinta como punto, pero cuenta en su barrio si se
     puede asignar por nombre."""
-    df = _cargar_todo()
+    return limpiar_ciudad(_cargar_todo(), ciudad)
+
+
+def limpiar_ciudad(df: pd.DataFrame, ciudad: str, precio_min: float = 1e7) -> pd.DataFrame:
+    """La limpieza de `cargar_ciudad` sobre cualquier dataset con su formato. Los arriendos
+    (src/rentabilidad.py) la usan con un mínimo de canon en vez del de venta."""
     # Nombre exacto: con "contiene", "Cali" también traía "Calima" y "Cali, Yumbo"
     df = df[df["Ciudad"].map(zonas.normalizar) == zonas.normalizar(ciudad)].copy()
     for c in ["Latitud", "Longitud", "Precio", "Area_m2", "Habitaciones", "Baños"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["Precio", "Area_m2"])
-    df = df[(df["Area_m2"] > 10) & (df["Precio"] > 1e7)]
+    df = df[(df["Area_m2"] > 10) & (df["Precio"] > precio_min)]
 
     # Coordenadas lejanas (fuera del área urbana) se descartan como coordenadas
     lat0, lon0 = df["Latitud"].median(), df["Longitud"].median()
