@@ -34,9 +34,15 @@ ZOOM_BARRIOS = 13       # desde este zoom se ven barrios en vez de comunas
 ZOOM_AVISOS = 15        # desde este zoom aparecen los avisos individuales
 
 
+FUENTE = "master"     # "master": scraper actual · "http": barrido por segmentos (src/fuente_http.py)
+
+
 def _cargar_todo() -> pd.DataFrame:
     """Devuelve el dataset limpio. Prefiere el parquet curado (rápido, y en CI
     no hay CSV crudos); si no existe, lee y limpia todos los CSV de data/raw."""
+    if FUENTE == "http":
+        from src import fuente_http
+        return fuente_http.dataset_activo()
     parquets = [BASE_DIR / "data" / "app" / "housing_clean.parquet",
                 BASE_DIR / "data" / "processed" / "housing_clean.parquet"]
     p = next((q for q in parquets if q.exists()), None)
@@ -60,7 +66,8 @@ def cargar_ciudad(ciudad: str) -> pd.DataFrame:
     sin ellas el aviso no se pinta como punto, pero cuenta en su barrio si se
     puede asignar por nombre."""
     df = _cargar_todo()
-    df = df[df["Ciudad"].str.contains(ciudad, case=False, na=False)].copy()
+    # Nombre exacto: con "contiene", "Cali" también traía "Calima" y "Cali, Yumbo"
+    df = df[df["Ciudad"].map(zonas.normalizar) == zonas.normalizar(ciudad)].copy()
     for c in ["Latitud", "Longitud", "Precio", "Area_m2", "Habitaciones", "Baños"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["Precio", "Area_m2"])
@@ -253,10 +260,14 @@ def estadisticas(df: pd.DataFrame, ciudad: str) -> dict:
 
 
 def main() -> None:
+    global FUENTE
     parser = argparse.ArgumentParser()
     parser.add_argument("--ciudad", default="Cali", help="Ciudad a mapear (coincide con la columna Ciudad)")
     parser.add_argument("--out", default=None, help="Ruta del HTML de salida")
+    parser.add_argument("--fuente", choices=["master", "http"], default="master",
+                        help="datos del scraper actual (master) o del barrido por segmentos (http)")
     args = parser.parse_args()
+    FUENTE = args.fuente
 
     df = cargar_ciudad(args.ciudad)
     slug = args.ciudad.lower().replace(" ", "_").replace("í", "i").replace("é", "e")
