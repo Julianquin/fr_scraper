@@ -6,7 +6,8 @@
 #
 #   Job 1 (plan):   arma el árbol de segmentos (src/segmentos.py) y lo reparte en 4 grupos
 #   Job 2 (barrer): 4 jobs en paralelo, cada uno recorre entero su grupo de segmentos
-#   Job 3 (juntar): une, deduplica, mide la cobertura real y sube el crudo + reporte a R2
+#   Job 3 (juntar): une, deduplica, mide la cobertura real y sube el crudo + reporte a R2;
+#                   luego consolida avisos + historial (src/consolidar.py: solo lo que cambió)
 #
 # Arranca cuando termina el scraper diario (como la alerta), así nunca leen el portal a la vez
 # aunque GitHub atrase las tareas programadas. Corre aunque el scraper diario falle: son
@@ -111,3 +112,12 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: python -m src.scraper_http juntar --subir
+      - name: Consolidar avisos + historial (solo lo que cambió)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          FECHA=$(ls data/raw_http | sort | tail -1)      # la fecha que acaba de escribir "juntar"
+          python -m src.consolidar --bajar --fecha "$FECHA" --subir
