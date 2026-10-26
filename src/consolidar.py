@@ -196,14 +196,23 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
     from src.almacen import COMPRESION
     guardar_parquet(estado.reset_index().rename(columns={"index": "id_inmueble"}), r.avisos, compression=COMPRESION)
     guardar_parquet(hist, r.historial / f"fecha={fecha}.parquet", compression=COMPRESION)
-    meta = meta | {"ultimo_barrido": fecha, "barridos": meta["barridos"] + [fecha]}
-    r.meta.write_text(json.dumps(meta, indent=2))
 
+    cp = hist[hist["evento"] == "cambio_precio"]
     resumen = {"raiz": raiz, "fecha": fecha, "vistos": len(vistos), "avisos_total": len(estado),
                "activos": int(estado["estado_aviso"].eq("activo").sum()),
                "retirados": int(estado["estado_aviso"].eq("retirado").sum()),
                "ausencias_contadas": bool(ausencias_contadas),
+               "precio_baja": int((cp["valor_despues"] < cp["valor_antes"]).sum()),
+               "precio_sube": int((cp["valor_despues"] > cp["valor_antes"]).sum()),
                **hist["evento"].value_counts().to_dict()}
+    # El monitor (src/monitor.py) lee el resumen del día y el acumulado: la tasa de "reaparece"
+    # sobre las bajas dice si la regla de 3 ausencias está bien calibrada
+    acumulado = meta.get("acumulado", {})
+    for ev in ("alta", "baja", "reaparece"):
+        acumulado[ev] = acumulado.get(ev, 0) + int(resumen.get(ev, 0))
+    meta = meta | {"ultimo_barrido": fecha, "barridos": meta["barridos"] + [fecha],
+                   "ultimo_resumen": resumen, "acumulado": acumulado}
+    r.meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
     print(json.dumps(resumen, ensure_ascii=False))
     return resumen
 

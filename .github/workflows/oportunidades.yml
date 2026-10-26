@@ -7,6 +7,7 @@
 #   tengan secrets configurados (Settings → Secrets and variables → Actions):
 #     - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 #     - WhatsApp: CALLMEBOT_PHONE, CALLMEBOT_APIKEY
+#   Si algo falla, avisa SOLO al administrador (TELEGRAM_ADMIN_CHAT_ID, src/monitor.py).
 #
 # ⚠️ El repo es público: el informe NO se sube como artifact (cualquiera con
 #    cuenta de GitHub podría descargarlo). Solo viaja por el mensaje.
@@ -77,3 +78,12 @@ jobs:
           archivos=(reports/oportunidades/*_whatsapp.txt)
           if [ ${#archivos[@]} -eq 0 ]; then echo "No se generó alerta (sin datos en el periodo)."; exit 0; fi
           python -m src.notificar "${archivos[0]}"
+      - name: Avisar al administrador si algo falló
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: >-
+          python -m src.monitor fallo
+          "La alerta semanal falló: puede que no haya salido o que algún destino no la recibiera"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
