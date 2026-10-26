@@ -70,13 +70,14 @@ def _texto(s: pd.Series) -> pd.Series:
     return s.fillna("").astype(str).str.split().str.join(" ")
 
 
-def _evento(fecha, ids, evento, antes=None, despues=None, texto_antes=None) -> pd.DataFrame:
+def _evento(fecha, ids, evento, antes=None, despues=None, texto_antes=None, fuente="barrido") -> pd.DataFrame:
     n = len(ids)
     return pd.DataFrame({
         "fecha": fecha, "id_inmueble": list(ids), "evento": evento,
         "valor_antes": antes if antes is not None else [np.nan] * n,
         "valor_despues": despues if despues is not None else [np.nan] * n,
         "texto_antes": texto_antes if texto_antes is not None else [None] * n,
+        "fuente": fuente,       # barrido | scraper_viejo | foto_2025 (src/rescatar.py)
     })
 
 
@@ -137,6 +138,9 @@ def consolidar(fecha: str) -> dict:
         faltan = previo.index.difference(vistos)
         estado = pd.concat([hoy, previo.loc[faltan, hoy.columns.intersection(previo.columns)]])
         estado["primera_vez"] = previo["primera_vez"].reindex(estado.index).fillna(fecha)
+        # Columnas que no vienen en el barrido (p. ej. `origen` de lo rescatado): se conservan
+        for c in previo.columns.difference(hoy.columns).difference(CONTROL):
+            estado[c] = previo[c].reindex(estado.index)
         for c in ("ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia"):
             estado.loc[faltan, c] = previo.loc[faltan, c]
 
