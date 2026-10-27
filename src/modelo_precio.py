@@ -79,18 +79,17 @@ def variables(a: pd.DataFrame, amenidades: list[str] | None = None) -> tuple[pd.
     en modelos que las aceptan (CatBoost), usarlas tal cual."""
     amenidades = amenidades if amenidades is not None else amenidades_comunes(a)
     num = lambda c: pd.to_numeric(a[c], errors="coerce")
-    X = pd.DataFrame(index=a.index)
-    for c in NUMERICAS:
-        X[c] = num(c)
-    X["estrato"] = num("estrato").where(num("estrato").between(1, 6))
-    X["antiguedad"] = num("antiguedad").where(num("antiguedad").between(1, 5))
-    X["admin_m2"] = (num("administracion") / num("m2")).where(num("administracion") > 0)
-    X["es_proyecto"] = a["es_proyecto"].astype(int)
-    for c in CATEGORICAS:
-        X[c] = a[c].fillna("NA").replace("", "NA").astype("category")
     am = a["amenidades"].fillna("")
-    for m in amenidades:
-        X["am: " + m] = am.str.contains(m, regex=False).astype(int)
+    cols = {c: num(c) for c in NUMERICAS}                      # de una vez: columna a columna, pandas
+    cols |= {                                                  # fragmenta la tabla y avisa
+        "estrato": num("estrato").where(num("estrato").between(1, 6)),
+        "antiguedad": num("antiguedad").where(num("antiguedad").between(1, 5)),
+        "admin_m2": (num("administracion") / num("m2")).where(num("administracion") > 0),
+        "es_proyecto": a["es_proyecto"].astype(int),
+    }
+    cols |= {c: a[c].fillna("NA").replace("", "NA").astype("category") for c in CATEGORICAS}
+    cols |= {"am: " + m: am.str.contains(m, regex=False).astype(int) for m in amenidades}
+    X = pd.DataFrame(cols, index=a.index)
     clave = lambda c: (a["ciudad"].fillna("") + "|" + a[c].fillna("")).where(a[c].notna(), "NA")
     TE = pd.DataFrame({"ciudad": a["ciudad"].fillna("NA"), "barrio": clave("barrio"),
                        "zona": clave("zona"), "comuna": clave("comuna")}, index=a.index)
@@ -215,27 +214,37 @@ def vecindario(a: pd.DataFrame, y: np.ndarray, ref: np.ndarray, objetivo: np.nda
                ks: tuple[int, ...] = (10, 30)) -> pd.DataFrame:
     """Los "comparables" como variable: mediana del log precio/m² de los k vecinos más cercanos del
     MISMO TIPO entre los avisos de referencia, y la distancia mediana a ellos (densidad)."""
-    from scipy.spatial import cKDTree
     X = _km(a)
     tipo = a["tipo"].to_numpy()
-    con_geo = ~np.isnan(X).any(axis=1)
     res = {f"{p}_vecinos_{k}": np.full(len(a), np.nan) for k in ks for p in ("med", "dist")}
 
     def llenar(base: np.ndarray, consulta: np.ndarray):
-        for t in np.unique(tipo[consulta]):
-            b = base[(tipo[base] == t) & con_geo[base]]
-            q = consulta[(tipo[consulta] == t) & con_geo[consulta]]
-            if len(b) < max(ks) or not len(q):
-                continue
-            dist, idx = cKDTree(X[b]).query(X[q], k=max(ks), workers=-1)
-            for k in ks:
-                res[f"med_vecinos_{k}"][q] = np.median(y[b][idx[:, :k]], axis=1)
-                res[f"dist_vecinos_{k}"][q] = np.median(dist[:, :k], axis=1)
+        for nombre, v in _vecinos(X[base], tipo[base], y[base], X[consulta], tipo[consulta], ks).items():
+            res[nombre][consulta] = v
 
     for tr, va in _pliegues(ref, grupo):
         llenar(tr, va)
     llenar(ref, objetivo)
     return pd.DataFrame(res, index=a.index)
+
+
+def _vecinos(Xb: np.ndarray, tb: np.ndarray, yb: np.ndarray, Xq: np.ndarray, tq: np.ndarray,
+             ks: tuple[int, ...] = (10, 30)) -> dict[str, np.ndarray]:
+    """Para cada punto de consulta (km), mediana de `yb` y distancia mediana de sus k vecinos del mismo
+    tipo en la base."""
+    from scipy.spatial import cKDTree
+    res = {f"{p}_vecinos_{k}": np.full(len(Xq), np.nan) for k in ks for p in ("med", "dist")}
+    geo_b, geo_q = ~np.isnan(Xb).any(axis=1), ~np.isnan(Xq).any(axis=1)
+    for t in np.unique(tq):
+        b = np.flatnonzero((tb == t) & geo_b)
+        q = np.flatnonzero((tq == t) & geo_q)
+        if len(b) < max(ks) or not len(q):
+            continue
+        dist, idx = cKDTree(Xb[b]).query(Xq[q], k=max(ks), workers=-1)
+        for k in ks:
+            res[f"med_vecinos_{k}"][q] = np.median(yb[b][idx[:, :k]], axis=1)
+            res[f"dist_vecinos_{k}"][q] = np.median(dist[:, :k], axis=1)
+    return res
 
 
 # Palabras de la descripción (sin tildes, minúsculas) → variable 0/1. Solo cosas del INMUEBLE: lo que
@@ -283,21 +292,30 @@ def texto_puntaje(a: pd.DataFrame, y: np.ndarray, ref: np.ndarray, objetivo: np.
     """Lo que dice TODA la descripción sobre el inmueble: un modelo lineal sobre palabras y pares de
     palabras (TF-IDF, sin números ni PALABRAS_VENDEDOR) predice el log precio/m²; esa predicción entra
     como una variable más."""
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.linear_model import Ridge
-    t = _normalizar(a["descripcion"]).str.replace(r"\d", " ", regex=True).to_numpy()
+    t = _texto(a)
     out = pd.Series(np.nan, index=a.index, name="txt_puntaje")
 
     def ajustar(base: np.ndarray, consulta: np.ndarray):
-        vec = TfidfVectorizer(min_df=5, max_df=0.5, ngram_range=(1, 2), sublinear_tf=True, max_features=200_000,
-                              token_pattern=r"(?u)\b[a-z]{2,}\b", stop_words=PALABRAS_VENDEDOR)
-        m = Ridge(alpha=3.0).fit(vec.fit_transform(t[base]), y[base])
+        vec, m = _ajustar_texto(t[base], y[base])
         out.iloc[consulta] = m.predict(vec.transform(t[consulta]))
 
     for tr, va in _pliegues(ref, grupo):
         ajustar(tr, va)
     ajustar(ref, objetivo)
     return out
+
+
+def _texto(a: pd.DataFrame) -> np.ndarray:
+    return _normalizar(a["descripcion"]).str.replace(r"\d", " ", regex=True).to_numpy()
+
+
+def _ajustar_texto(t: np.ndarray, y: np.ndarray):
+    """(vectorizador TF-IDF, modelo lineal) ajustados con los textos `t` y la respuesta `y`."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import Ridge
+    vec = TfidfVectorizer(min_df=5, max_df=0.5, ngram_range=(1, 2), sublinear_tf=True, max_features=200_000,
+                          token_pattern=r"(?u)\b[a-z]{2,}\b", stop_words=PALABRAS_VENDEDOR)
+    return vec, Ridge(alpha=3.0).fit(vec.fit_transform(t), y)
 
 
 def servicios(a: pd.DataFrame) -> pd.DataFrame:
@@ -348,3 +366,200 @@ def lightgbm(Xb: pd.DataFrame, TE: pd.DataFrame, y: np.ndarray, ajuste: np.ndarr
     m = lgb.LGBMRegressor(**LGBM)
     m.fit(Xa, y[ajuste], eval_X=Xv, eval_y=y[validacion], callbacks=[lgb.early_stopping(200, verbose=False)])
     return (m.predict(Xp), m, Xp) if devolver_modelo else m.predict(Xp)
+
+
+# ── Modelo definitivo (28-oct) ─────────────────────────────────────────────────
+# LightGBM con la base + mercado alrededor + servicios OSM + texto (notebooks/*_e7.ipynb). Rango p10–p90
+# con modelos de cuantiles calibrados (conformal). El objeto guarda todo lo que hace falta para predecir
+# avisos que no vio: codificador, modelo del texto, referencia de vecinos y servicios de OSM.
+MODELOS = BASE_DIR / "data" / "modelos"
+ARCHIVO = MODELOS / "precio_vivienda.joblib"
+FICHA = MODELOS / "precio_vivienda_ficha.json"
+COBERTURA = 0.80                     # el rango p10–p90 debe contener el 80% de los precios
+
+
+class ModeloPrecio:
+    """Precio de mercado estimado de vivienda (apartamento, apartaestudio, casa) en Colombia.
+    Se crea con `entrenar(a)`; se usa con `predecir(avisos)`."""
+
+    def _variables(self, a: pd.DataFrame) -> pd.DataFrame:
+        """Matriz de variables de avisos que el modelo NO vio (mismas columnas que al entrenar)."""
+        from src.osm_pois import features_servicios
+        a = a.reset_index(drop=True)
+        X, TE, _ = variables(a, self.amenidades)
+        for c in CATEGORICAS:
+            X[c] = pd.Categorical(X[c].astype(str), categories=self.categorias[c])
+        ref = self.referencia
+        v = _vecinos(_km(ref), ref["tipo"].to_numpy(), ref["lpm2"].to_numpy(), _km(a), a["tipo"].to_numpy())
+        union = pd.concat([ref[["latitud", "longitud", "tipo", "estrato"]],
+                           a[["latitud", "longitud", "tipo", "estrato"]]], ignore_index=True)
+        ctx = contexto(union).iloc[len(ref):].set_index(a.index)
+        vec, ridge = self.texto
+        Xb = pd.concat([X, pd.DataFrame(v, index=a.index), ctx, features_servicios(a, self.pois),
+                        texto_claves(a), pd.Series(ridge.predict(vec.transform(_texto(a))), index=a.index,
+                                                   name="txt_puntaje")], axis=1)
+        Xb[["te_" + c for c in TE.columns]] = self.codificador.transform(TE)
+        Xb = Xb.rename(columns=lambda c: c.replace(":", "_").replace(" ", "_"))
+        return Xb[self.columnas]
+
+    def predecir(self, a: pd.DataFrame) -> pd.DataFrame:
+        """Precio/m² y precio estimados, rango p10–p90 y confianza (por el ancho del rango)."""
+        Xb = self._variables(a)
+        p, lo, hi = (m.predict(Xb) for m in (self.punto, self.p10, self.p90))
+        lo, hi = np.minimum(lo, p) - self.margen, np.maximum(hi, p) + self.margen
+        m2 = pd.to_numeric(a["m2"], errors="coerce").to_numpy()
+        ancho = np.exp(hi - lo) - 1
+        return pd.DataFrame({
+            "pm2_estimado": np.exp(p), "precio_estimado": np.exp(p) * m2,
+            "precio_p10": np.exp(lo) * m2, "precio_p90": np.exp(hi) * m2,
+            "confianza": np.select([ancho <= self.cortes_confianza[0], ancho <= self.cortes_confianza[1]],
+                                   ["Alta", "Media"], default="Baja"),
+        }, index=a.index)
+
+    def guardar(self, ruta=ARCHIVO) -> None:
+        import joblib
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, ruta, compress=3)
+        if self.ficha:
+            ruta.with_name(ruta.stem + "_ficha.json").write_text(json.dumps(self.ficha, indent=2, ensure_ascii=False))
+        print(f"💾 {ruta.relative_to(BASE_DIR)} ({ruta.stat().st_size / 1e6:.0f} MB)")
+
+    @staticmethod
+    def cargar(ruta=ARCHIVO) -> "ModeloPrecio":
+        import joblib
+        return joblib.load(ruta)
+
+
+def entrenar(a: pd.DataFrame, publicados_antes: str | None = None) -> ModeloPrecio:
+    """Entrena el modelo con los avisos limpios `a` (salida de `limpiar`). Con `publicados_antes`, solo
+    con lo publicado antes de esa fecha: así puede calificar los avisos posteriores sin haberlos visto
+    (lo que necesita la alerta)."""
+    import lightgbm as lgb
+    from src.osm_pois import extraer_pois
+    if publicados_antes:
+        a = a[a["fecha_publicacion"].astype(str).str[:10] < publicados_antes]
+    a = a.reset_index(drop=True)
+    y, grupo = a["lpm2"].to_numpy(), grupos(a)
+    X, TE, amenidades = variables(a)
+    ajuste, validacion = subparticion(np.arange(len(a)), grupo, fraccion=0.1, semilla=1)
+    G = variables_nuevas(a, y, ajuste, validacion, grupo)
+    Xb = pd.concat([X, *G.values()], axis=1)
+    enc = codificador()
+    Xa, Xv = Xb.iloc[ajuste].copy(), Xb.iloc[validacion].copy()
+    te = ["te_" + c for c in TE.columns]
+    Xa[te] = enc.fit_transform(TE.iloc[ajuste], y[ajuste])
+    Xv[te] = enc.transform(TE.iloc[validacion])
+    Xa, Xv = (Z.rename(columns=lambda c: c.replace(":", "_").replace(" ", "_")) for Z in (Xa, Xv))
+
+    def ajustar(**extra):
+        m = lgb.LGBMRegressor(**(LGBM | extra))
+        m.fit(Xa, y[ajuste], eval_X=Xv, eval_y=y[validacion], callbacks=[lgb.early_stopping(200, verbose=False)])
+        return m
+
+    mod = ModeloPrecio()
+    mod.punto = ajustar()
+    mod.p10 = ajustar(objective="quantile", alpha=0.10)
+    mod.p90 = ajustar(objective="quantile", alpha=0.90)
+    # Margen conformal: cuánto ensanchar el rango (en log) para que el 80% de la validación quede dentro
+    pv, lo, hi = (m.predict(Xv) for m in (mod.punto, mod.p10, mod.p90))
+    lo, hi = np.minimum(lo, pv), np.maximum(hi, pv)
+    s = np.maximum(lo - y[validacion], y[validacion] - hi)
+    mod.margen = float(np.quantile(s, min(1.0, np.ceil((len(s) + 1) * COBERTURA) / len(s))))
+    ancho = np.exp(hi - lo + 2 * mod.margen) - 1
+    mod.cortes_confianza = tuple(float(q) for q in np.quantile(ancho, [1 / 3, 2 / 3]))   # tercios del ancho
+    mod.columnas = list(Xa.columns)
+    mod.categorias = {c: list(X[c].cat.categories) for c in CATEGORICAS}
+    mod.amenidades = amenidades
+    mod.codificador = enc
+    mod.referencia = a[["latitud", "longitud", "tipo", "estrato", "lpm2"]].copy()
+    mod.texto = _ajustar_texto(_texto(a), y)
+    mod.pois = extraer_pois()
+    mod.fecha_datos = str(a["fecha_publicacion"].astype(str).str[:10].max())
+    mod.publicados_antes = publicados_antes
+    mod.n_entrenamiento = len(a)
+    mod.ficha = {}
+    return mod
+
+
+def evaluar(a: pd.DataFrame, dias_temporal: int = 28) -> dict:
+    """Ficha del modelo: lo entrena sin una parte de los avisos y lo mide en ella, con el MISMO camino de
+    predicción que se usa en producción. (1) Por inmueble: 20% de los inmuebles fuera. (2) Temporal:
+    entrena con lo publicado hasta hace `dias_temporal` días y predice lo publicado después."""
+    a = a.reset_index(drop=True)
+    grupo = grupos(a)
+    publicado = a["fecha_publicacion"].astype(str).str[:10]
+    corte = (pd.Timestamp(publicado.max()) - pd.Timedelta(days=dias_temporal)).strftime("%Y-%m-%d")
+
+    def medir(tr: np.ndarray, te: np.ndarray, **kw) -> tuple[dict, pd.DataFrame]:
+        mod = entrenar(a.iloc[tr], **kw)
+        p = mod.predecir(a.iloc[te])
+        precio = a["precio"].to_numpy()[te]
+        e = np.abs(p["precio_estimado"].to_numpy() / precio - 1)
+        dentro = (precio >= p["precio_p10"].to_numpy()) & (precio <= p["precio_p90"].to_numpy())
+        d = a.iloc[te][["tipo", "ciudad"]].assign(e=e, dentro=dentro, confianza=p["confianza"].to_numpy())
+        r = metricas(e) | {"cobertura_p10_p90": float(dentro.mean()),
+                           "ancho_mediano": float(np.median(p["precio_p90"] / p["precio_p10"] - 1))}
+        return r, d
+
+    tr, te = particion_grupos(grupo)
+    r_g, d = medir(tr, te)
+    tr_t = np.flatnonzero((publicado < corte).to_numpy())
+    te_t = np.flatnonzero((publicado >= corte).to_numpy() & ~grupo.isin(set(grupo.iloc[tr_t])).to_numpy())
+    r_t, _ = medir(np.arange(len(a)), te_t, publicados_antes=corte)
+    ciudades = d["ciudad"].value_counts().head(10).index
+    a_float = lambda dct: {k: (round(float(v), 4) if isinstance(v, (float, np.floating)) else int(v)) for k, v in dct.items()}
+    return {
+        "modelo": "LightGBM · base + mercado alrededor + servicios OSM + texto",
+        "objetivo": "log(precio/m²) pedido; vivienda: apartamento, apartaestudio, casa",
+        "fecha_datos": str(publicado.max()),
+        "avisos": int(len(a)),
+        "por_inmueble": a_float(r_g),
+        "temporal": a_float(r_t) | {"publicados_desde": corte},
+        "por_tipo": {t: a_float(metricas(g["e"])) for t, g in d.groupby("tipo")},
+        "por_ciudad": {c: a_float(metricas(d.loc[d["ciudad"] == c, "e"])) for c in ciudades},
+        "por_confianza": {c: a_float(metricas(g["e"]) | {"cobertura_p10_p90": g["dentro"].mean()})
+                          for c, g in d.groupby("confianza")},
+        "advertencia": "Estimación del precio de mercado pedido, no un avalúo (Ley 1673 de 2013).",
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    import time
+    # Con `python -m`, este archivo corre como __main__: se usa el módulo importado para que el modelo
+    # guardado sea `src.modelo_precio.ModeloPrecio` y se pueda cargar desde cualquier otro programa
+    from src.modelo_precio import ARCHIVO, FICHA, ModeloPrecio, cargar, entrenar, evaluar, limpiar
+    p = argparse.ArgumentParser(description="Modelo de precios de vivienda (E7)")
+    sub = p.add_subparsers(dest="accion", required=True)
+    e = sub.add_parser("entrenar", help="entrena con todos los avisos activos y guarda modelo y ficha")
+    e.add_argument("--sin-evaluar", action="store_true", help="no calcula la ficha (más rápido)")
+    e.add_argument("--publicados-antes", help="solo avisos publicados antes de esta fecha (AAAA-MM-DD)")
+    e.add_argument("--subir", action="store_true", help="sube modelo y ficha a R2 (modelos/)")
+    q = sub.add_parser("predecir", help="estima el precio de los avisos activos de una ciudad")
+    q.add_argument("--ciudad", default="Cali")
+    args = p.parse_args()
+    t0 = time.time()
+    if args.accion == "entrenar":
+        datos, _ = limpiar(cargar())
+        ficha = {} if args.sin_evaluar else evaluar(datos)
+        modelo = entrenar(datos, args.publicados_antes)
+        modelo.ficha = ficha
+        modelo.guardar()
+        if ficha:
+            print(json.dumps({k: ficha[k] for k in ("por_inmueble", "temporal")}, ensure_ascii=False, indent=2))
+        if args.subir:
+            from src import almacen
+            almacen.subir_archivo(ARCHIVO, "modelos/precio_vivienda.joblib")
+            if FICHA.exists():
+                almacen.subir_archivo(FICHA, "modelos/precio_vivienda_ficha.json")
+    else:
+        modelo = ModeloPrecio.cargar()
+        datos, _ = limpiar(cargar())
+        datos = datos[datos["ciudad"] == args.ciudad]
+        print(f"⚠️  Ojo: estos avisos {'no ' if modelo.publicados_antes else ''}estaban en el entrenamiento")
+        out = datos[["id_inmueble", "tipo", "barrio", "m2", "precio"]].join(modelo.predecir(datos))
+        destino = BASE_DIR / "reports" / "modelo" / f"{args.ciudad.lower()}_{modelo.fecha_datos}.csv"
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(destino, index=False)
+        print(f"✅ {destino.relative_to(BASE_DIR)} ({len(out):,} avisos)")
+    print(f"⏱️  {time.time() - t0:.0f} s")
