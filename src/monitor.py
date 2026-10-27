@@ -82,7 +82,8 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
         return lineas + ["(sin resumen del estado: consolidado con una versión anterior)"], avisos
     activos = max(res["activos"], 1)
     lineas += [f"🆕 {_n(res.get('alta', 0))} altas · {_n(res.get('descubierto', 0))} descubiertos · "
-               f"❌ {_n(res.get('baja', 0))} bajas · ↩️ {_n(res.get('reaparece', 0))} reaparecen",
+               f"❌ {_n(res.get('baja', 0))} bajas · ↩️ {_n(res.get('reaparece', 0))} reaparecen"
+               + (f" · {_n(res['reactivado'])} rescatados vuelven" if res.get("reactivado") else ""),
                f"💲 {_n(res.get('precio_baja', 0))} bajaron y {_n(res.get('precio_sube', 0))} subieron de precio · "
                f"{_n(res['activos'])} activos"]
     acu = meta.get("acumulado", {})

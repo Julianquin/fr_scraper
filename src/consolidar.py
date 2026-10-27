@@ -10,7 +10,7 @@ copia diaria, se mantiene:
   historial  estado/historial/fecha=AAAA-MM-DD.parquet   solo lo que cambió ese día (nunca se reescribe):
                                                    alta · descubierto · cambio_precio ·
                                                    cambio_administracion · cambio_descripcion ·
-                                                   baja · reaparece
+                                                   baja · reaparece · reactivado
 
 Reglas:
   - Alta vs. descubierto: cada barrido ve ~93% del país y el ~7% que falta cambia de un día a otro.
@@ -19,6 +19,9 @@ Reglas:
   - Baja: el aviso falta en 3 barridos seguidos (con 2 habría muchas bajas falsas por ese ~7%
     variable). La fecha de baja es la del primer barrido en que faltó. Las "reaparece" después de
     una baja miden cuántas bajas fueron falsas.
+  - Reactivado: un aviso que el rescate del sistema viejo (src/rescatar.py) dejó como retirado, sin
+    fecha de baja, y que el barrido vuelve a encontrar. No dice nada de la regla de bajas: va aparte
+    para no inflar la tasa de "reaparece" (el 27-oct fueron 395, ninguno con baja del barrido).
   - Protección: si el barrido trae menos del 90% de los avisos activos, no se cuentan ausencias ese
     día (un grupo caído no debe generar miles de bajas falsas).
   - Cada fecha se procesa una sola vez y en orden.
@@ -145,7 +148,9 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         for ids, nombre in ((nuevos[es_alta], "alta"), (nuevos[~es_alta], "descubierto")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
         volvieron = comunes[previo.loc[comunes, "estado_aviso"].eq("retirado").to_numpy()]
-        eventos.append(_evento(fecha, volvieron, "reaparece", despues=hoy.loc[volvieron, "precio"].to_numpy()))
+        de_barrido = previo.loc[volvieron, "fecha_baja"].notna().to_numpy()     # sin fecha: del rescate
+        for ids, nombre in ((volvieron[de_barrido], "reaparece"), (volvieron[~de_barrido], "reactivado")):
+            eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
 
         # Cambios en los campos vigilados (subidas y bajadas)
         for campo, nombre in VIGILADOS.items():
