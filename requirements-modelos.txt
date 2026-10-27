@@ -1,0 +1,6 @@
+# Solo para los notebooks de modelos (E7): el CI diario no los instala.
+#   uv pip install --python .venv/bin/python -r requirements-modelos.txt
+-r requirements.txt
+xgboost-cpu>=3.0      # versión sin GPU (la normal pesa varios cientos de MB más)
+lightgbm>=4.7         # eval_X/eval_y para el conjunto de validación
+catboost>=1.2

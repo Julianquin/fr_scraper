@@ -234,6 +234,7 @@ __marimo__/
 /results/
 # mapas HTML generados por src.viz_map (se regeneran con un comando)
 /reports/
+catboost_info/
 /tmp/
 /logs/
 

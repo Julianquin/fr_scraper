@@ -1,88 +1,157 @@
 """
-Servicios cercanos desde OpenStreetMap — 100% offline, sin API ni límites.
+Servicios cercanos desde OpenStreetMap: 100% offline, sin API ni límites (bloque E7).
 
-Lee un extract de Colombia (.pbf de Geofabrik, en data/osm/) con DuckDB, extrae
-los POIs relevantes y calcula features de "servicios cercanos" por inmueble
-(conteos en radios + distancia a la más cercana de cada categoría).
+Lee un extract de Colombia (.pbf de Geofabrik, en data/osm/) con DuckDB y guarda en
+data/osm/pois_colombia.parquet un punto por servicio (lat, lon, categoria, area_m2).
+
+Versión 2 (27-oct-2026). La primera solo leía NODOS (puntos sueltos) y se perdía casi todo lo que
+OSM dibuja como polígono: en Cali quedaban 98 colegios y 28 parques. Ahora:
+  - servicios: nodos + polígonos (centroide y área; el área separa un parque de una plazoleta);
+  - vías principales y zonas industriales: se guardan TODOS sus nodos, para medir la distancia
+    al borde y no al centro;
+  - categorías que mueven el precio: transporte masivo (TransMilenio, Metro, MIO, cables…),
+    centros comerciales, universidades, aeropuerto, comercio en general.
 
 Uso:
-    # 1) (una vez) construir el parquet de POIs desde el .pbf
-    python -m src.osm_pois
+    python -m src.osm_pois                       # (re)construye el parquet desde el .pbf (~1 min)
 
-    # 2) en código / notebook
     from src.osm_pois import features_servicios
-    df = features_servicios(df)   # añade columnas serv_*/n_*/dist_*
+    extra = features_servicios(df)               # SOLO las columnas nuevas: dist_*_km y n_*_500m
 """
 from __future__ import annotations
 import glob
-from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
+
 from src.config import BASE_DIR
 
 OSM_DIR = BASE_DIR / "data" / "osm"
 POIS_PARQUET = OSM_DIR / "pois_colombia.parquet"
+RADIO_TIERRA_KM = 6371.0
+PARQUE_GRANDE_M2 = 10_000        # 1 ha: un parque de barrio de verdad, no una zona verde de conjunto
+DIST_MAX_KM = 30.0               # más lejos que esto no aporta (y evita valores enormes en zonas rurales)
 
-# Categoría lógica → condición sobre los tags de OSM (nodos)
+# Servicios: punto (nodo) o polígono (centroide + área). El orden importa: gana la primera que cumpla
 CATEGORIAS = {
-    "educacion":    "tags['amenity'] IN ('school','university','college','kindergarten')",
-    "salud":        "tags['amenity'] IN ('hospital','clinic','pharmacy','doctors')",
-    "supermercado": "tags['shop'] IN ('supermarket','convenience','mall','marketplace')",
-    "banco":        "tags['amenity'] IN ('bank','atm')",
-    "gastronomia":  "tags['amenity'] IN ('restaurant','cafe','fast_food')",
-    "parque":       "tags['leisure'] IN ('park','playground','pitch')",
-    "transporte":   ("tags['public_transport'] IN ('station','stop_position') "
-                     "OR tags['railway']='station' OR tags['amenity']='bus_station'"),
+    "transporte_masivo": ("tags['public_transport']='station' OR tags['amenity']='bus_station' "
+                          "OR tags['railway'] IN ('station','halt') OR tags['aerialway']='station'"),
+    "parada_bus":        "tags['highway']='bus_stop'",
+    "centro_comercial":  "tags['shop']='mall'",
+    "supermercado":      "tags['shop']='supermarket'",
+    "comercio":          "tags['shop'] IS NOT NULL",
+    "gastronomia":       "tags['amenity'] IN ('restaurant','cafe','fast_food','bar','pub')",
+    "banco":             "tags['amenity'] IN ('bank','atm')",
+    "universidad":       "tags['amenity'] IN ('university','college')",
+    "colegio":           "tags['amenity'] IN ('school','kindergarten')",
+    "salud":             "tags['amenity'] IN ('hospital','clinic')",
+    "parque":            "tags['leisure'] IN ('park','garden') OR tags['landuse']='recreation_ground'",
+    "aeropuerto":        "tags['aeroway']='aerodrome'",
 }
+# Líneas y bordes: se guardan todos sus nodos (redondeados a ~10 m para no repetir)
+LINEAS = {
+    "via_principal": "tags['highway'] IN ('motorway','trunk','primary')",
+    "industrial":    "tags['landuse']='industrial'",
+}
+# Qué se calcula para cada inmueble
+DISTANCIAS = ["transporte_masivo", "centro_comercial", "supermercado", "universidad", "colegio", "salud",
+              "parque", "parque_grande", "banco", "aeropuerto", "via_principal", "industrial"]
+CONTEOS_500M = ["comercio", "gastronomia", "parada_bus", "colegio", "banco"]
+
+
+def _caso(categorias: dict[str, str]) -> str:
+    return "CASE " + " ".join(f"WHEN {c} THEN '{n}'" for n, c in categorias.items()) + " END"
 
 
 def extraer_pois(pbf: str | None = None, force: bool = False) -> pd.DataFrame:
-    """Extrae los POIs del .pbf a un parquet cacheado (lat, lon, categoria)."""
+    """Extrae servicios, vías principales y zonas industriales del .pbf a un parquet cacheado."""
     if POIS_PARQUET.exists() and not force:
         return pd.read_parquet(POIS_PARQUET)
-
     import duckdb
     if pbf is None:
         pbfs = sorted(glob.glob(str(OSM_DIR / "*.pbf")))
         if not pbfs:
             raise FileNotFoundError(f"No hay .pbf en {OSM_DIR} (descárgalo de Geofabrik).")
-        pbf = pbfs[0]
-
+        pbf = pbfs[-1]
+    t0 = time.time()
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
-    conds = " OR ".join(f"({c})" for c in CATEGORIAS.values())
-    cat_case = " ".join(f"WHEN {c} THEN '{n}'" for n, c in CATEGORIAS.items())
-    q = f"""
-        SELECT lat, lon, CASE {cat_case} END AS categoria
-        FROM ST_ReadOSM('{pbf}')
-        WHERE kind = 'node' AND lat IS NOT NULL AND ({conds})
-    """
-    df = con.execute(q).df().dropna(subset=["categoria"]).reset_index(drop=True)
+    con.execute("SET geometry_always_xy = true")      # puntos en orden (longitud, latitud)
+    cond_p = " OR ".join(f"({c})" for c in CATEGORIAS.values())
+    cond_l = " OR ".join(f"({c})" for c in LINEAS.values())
+
+    # 1) Nodos que son servicios
+    nodos = con.execute(f"""
+        SELECT lat, lon, {_caso(CATEGORIAS)} AS categoria, NULL::DOUBLE AS area_m2
+        FROM ST_ReadOSM('{pbf}') WHERE kind = 'node' AND lat IS NOT NULL AND ({cond_p})
+    """).df()
+
+    # 2) Polígonos y líneas: sus nodos, en orden
+    con.execute(f"""
+        CREATE TEMP TABLE w AS
+        SELECT id, refs,
+               {_caso(LINEAS)} AS linea,
+               {_caso(CATEGORIAS)} AS categoria
+        FROM ST_ReadOSM('{pbf}') WHERE kind = 'way' AND (({cond_p}) OR ({cond_l}))
+    """)
+    con.execute("""CREATE TEMP TABLE wr AS
+                   SELECT id, unnest(refs) AS nid, generate_subscripts(refs, 1) AS pos FROM w""")
+    con.execute(f"""CREATE TEMP TABLE n AS
+                    SELECT o.id, o.lat, o.lon FROM ST_ReadOSM('{pbf}') o
+                    WHERE o.kind = 'node' AND o.id IN (SELECT DISTINCT nid FROM wr)""")
+    poligonos = con.execute("""
+        WITH c AS (
+            SELECT w.id, any_value(w.categoria) AS categoria, any_value(w.refs) AS refs,
+                   list(ST_Point(n.lon, n.lat) ORDER BY wr.pos) AS puntos,
+                   avg(n.lat) AS lat, avg(n.lon) AS lon
+            FROM w JOIN wr ON wr.id = w.id JOIN n ON n.id = wr.nid
+            WHERE w.linea IS NULL GROUP BY w.id
+        )
+        SELECT lat, lon, categoria,
+               CASE WHEN refs[1] = refs[-1] AND len(puntos) >= 4
+                    THEN TRY(ST_Area_Spheroid(ST_MakePolygon(ST_MakeLine(puntos)))) END AS area_m2
+        FROM c
+    """).df()
+    lineas = con.execute("""
+        SELECT DISTINCT round(n.lat, 4) AS lat, round(n.lon, 4) AS lon, w.linea AS categoria, NULL::DOUBLE AS area_m2
+        FROM w JOIN wr ON wr.id = w.id JOIN n ON n.id = wr.nid WHERE w.linea IS NOT NULL
+    """).df()
+
+    df = pd.concat([nodos, poligonos, lineas], ignore_index=True).dropna(subset=["categoria", "lat", "lon"])
+    df["area_m2"] = df["area_m2"].abs()
     OSM_DIR.mkdir(parents=True, exist_ok=True)
     df.to_parquet(POIS_PARQUET, index=False)
-    print(f"✅ {len(df):,} POIs → {POIS_PARQUET}")
+    print(f"✅ {len(df):,} puntos → {POIS_PARQUET.relative_to(BASE_DIR)} ({time.time() - t0:.0f} s)")
     print(df["categoria"].value_counts().to_string())
     return df
 
 
-def features_servicios(listings: pd.DataFrame, radios_km=(0.5, 1.0)) -> pd.DataFrame:
-    """Añade a cada inmueble: nº total de servicios por radio, nº por categoría a
-    1 km y distancia (km) a la más cercana de cada categoría."""
+def features_servicios(df: pd.DataFrame, pois: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Para cada inmueble: distancia (km) al más cercano de cada categoría de DISTANCIAS y cuántos
+    hay a 500 m de cada una de CONTEOS_500M. Sin coordenadas → vacío."""
     from sklearn.neighbors import BallTree
 
-    pois = extraer_pois()
-    out = listings.copy()
-    coords = np.radians(out[["Latitud", "Longitud"]].values)
-
-    tree_all = BallTree(np.radians(pois[["lat", "lon"]].values), metric="haversine")
-    for r in radios_km:
-        out[f"serv_{int(r*1000)}m"] = tree_all.query_radius(coords, r=r / 6371, count_only=True)
-
-    for cat, g in pois.groupby("categoria"):
-        t = BallTree(np.radians(g[["lat", "lon"]].values), metric="haversine")
-        out[f"n_{cat}_1km"] = t.query_radius(coords, r=1 / 6371, count_only=True)
-        out[f"dist_{cat}_km"] = t.query(coords, k=1)[0][:, 0] * 6371
+    pois = extraer_pois() if pois is None else pois
+    lat, lon = ("latitud", "longitud") if "latitud" in df else ("Latitud", "Longitud")
+    ok = df[lat].notna() & df[lon].notna()
+    coords = np.radians(df.loc[ok, [lat, lon]].astype(float).to_numpy())
+    out = pd.DataFrame(index=df.index)
+    grupos = dict(tuple(pois.groupby("categoria")))
+    grupos["parque_grande"] = pois[(pois["categoria"] == "parque") & (pois["area_m2"] >= PARQUE_GRANDE_M2)]
+    for cat in DISTANCIAS:
+        g = grupos.get(cat)
+        if g is None or g.empty:
+            continue
+        arbol = BallTree(np.radians(g[["lat", "lon"]].to_numpy()), metric="haversine")
+        d = arbol.query(coords, k=1)[0][:, 0] * RADIO_TIERRA_KM
+        out.loc[ok, f"dist_{cat}_km"] = np.minimum(d, DIST_MAX_KM)
+    for cat in CONTEOS_500M:
+        g = grupos.get(cat)
+        if g is None or g.empty:
+            continue
+        arbol = BallTree(np.radians(g[["lat", "lon"]].to_numpy()), metric="haversine")
+        out.loc[ok, f"n_{cat}_500m"] = arbol.query_radius(coords, r=0.5 / RADIO_TIERRA_KM, count_only=True)
     return out
 
 
