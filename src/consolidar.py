@@ -29,6 +29,11 @@ Reglas:
 Arriendos (`--raiz arriendo`): mismas reglas, con su propio estado (data/estado_arriendo/ y
 estado_arriendo/ en R2). En arriendos, `precio` es el canon mensual.
 
+Metrocuadrado (`--raiz m2_venta`, src/metrocuadrado_http.py): mismas reglas y estado propio
+(data/estado_m2_venta/ y estado_m2_venta/ en R2). El portal no publica la fecha de publicación, así
+que todo lo nuevo desde el barrido anterior cuenta como alta (con ~99% de cobertura, el ~1% variable
+puede colarse como alta).
+
 Uso:
     python -m src.consolidar --fecha 2026-10-27 [--subir]   # un barrido (el CI, tras juntar)
     python -m src.consolidar --bajar                         # solo trae el estado de R2
@@ -48,6 +53,7 @@ from src.config import BASE_DIR
 from src.fincaraiz_http import guardar_parquet
 from src.scraper_http import RAICES, carpetas
 
+RAICES_ESTADO = (*RAICES, "m2_venta")       # m2_venta: Metrocuadrado (src/metrocuadrado_http.py)
 
 
 class Rutas(NamedTuple):
@@ -145,6 +151,8 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         # Altas (publicadas desde el barrido anterior), descubiertos (ya existían) y reapariciones
         publicado = hoy.loc[nuevos, "fecha_publicacion"].fillna("").astype(str)
         es_alta = (publicado >= meta["ultimo_barrido"]).to_numpy()
+        if hoy["fecha_publicacion"].isna().all():      # el portal no la publica (Metrocuadrado)
+            es_alta = np.ones(len(nuevos), dtype=bool)
         for ids, nombre in ((nuevos[es_alta], "alta"), (nuevos[~es_alta], "descubierto")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
         volvieron = comunes[previo.loc[comunes, "estado_aviso"].eq("retirado").to_numpy()]
@@ -263,7 +271,7 @@ if __name__ == "__main__":
     p.add_argument("--reconstruir", action="store_true", help="rehace todo con los barridos locales")
     p.add_argument("--bajar", action="store_true", help="trae el estado actual de R2 antes de aplicar")
     p.add_argument("--subir", action="store_true", help="sube el estado y el historial del día a R2")
-    p.add_argument("--raiz", choices=RAICES, default="venta", help="venta o arriendo")
+    p.add_argument("--raiz", choices=RAICES_ESTADO, default="venta", help="venta, arriendo o m2_venta")
     a = p.parse_args()
     if a.reconstruir:
         reconstruir(a.raiz)

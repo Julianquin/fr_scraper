@@ -1,0 +1,161 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Barrido diario de Metrocuadrado (E8): vivienda en venta de todo el país.
+#
+# Corre al final de todo: arranca cuando termina el barrido diario de FincaRaíz
+# (barrido_http.yml, que a su vez arranca tras el scraper diario), así nunca compite con
+# los workflows que ya existen. No toca nada de FincaRaíz: escribe solo en R2
+# raw/m2_venta_http/fecha=…/ y estado_m2_venta/ (+ su respaldo en respaldos/).
+#
+#   Job 1 (plan):    totales por tipo y departamento (los grandes, por habitaciones) → unidades
+#                    repartidas en 4 grupos (src/metrocuadrado_http.py)
+#   Job 2 (barrer):  4 jobs en paralelo; cada uno camina por precio sus unidades (solo páginas
+#                    públicas de listado, ~3,5 s por página con la pausa de cortesía)
+#   Job 3 (juntar):  une, deduplica, mide la cobertura y sube crudo + reporte a R2; luego
+#                    consolida altas, bajas y cambios de precio (src/consolidar.py --raiz m2_venta)
+#   Job 4 (monitor): resumen por Telegram SOLO al administrador (src/monitor.py). Corre siempre.
+#
+# Corre aunque el barrido de FincaRaíz falle: son independientes. También se puede lanzar a mano.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Barrido diario Metrocuadrado
+
+on:
+  workflow_run:
+    workflows: ["Barrido diario (venta y arriendo)"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: barrido-m2
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Unidades por departamento repartidas en 4 grupos
+        run: python -m src.metrocuadrado_http plan --grupos 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2-plan
+          path: |
+            data/http_m2_venta/plan.csv
+            data/http_m2_venta/nacional.json
+          retention-days: 3
+
+  barrer:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false            # si un grupo falla, los demás siguen
+      max-parallel: 4
+      matrix:
+        grupo: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: m2-plan
+          path: data/http_m2_venta
+      - name: Barrer el grupo ${{ matrix.grupo }}
+        run: python -m src.metrocuadrado_http barrer --grupo ${{ matrix.grupo }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2-barrido-${{ matrix.grupo }}
+          path: |
+            data/http_m2_venta/barrido_${{ matrix.grupo }}.parquet
+            data/http_m2_venta/informe_${{ matrix.grupo }}.csv
+          retention-days: 3
+
+  juntar:
+    needs: [plan, barrer]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}    # junta lo que haya, aunque algún grupo falle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      fecha: ${{ steps.consolidar.outputs.fecha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: m2-*
+          path: data/http_m2_venta
+          merge-multiple: true
+      - name: Juntar, medir cobertura y subir a R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m src.metrocuadrado_http juntar --subir
+      - name: Consolidar altas, bajas y cambios de precio
+        id: consolidar
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          FECHA=$(ls data/raw_http_m2_venta | sort | tail -1)      # la fecha que acaba de escribir "juntar"
+          echo "fecha=$FECHA" >> "$GITHUB_OUTPUT"
+          python -m src.consolidar --raiz m2_venta --bajar --fecha "$FECHA" --subir
+
+  # ── Monitor de salud ───────────────────────────────────────────────────────
+  monitor:
+    needs: [plan, barrer, juntar]
+    if: always()                  # justo cuando algo falla es cuando más importa
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Resumen de Metrocuadrado al administrador
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+          FECHA: ${{ needs.juntar.outputs.fecha }}
+        run: |
+          python -m src.monitor resumen --raices m2_venta --titulo "Metrocuadrado" \
+            ${FECHA:+--fecha "$FECHA"} \
+            --jobs "plan=${{ needs.plan.result }},barrer=${{ needs.barrer.result }},juntar=${{ needs.juntar.result }}" \
+            --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

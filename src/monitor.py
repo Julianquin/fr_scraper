@@ -7,11 +7,15 @@ Monitor de salud del pipeline: un resumen diario por Telegram SOLO para el admin
             job y el del scraper viejo (que es el que dispara el barrido).
   fallo     un aviso corto cuando falla otro workflow (p. ej. la alerta de los lunes).
 
+Metrocuadrado (metrocuadrado.yml) manda su propio resumen al terminar, con
+`--raices m2_venta --titulo Metrocuadrado`.
+
 Si un día no llega el resumen, algo no corrió (GitHub no lanzó el scraper, se canceló…).
 
 Uso:
     python -m src.monitor resumen [--fecha AAAA-MM-DD] [--jobs plan=success,barrer=failure…]
                                   [--scraper success|failure] [--url URL] [--local] [--no-enviar]
+                                  [--raices venta,arriendo] [--titulo "Barrido diario"]
     python -m src.monitor fallo "La alerta semanal falló" [--url URL]
 """
 from __future__ import annotations
@@ -29,7 +33,7 @@ COBERTURA_MIN = 0.90    # del total que declara el portal
 ERRORES_MAX = 0.01      # páginas con error / páginas leídas
 BAJAS_MAX = 0.05        # bajas del día / activos: más que esto es un barrido roto, no el mercado
 CAMBIOS_MAX = 0.03      # cambios de precio del día / activos
-RAICES = {"venta": "Venta", "arriendo": "Arriendo"}
+RAICES = {"venta": "Venta", "arriendo": "Arriendo", "m2_venta": "Metrocuadrado venta"}
 
 
 def _n(x) -> str:
@@ -72,6 +76,8 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
         avisos.append(f"{nombre}: {rep['errores_pagina']} páginas con error de {_n(rep['paginas'])}")
     if rep.get("segmentos_bajo_90pct"):
         lineas.append(f"Segmentos bajo 90%: {', '.join(rep['segmentos_bajo_90pct'])}")
+    if rep.get("escalones_sin_resolver"):                # Metrocuadrado: empates de precio sin partir
+        lineas.append(f"Escalones de precio sin resolver: {rep['escalones_sin_resolver']}")
 
     if not meta or meta.get("ultimo_barrido") != fecha:
         ultimo = meta.get("ultimo_barrido") if meta else "ninguno"
@@ -100,7 +106,8 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
     return lineas, avisos
 
 
-def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | None, local: bool) -> str:
+def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | None, local: bool,
+            raices: tuple[str, ...] = ("venta", "arriendo"), titulo: str = "Barrido diario") -> str:
     bloques, avisos = [], []
     fallidos = [f"{j} ({r})" for j, r in jobs.items() if r != "success"]
     if fallidos:
@@ -109,13 +116,13 @@ def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | No
         lunes = datetime.now(ZoneInfo("America/Bogota")).weekday() == 0
         avisos.append(f"El scraper viejo terminó en '{scraper}'"
                       + (": hoy es lunes y la alerta NO salió" if lunes else ""))
-    for raiz in RAICES:
+    for raiz in raices:
         lineas, av = revisar(raiz, fecha, *leer(raiz, fecha, local))
         bloques.append("\n".join(lineas))
         avisos += av
-    titulo = (f"*⚠️ Barrido diario · {fecha} · {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}*\n"
-              + "\n".join(f"• {a}" for a in avisos)) if avisos else f"*✅ Barrido diario · {fecha}*"
-    return "\n\n".join([titulo, *bloques] + ([f"🔗 {url}"] if url else []))
+    cabeza = (f"*⚠️ {titulo} · {fecha} · {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}*\n"
+              + "\n".join(f"• {a}" for a in avisos)) if avisos else f"*✅ {titulo} · {fecha}*"
+    return "\n\n".join([cabeza, *bloques] + ([f"🔗 {url}"] if url else []))
 
 
 def enviar(texto: str) -> None:
@@ -139,6 +146,8 @@ def main() -> None:
     r.add_argument("--url", help="enlace a la corrida")
     r.add_argument("--local", action="store_true", help="lee data/ en vez de R2")
     r.add_argument("--no-enviar", action="store_true", help="solo imprime")
+    r.add_argument("--raices", default="venta,arriendo", help=f"separadas por coma: {', '.join(RAICES)}")
+    r.add_argument("--titulo", default="Barrido diario")
     f = sub.add_parser("fallo", help="aviso corto de que algo falló")
     f.add_argument("texto")
     f.add_argument("--url")
@@ -153,7 +162,7 @@ def main() -> None:
         texto = f"*⚠️ {a.texto}*" + (f"\n\n🔗 {a.url}" if a.url else "")
     else:
         jobs = dict(j.split("=", 1) for j in a.jobs.split(",") if "=" in j)
-        texto = resumen(a.fecha, jobs, a.scraper, a.url, a.local)
+        texto = resumen(a.fecha, jobs, a.scraper, a.url, a.local, tuple(a.raices.split(",")), a.titulo)
     print(texto)
     if a.accion == "fallo" or not a.no_enviar:
         try:
