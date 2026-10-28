@@ -1,8 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Alerta semanal de oportunidades (Cali).
 #
-#   Corre cuando termina el scraper diario, pero solo sigue si en Colombia es
-#   lunes: así usa siempre los datos recién actualizados. Genera la alerta con
+#   Corre cuando termina el barrido diario (barrido_http.yml), pero solo sigue si en
+#   Colombia es lunes: así usa siempre los datos recién actualizados. Lee el estado del
+#   barrido (estado/ y estado_arriendo/ en R2, --fuente http): fecha real de publicación,
+#   bajadas de precio de cada día y rentabilidad con los arriendos. Genera la alerta con
 #   src/oportunidades.py y la envía con src/notificar.py a los canales que
 #   tengan secrets configurados (Settings → Secrets and variables → Actions):
 #     - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -16,7 +18,7 @@ name: Alerta semanal de oportunidades
 
 on:
   workflow_run:
-    workflows: ["Scraper diario FincaRaíz (matriz por departamento)"]
+    workflows: ["Barrido diario (venta y arriendo)"]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -31,7 +33,9 @@ jobs:
   alerta:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # El barrido termina en "failure" si falla un solo grupo, pero el estado se consolida igual
+    # (y el monitor avisa): la alerta sale salvo que lo hayan cancelado
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
     steps:
       - name: ¿Es lunes en Colombia?
         id: dia
@@ -55,17 +59,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Bajar datos actuales desde R2
+      - name: Bajar el estado del barrido desde R2 (venta, su historial y arriendos)
         if: steps.dia.outputs.seguir == 'true'
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.almacen bajar
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.consolidar --raiz arriendo --bajar
+          python -m src.almacen traer estado/historial/ --destino data
       - name: Generar alerta
         if: steps.dia.outputs.seguir == 'true'
-        run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}"
+        run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}" --fuente http
       - name: Enviar alerta
         if: steps.dia.outputs.seguir == 'true'
         env:
