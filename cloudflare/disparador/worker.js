@@ -6,7 +6,8 @@
 //   "0 5 * * *"   todos los días 05:00 UTC = 00:00 Colombia → env.WORKFLOW
 //                 (scraper.yml hasta el cambio de fuente; desde el 2-nov, barrido_http.yml,
 //                 que encadena el mapa y Metrocuadrado)
-//   "0 12 * * 1"  los lunes 12:00 UTC = 07:00 Colombia → oportunidades.yml (la alerta)
+//   "0 12 * * MON" los lunes 12:00 UTC = 07:00 Colombia → oportunidades.yml (la alerta). Ojo: en
+//                 Cloudflare el día 1 es DOMINGO (no lunes como en GitHub): por eso MON y no 1
 //
 // Configuración (Cloudflare → Workers → fr-scraper-disparador → Settings):
 //   Variables: REPO ("Julianquin/fr_scraper"), WORKFLOW, RAMA ("main")
@@ -16,12 +17,19 @@
 //
 // El código se pega en el editor del panel; los secretos viven solo en Cloudflare.
 
-const CRON_ALERTA = "0 12 * * 1";
+// La alerta se reconoce por la HORA del horario (12 UTC), no por el texto completo: así da igual si
+// Cloudflare escribe el día como MON o como número. Si se cambia la hora de la alerta, cambiar aquí.
+const HORA_ALERTA = "12";
 const ALERTA = "oportunidades.yml";
 
 export default {
   async scheduled(evento, env, ctx) {
-    const workflow = evento.cron === CRON_ALERTA ? ALERTA : env.WORKFLOW;
+    const workflow = evento.cron.trim().split(/\s+/)[1] === HORA_ALERTA ? ALERTA : env.WORKFLOW;
+    // Solo si cada variable existe (nunca su valor): para diagnosticar en Observability → Logs
+    const hay = (k) => (env[k] ? "sí" : "NO");
+    console.log(`cron "${evento.cron}" · PRUEBA ${hay("PRUEBA")} · REPO ${env.REPO} · WORKFLOW ${env.WORKFLOW} · ` +
+                `GITHUB_TOKEN ${hay("GITHUB_TOKEN")} · TELEGRAM_BOT_TOKEN ${hay("TELEGRAM_BOT_TOKEN")} · ` +
+                `TELEGRAM_ADMIN_CHAT_ID ${hay("TELEGRAM_ADMIN_CHAT_ID")}`);
     ctx.waitUntil(env.PRUEBA ? probar(env, [env.WORKFLOW, ALERTA]) : disparar(env, workflow));
   },
 };
@@ -45,7 +53,10 @@ async function disparar(env, workflow) {
       method: "POST",
       body: JSON.stringify({ ref: env.RAMA || "main" }),
     });
-    if (r.status === 204) return;                     // lanzado
+    if (r.status === 204) {                           // lanzado
+      console.log(`${workflow} lanzado en ${env.REPO} (${env.RAMA || "main"})`);
+      return;
+    }
     // 401: token vencido o inválido · 404: repo o workflow mal escrito, o token sin acceso
     // 422: el workflow no tiene workflow_dispatch o la rama no existe
     detalle = `GitHub respondió ${r.status}: ${(await r.text()).slice(0, 300)}`;
@@ -62,14 +73,20 @@ async function probar(env, workflows) {
     const r = await github(env, w);
     lineas.push(`${r.status === 200 ? "✅" : "❌"} ${w}: ${r.status}`);
   }
+  console.log(`prueba: ${lineas.join(" · ")}`);
   await avisar(env, `🧪 Prueba del disparador (${env.REPO}, rama ${env.RAMA || "main"})\n${lineas.join("\n")}`);
 }
 
 async function avisar(env, texto) {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_ADMIN_CHAT_ID) return;
-  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_ADMIN_CHAT_ID) {
+    console.error("Sin TELEGRAM_BOT_TOKEN o TELEGRAM_ADMIN_CHAT_ID: no se avisa");
+    return;
+  }
+  const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: env.TELEGRAM_ADMIN_CHAT_ID, text: texto }),
   });
+  // 401/404: token del bot mal copiado · 400 "chat not found": chat_id mal copiado
+  if (!r.ok) throw new Error(`Telegram respondió ${r.status}: ${(await r.text()).slice(0, 200)}`);
 }

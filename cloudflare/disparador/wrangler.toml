@@ -7,7 +7,7 @@ compatibility_date = "2026-10-01"
 workers_dev = false            # sin URL pública: solo lo activan los Cron Triggers
 
 [triggers]
-crons = ["0 5 * * *", "0 12 * * 1"]    # 00:00 Colombia todos los días · lunes 07:00 Colombia (alerta)
+crons = ["0 5 * * *", "0 12 * * MON"]  # 00:00 Colombia todos los días · lunes 07:00 Colombia (alerta; en Cloudflare 1 = domingo)
 
 [vars]
 REPO = "Julianquin/fr_scraper"
