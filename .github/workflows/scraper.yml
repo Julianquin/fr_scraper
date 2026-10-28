@@ -17,8 +17,6 @@
 name: Scraper diario FincaRaíz (matriz por departamento)
 
 on:
-  schedule:
-    - cron: "0 6 * * *"          # todos los días 06:00 UTC (01:00 Colombia)
   workflow_dispatch:
     inputs:
       max_pages:

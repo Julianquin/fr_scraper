@@ -1,0 +1,15 @@
+# Configuración del disparador (worker.js) por si algún día se publica con la CLI
+# (`npx wrangler deploy`) en vez de pegarlo en el panel. Los secretos NO van aquí:
+#   npx wrangler secret put GITHUB_TOKEN   (y TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID)
+name = "fr-scraper-disparador"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false            # sin URL pública: solo lo activan los Cron Triggers
+
+[triggers]
+crons = ["0 5 * * *", "0 12 * * 1"]    # 00:00 Colombia todos los días · lunes 07:00 Colombia (alerta)
+
+[vars]
+REPO = "Julianquin/fr_scraper"
+WORKFLOW = "scraper.yml"       # desde el cambio de fuente (2-nov): "barrido_http.yml"
+RAMA = "main"
