@@ -15,16 +15,15 @@
 #                   cobertura, altas, bajas, cambios de precio y jobs fallidos. Corre
 #                   siempre; si un día no llega, algo no corrió.
 #
-# Arranca con su propio horario (GitHub suele atrasarlo unas horas). Al terminar se
-# encadenan: la alerta de los lunes (oportunidades.yml), el mapa (mapa.yml) y Metrocuadrado
-# (metrocuadrado.yml). También se puede lanzar a mano.
+# Lo lanza a las 00:00 de Colombia el disparador de Cloudflare (cloudflare/disparador/): las
+# tareas programadas de GitHub llegaban con 4–6 h de retraso. Al terminar se encadenan el mapa
+# (mapa.yml) y Metrocuadrado (metrocuadrado.yml); la alerta de los lunes la lanza el mismo
+# disparador a las 07:00. También se puede lanzar a mano.
 # ─────────────────────────────────────────────────────────────────────────────
 name: Barrido diario (venta y arriendo)
 
 on:
-  schedule:
-    - cron: "0 6 * * *"          # todos los días 06:00 UTC (01:00 Colombia)
-  workflow_dispatch:
+  workflow_dispatch:             # 00:00 de Colombia, desde Cloudflare
 
 permissions:
   contents: read
