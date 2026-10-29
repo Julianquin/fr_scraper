@@ -8,8 +8,8 @@ Cómo:
      total y construida) y precio parecido (PRECIO_MAX). En Cali esos filtros dejan el 27% de los
      candidatos y el 99,3% de los pares buenos (29-oct). No se comparan dos avisos del mismo anunciante
      en el mismo portal: casi siempre son unidades distintas de un edificio o un proyecto.
-  2. Señales y puntaje de src/deduplicar.py: texto, ficha, distancia y precio; piso distinto como veto y
-     habitaciones y baños distintos a la vez como resta.
+  2. Señales y puntaje de src/deduplicar.py: texto, ficha, distancia y precio; piso distinto como veto,
+     habitaciones y baños distintos a la vez como resta, y con texto débil hace falta precio idéntico.
   3. Grupos: se unen los pares de mayor a menor puntaje (desde UMBRAL), y dos grupos solo se juntan si
      TODOS sus avisos se parecen entre sí al menos UMBRAL_TODOS (no basta un par: un aviso parecido a dos
      edificios encadenaría inmuebles distintos). Además, un grupo no puede tener dos avisos del mismo

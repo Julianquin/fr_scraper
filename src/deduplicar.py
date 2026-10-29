@@ -11,7 +11,9 @@ el precio puede diferir), así que se combinan señales para cada par candidato:
     para varios apartamentos de un edificio, y solo el piso los distingue), y habitaciones Y baños distintos
     a la vez también restan (revisión del 29-oct: casas iguales en área y precio pero con otra ficha),
   - parecido de la descripción: coseno TF-IDF de fragmentos de caracteres. Las inmobiliarias suelen copiar el
-    mismo texto en los dos portales, así que es la señal más fuerte.
+    mismo texto en los dos portales, así que es la señal más fuerte. Con texto DÉBIL solo se juntan con precio
+    idéntico y sin habitaciones ni baños distintos (revisión del 29-oct: así quedaban bien los 15 casos
+    revisados; con texto débil, dos precios casi iguales son dos inmuebles parecidos de la misma zona).
 
 Candidatos: mismo tipo a menos de RADIO_KM. Luego un emparejamiento uno a uno: el par más parecido primero,
 y cada aviso queda en un solo par.
@@ -29,6 +31,7 @@ import pandas as pd
 
 RADIO_KM = 0.5
 TOPE = 5            # habitaciones y baños: Metrocuadrado publica 5 como «5 o más»
+TEXTO_DEBIL = 0.5   # por debajo, el texto no basta: hace falta precio idéntico y ficha que no se contradiga
 
 
 def _km(d: pd.DataFrame) -> np.ndarray:
@@ -123,14 +126,18 @@ def pares(a: pd.DataFrame, b: pd.DataFrame, radio_km: float = RADIO_KM) -> pd.Da
 def puntaje(P: pd.DataFrame) -> pd.Series:
     """Qué tan probable es que el par sea el mismo inmueble (0 a ~1). Reglas simples y legibles: el texto
     pesa más; área, habitaciones y baños tienen que cuadrar; la distancia y el precio suman. Piso distinto
-    casi veta; habitaciones y baños distintos a la vez restan, pero un texto casi idéntico aún los junta."""
+    casi veta; habitaciones y baños distintos a la vez restan, pero un texto casi idéntico aún los junta. Con
+    texto débil, lo que no sea precio idéntico y ficha sin contradicciones resta."""
     texto = P["sim_texto"].fillna(0)
     ficha = ((P["d_area"] <= 0.05).astype(float) * 0.5 + P["hab_igual"].fillna(0.5) * 0.25 + P["banos_igual"].fillna(0.5) * 0.25)
     cerca = np.clip(1 - P["dist_m"] / 300, 0, 1)
     precio = np.clip(1 - P["d_precio"].fillna(1) / 0.15, 0, 1) + 0.5 * (P["d_precio"] < 0.005)   # idéntico suma
     base = 0.45 * texto + 0.30 * ficha + 0.15 * cerca + 0.10 * precio
     otra_ficha = (P["hab_igual"] == 0) & (P["banos_igual"] == 0)
-    return base * np.where(P["piso_distinto"] == 1, 0.4, 1.0) * np.where(otra_ficha, 0.8, 1.0)
+    confirma = (P["d_precio"] < 0.005) & (P["hab_igual"] != 0) & (P["banos_igual"] != 0)   # sin dato no contradice
+    sin_apoyo = (texto < TEXTO_DEBIL) & ~confirma
+    return (base * np.where(P["piso_distinto"] == 1, 0.4, 1.0) * np.where(otra_ficha, 0.8, 1.0)
+            * np.where(sin_apoyo, 0.8, 1.0))
 
 
 def emparejar(P: pd.DataFrame, umbral: float = 0.6) -> pd.DataFrame:
