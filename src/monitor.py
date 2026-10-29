@@ -6,6 +6,8 @@ Monitor de salud del pipeline: un resumen diario por Telegram SOLO para el admin
             errores, altas, bajas, reaparecen y cambios de precio del día; el resultado de cada
             job y el del scraper viejo (que es el que dispara el barrido).
   fallo     un aviso corto cuando falla otro workflow (p. ej. la alerta de los lunes).
+  modelo    tras el entrenamiento semanal del modelo de precios (modelo.yml): el error de esta semana
+            frente a la anterior (fichas en R2, modelos/historial/), con aviso si empeora.
 
 Metrocuadrado (metrocuadrado.yml) manda su propio resumen al terminar, con
 `--raices m2_venta --titulo Metrocuadrado`.
@@ -17,6 +19,7 @@ Uso:
                                   [--scraper success|failure] [--url URL] [--local] [--no-enviar]
                                   [--raices venta,arriendo] [--titulo "Barrido diario"]
     python -m src.monitor fallo "La alerta semanal falló" [--url URL]
+    python -m src.monitor modelo [--fecha AAAA-MM-DD] [--url URL] [--no-enviar]
 """
 from __future__ import annotations
 import argparse
@@ -33,6 +36,8 @@ COBERTURA_MIN = 0.90    # del total que declara el portal
 ERRORES_MAX = 0.01      # páginas con error / páginas leídas
 BAJAS_MAX = 0.05        # bajas del día / activos: más que esto es un barrido roto, no el mercado
 CAMBIOS_MAX = 0.03      # cambios de precio del día / activos
+MODELO_SUBE_MAX = 0.01  # el error mediano en avisos nuevos no debe subir más de 1 punto en una semana
+COBERTURA_RANGO = (0.75, 0.85)   # el rango p10–p90 debe contener ~80% de los precios
 RAICES = {"venta": "Venta", "arriendo": "Arriendo", "m2_venta": "Metrocuadrado venta"}
 
 
@@ -125,6 +130,41 @@ def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | No
     return "\n\n".join([cabeza, *bloques] + ([f"🔗 {url}"] if url else []))
 
 
+def modelo(fecha: str, url: str | None) -> str:
+    """Resumen del entrenamiento semanal: la ficha de `fecha` frente a la de la semana anterior."""
+    from src import almacen
+    tmp = BASE_DIR / "data" / "_monitor"
+    shutil.rmtree(tmp / "modelos", ignore_errors=True)
+    almacen.traer("modelos/historial/", tmp)
+    fichas = {p.parent.name.split("=")[1]: json.loads(p.read_text())
+              for p in (tmp / "modelos" / "historial").glob("fecha=*/*.json")}
+    enlace = [f"🔗 {url}"] if url else []
+    if fecha not in fichas:
+        return "\n\n".join([f"*⚠️ Modelo de precios · {fecha}*\n• No hay ficha de hoy en R2: ¿falló el entrenamiento?"] + enlace)
+    f = fichas[fecha]
+    previas = sorted(k for k in fichas if k < fecha)
+    antes = fichas[previas[-1]] if previas else None
+    vs = lambda clave: f" (antes {_pct(antes[clave]['MdAPE'])})" if antes else ""
+    pi, nt = f["por_inmueble"], f["temporal"]
+    lineas = [f"{_n(f['avisos'])} avisos · publicados hasta {f['fecha_datos']}",
+              f"Por inmueble: error mediano {_pct(pi['MdAPE'])}{vs('por_inmueble')} · {_pct(pi['±10%'])} a ±10% · "
+              f"el rango p10–p90 contiene el {_pct(pi['cobertura_p10_p90'])}",
+              f"Avisos nuevos (desde {nt['publicados_desde']}): error mediano {_pct(nt['MdAPE'])}{vs('temporal')} · "
+              f"el rango contiene el {_pct(nt['cobertura_p10_p90'])}",
+              " · ".join(f"{t} {_pct(m['MdAPE'])}" for t, m in f["por_tipo"].items())]
+    avisos = []
+    if antes and nt["MdAPE"] > antes["temporal"]["MdAPE"] + MODELO_SUBE_MAX:
+        avisos.append(f"El error en avisos nuevos subió de {_pct(antes['temporal']['MdAPE'])} a {_pct(nt['MdAPE'])}")
+    for nombre, m in (("por inmueble", pi), ("en avisos nuevos", nt)):
+        if not COBERTURA_RANGO[0] <= m["cobertura_p10_p90"] <= COBERTURA_RANGO[1]:
+            avisos.append(f"El rango p10–p90 {nombre} contiene el {_pct(m['cobertura_p10_p90'])} (debería ~80%)")
+    if antes and f["avisos"] < 0.8 * antes["avisos"]:
+        avisos.append(f"Entrenó con {_n(f['avisos'])} avisos, frente a {_n(antes['avisos'])} la semana anterior")
+    titulo = (f"*⚠️ Modelo de precios · {fecha} · {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}*\n"
+              + "\n".join(f"• {a}" for a in avisos)) if avisos else f"*🧠 Modelo de precios · {fecha}*"
+    return "\n\n".join([titulo, "\n".join(lineas)] + enlace)
+
+
 def enviar(texto: str) -> None:
     """Al chat del administrador. Sin credenciales, el mensaje queda solo en el log."""
     from src.notificar import telegram
@@ -151,6 +191,10 @@ def main() -> None:
     f = sub.add_parser("fallo", help="aviso corto de que algo falló")
     f.add_argument("texto")
     f.add_argument("--url")
+    m = sub.add_parser("modelo", help="resumen del entrenamiento semanal del modelo de precios")
+    m.add_argument("--fecha", default=datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    m.add_argument("--url", help="enlace a la corrida")
+    m.add_argument("--no-enviar", action="store_true", help="solo imprime")
     a = p.parse_args()
 
     try:                                    # en local, las claves vienen de .env
@@ -160,6 +204,8 @@ def main() -> None:
         pass
     if a.accion == "fallo":
         texto = f"*⚠️ {a.texto}*" + (f"\n\n🔗 {a.url}" if a.url else "")
+    elif a.accion == "modelo":
+        texto = modelo(a.fecha, a.url)
     else:
         jobs = dict(j.split("=", 1) for j in a.jobs.split(",") if "=" in j)
         texto = resumen(a.fecha, jobs, a.scraper, a.url, a.local, tuple(a.raices.split(",")), a.titulo)

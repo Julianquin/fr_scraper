@@ -1,0 +1,4 @@
+# Entrenamiento semanal del modelo de precios en el CI (.github/workflows/modelo.yml, src/modelo_precio.py).
+# El CI diario no lo instala.
+-r requirements.txt
+lightgbm>=4.7         # eval_X/eval_y para el conjunto de validación

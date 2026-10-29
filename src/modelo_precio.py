@@ -1,7 +1,7 @@
 """
 Modelo de estimación de precios de vivienda (bloque E7): preparación de datos común a los notebooks
-(notebooks/modelo_precio_e7.ipynb, notebooks/comparacion_modelos_e7.ipynb) y, más adelante, al
-entrenamiento semanal en producción.
+(notebooks/modelo_precio_e7.ipynb, notebooks/comparacion_modelos_e7.ipynb) y entrenamiento semanal en
+el CI (.github/workflows/modelo.yml: los lunes tras el barrido; modelo y ficha a R2, modelos/).
 
 Datos: los avisos de venta ACTIVOS de estado/avisos (src/consolidar.py), solo vivienda
 (apartamento, apartaestudio, casa). Son precios pedidos, no de cierre.
@@ -552,6 +552,9 @@ if __name__ == "__main__":
             almacen.subir_archivo(ARCHIVO, "modelos/precio_vivienda.joblib")
             if FICHA.exists():
                 almacen.subir_archivo(FICHA, "modelos/precio_vivienda_ficha.json")
+                # Una ficha por semana, para comparar (src/monitor.py modelo); el modelo solo el vigente
+                hoy = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+                almacen.subir_archivo(FICHA, f"modelos/historial/fecha={hoy}/{FICHA.name}")
     else:
         modelo = ModeloPrecio.cargar()
         datos, _ = limpiar(cargar())

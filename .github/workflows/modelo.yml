@@ -1,0 +1,84 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Modelo de precios de vivienda (E7): entrenamiento semanal.
+#
+# Corre cuando termina el barrido diario (barrido_http.yml), pero solo sigue los LUNES (hora de
+# Colombia): entrena con los avisos activos recién consolidados, mide su error (la ficha) y sube a
+# R2 el modelo (modelos/precio_vivienda.joblib) y la ficha (+ una copia por fecha en
+# modelos/historial/). Luego manda al administrador el resumen frente a la semana anterior
+# (src/monitor.py modelo). Solo lee R2: no toca los portales ni el estado del mercado.
+#
+# Datos: estado/avisos (consolidar --bajar) y los servicios de OpenStreetMap (osm/, que se suben a
+# mano con `python -m src.osm_pois --subir` cuando se actualiza el extract). También se puede
+# lanzar a mano (entrena el día que sea).
+# ─────────────────────────────────────────────────────────────────────────────
+name: Modelo de precios (semanal)
+
+on:
+  workflow_run:
+    workflows: ["Barrido diario (venta y arriendo)"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modelo
+  cancel-in-progress: false
+
+jobs:
+  dia:
+    # Si el barrido se canceló, no se entrena: cancelar no debe lanzar el siguiente eslabón
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      seguir: ${{ steps.dia.outputs.seguir }}
+    steps:
+      - name: ¿Es lunes en Colombia?
+        id: dia
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=America/Bogota date +%u)" = "1" ]; then
+            echo "seguir=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Hoy no es lunes en Colombia: el modelo se entrena los lunes."
+          fi
+
+  entrenar:
+    needs: dia
+    if: needs.dia.outputs.seguir == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60             # ~7 min con 4 núcleos y ~2 GB de memoria (medido el 29-oct)
+    env:
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Instalar dependencias (requirements.txt + lightgbm)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-entrenamiento.txt
+      - name: Bajar de R2 los avisos y los servicios de OpenStreetMap
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.almacen traer osm/ --destino data
+      - name: Entrenar, medir y subir modelo y ficha a R2
+        run: python -m src.modelo_precio entrenar --subir
+      - name: Resumen al administrador
+        run: >-
+          python -m src.monitor modelo
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Avisar al administrador si algo falló
+        if: failure()
+        run: >-
+          python -m src.monitor fallo "El entrenamiento semanal del modelo de precios falló"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
