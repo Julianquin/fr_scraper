@@ -36,6 +36,9 @@ concurrency:
 
 jobs:
   plan:
+    # Si el workflow anterior se CANCELÓ, no se corre: cancelar una cadena no debe lanzar el
+    # siguiente eslabón (un workflow_run cancelado cuenta como "completed")
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -93,7 +96,7 @@ jobs:
 
   juntar:
     needs: barrer
-    if: always()                  # junta lo que haya, aunque algún grupo falle
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}   # junta lo que haya, aunque algún grupo falle
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -131,7 +134,7 @@ jobs:
   # ── Arriendos (E3) ─────────────────────────────────────────────────────────
   plan_arriendo:
     needs: juntar
-    if: ${{ !cancelled() }}       # independiente de que venta salga bien
+    if: ${{ !cancelled() && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled') }}   # independiente de que venta salga bien
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -227,7 +230,7 @@ jobs:
   # ── Monitor de salud ───────────────────────────────────────────────────────
   monitor:
     needs: [plan, barrer, juntar, plan_arriendo, barrer_arriendo, juntar_arriendo]
-    if: always()                  # justo cuando algo falla es cuando más importa
+    if: ${{ !cancelled() && needs.plan.result != 'skipped' }}   # justo cuando algo falla es cuando más importa
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
