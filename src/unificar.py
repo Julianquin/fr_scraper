@@ -15,18 +15,29 @@ Cómo:
      edificios encadenaría inmuebles distintos). Además, un grupo no puede tener dos avisos del mismo
      anunciante en el mismo portal, dos pisos distintos ni más de GRUPO_MAX avisos.
 
-Salida (data/unificado/, no se versiona):
-  avisos.parquet     una fila por aviso: portal, id_inmueble, id_unificado y avisos de su grupo
-  inmuebles.parquet  una fila por inmueble: n_avisos, portales, precio mínimo, mediano y máximo, ficha
+Estado unificado (data/estado_unificado/ y estado_unificado/ en R2), al final del barrido de Metrocuadrado:
+  avisos.parquet     1 fila por aviso que haya estado en el registro: portal, id, url, precio, su inmueble
+                     (id_unificado), activo y desde cuándo está en ese inmueble
+  inmuebles.parquet  1 fila por inmueble que haya existido: primera_vez (la del aviso más antiguo),
+                     ultima_vez, activo, avisos, portales, ficha y precios; fusionado_en si se juntó con otro
+  historial/fecha=…  los avisos que ese día entraron a un inmueble, cambiaron de inmueble o salieron
+  meta.json          último día, último id y resumen del día (lo lee el monitor)
 
-`id_unificado` = el aviso más antiguo del grupo ("portal:id"). Todavía no es estable de un día a otro:
-eso llega con el estado unificado (BACKLOG E8).
+`id_unificado` es un número que no cambia aunque entren o salgan avisos de su grupo. Cada día, con los
+grupos de hoy y el id que tenía cada aviso:
+  - cada id pasa al grupo de hoy que tiene más de sus avisos (si el grupo se parte, el resto recibe otro);
+  - si a un grupo le llegan varios ids, se queda con el más antiguo (el menor) y los demás quedan
+    `fusionado_en` él;
+  - un grupo sin ningún aviso conocido recibe un id nuevo (consecutivos, del aviso más antiguo al más nuevo);
+  - un inmueble sin avisos activos queda inactivo con su id, y lo recupera si vuelve uno de sus avisos.
 
 Uso:
-    python -m src.unificar [--ciudad Cali]
+    python -m src.unificar [--ciudad Cali]              # foto del día en data/unificado/ (análisis, sin estado)
+    python -m src.unificar --fecha 2026-10-29 [--bajar] [--subir]   # el CI: estado unificado del día
 """
 from __future__ import annotations
 import argparse
+import json
 import time
 
 import numpy as np
@@ -46,6 +57,8 @@ UMBRAL = 0.65
 UMBRAL_TODOS = 0.5      # el par más débil del grupo resultante (vínculo completo)
 GRUPO_MAX = 6
 SALIDA = BASE_DIR / "data" / "unificado"
+ESTADO = BASE_DIR / "data" / "estado_unificado"
+R2 = "estado_unificado"
 
 
 def cargar(ciudad: str | None = None) -> pd.DataFrame:
@@ -61,6 +74,7 @@ def cargar(ciudad: str | None = None) -> pd.DataFrame:
     d = pd.concat(partes, ignore_index=True)
     d["id_inmueble"] = d["id_inmueble"].astype(str)
     d["anunciante_id"] = d["anunciante_id"].astype(str).where(d["anunciante_id"].notna())
+    d["primera_vez"] = d["primera_vez"].astype(str)
     d["clave"] = d["portal"] + ":" + d["id_inmueble"]
     return d
 
@@ -122,46 +136,190 @@ def agrupar(d: pd.DataFrame, P: pd.DataFrame, umbral: float = UMBRAL) -> np.ndar
     return np.array([raiz(k) for k in range(len(d))])
 
 
-def unificar(ciudad: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """(avisos con su id_unificado, inmuebles, pares puntuados)."""
+def grupos(d: pd.DataFrame) -> tuple[np.ndarray, pd.DataFrame]:
+    """(grupo de cada aviso, pares puntuados)."""
     t0 = time.time()
-    d = cargar(ciudad)
     i, j = candidatos(d)
     print(f"{len(d):,} avisos · {len(i):,} pares candidatos · {time.time() - t0:.0f} s", flush=True)
     T = matriz_texto(_texto(d))
     P = señales(d, d, i, j, T, T)
     P["puntaje"] = puntaje(P).astype(np.float32)
-    print(f"señales y puntaje · {time.time() - t0:.0f} s", flush=True)
     g = agrupar(d, P)
-    d["primera_vez"] = d["primera_vez"].astype(str)
+    print(f"{len(set(g)):,} inmuebles · {time.time() - t0:.0f} s", flush=True)
+    return g, P
+
+
+def resumir(d: pd.DataFrame) -> pd.DataFrame:
+    """Una fila por inmueble (`id_unificado`) con sus avisos, portales, ficha y precios."""
+    num = lambda c: pd.to_numeric(d[c], errors="coerce")
+    return d.assign(precio=num("precio"), m2=num("m2"), habitaciones=num("habitaciones"),
+                    latitud=num("latitud"), longitud=num("longitud")).groupby("id_unificado").agg(
+        n_avisos=("clave", "size"), portales=("portal", lambda s: "+".join(sorted(set(s)))),
+        primera_vez=("primera_vez", "min"), tipo=("tipo", "first"), ciudad=("ciudad", "first"),
+        barrio=("barrio", "first"), latitud=("latitud", "mean"), longitud=("longitud", "mean"), m2=("m2", "median"),
+        habitaciones=("habitaciones", "median"), precio_min=("precio", "min"),
+        precio_mediano=("precio", "median"), precio_max=("precio", "max")).reset_index()
+
+
+def unificar(ciudad: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Foto del día, sin estado: (avisos con su id_unificado, inmuebles, pares puntuados). Aquí el id es
+    la clave del aviso más antiguo del grupo ("portal:id")."""
+    d = cargar(ciudad)
+    g, P = grupos(d)
     orden = d.sort_values(["primera_vez", "clave"])
     rep = orden.groupby(g[orden.index])["clave"].first()                  # el aviso más antiguo del grupo
     d["id_unificado"] = rep.reindex(g).to_numpy()
     d["avisos_en_grupo"] = d.groupby("id_unificado")["clave"].transform("size")
-    num = lambda c: pd.to_numeric(d[c], errors="coerce")
-    inm = d.assign(precio=num("precio"), m2=num("m2"), habitaciones=num("habitaciones"),
-                   latitud=num("latitud"), longitud=num("longitud")).groupby("id_unificado").agg(
-        n_avisos=("clave", "size"), portales=("portal", lambda s: "+".join(sorted(set(s)))),
-        tipo=("tipo", "first"), ciudad=("ciudad", "first"), barrio=("barrio", "first"),
-        latitud=("latitud", "mean"), longitud=("longitud", "mean"), m2=("m2", "median"),
-        habitaciones=("habitaciones", "median"), precio_min=("precio", "min"),
-        precio_mediano=("precio", "median"), precio_max=("precio", "max")).reset_index()
-    print(f"{len(inm):,} inmuebles · {time.time() - t0:.0f} s", flush=True)
-    return d.drop(columns=["descripcion"]), inm, P
+    return d.drop(columns=["descripcion"]), resumir(d), P
+
+
+# ── Estado unificado: id estable de un día a otro ─────────────────────────────
+
+
+def cargar_estado() -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    if (ESTADO / "avisos.parquet").exists():
+        return (pd.read_parquet(ESTADO / "avisos.parquet"), pd.read_parquet(ESTADO / "inmuebles.parquet"),
+                json.loads((ESTADO / "meta.json").read_text()))
+    return (pd.DataFrame(columns=["clave", "id_unificado", "activo", "desde"]),
+            pd.DataFrame(columns=["id_unificado", "primera_vez", "activo", "fusionado_en"]),
+            {"ultimo_dia": None, "dias": [], "ultimo_id": 0})
+
+
+def asignar(d: pd.DataFrame, g: np.ndarray, avisos: pd.DataFrame, inmuebles: pd.DataFrame,
+            ultimo_id: int) -> tuple[np.ndarray, pd.DataFrame, int, int]:
+    """id estable de cada aviso de hoy con las reglas del docstring del módulo.
+    (ids, fusiones viejo → en, ids partidos, nuevo último id)."""
+    fusion = dict(inmuebles.dropna(subset=["fusionado_en"])[["id_unificado", "fusionado_en"]].astype(int).to_numpy())
+
+    def vigente(i: int) -> int:                 # el id en que terminó una cadena de fusiones
+        while i in fusion:
+            i = fusion[i]
+        return i
+    viejo = d["clave"].map(avisos.set_index("clave")["id_unificado"]).map(vigente, na_action="ignore")
+    t = pd.DataFrame({"grupo": g, "viejo": viejo.to_numpy()}).dropna()
+    n = t.value_counts().rename("n").reset_index().sort_values(["viejo", "n", "grupo"], ascending=[True, False, True])
+    dueño = n.drop_duplicates("viejo").set_index("viejo")["grupo"]        # cada id viejo → su grupo de hoy
+    gana = dueño.reset_index().groupby("grupo")["viejo"].min()             # cada grupo → el id más antiguo
+    fusiones = dueño.map(gana).rename("en").reset_index().query("viejo != en").astype(int)
+    orden = pd.Series(g, index=d.index).loc[d.sort_values(["primera_vez", "clave"]).index]
+    sin_id = [x for x in pd.unique(orden) if x not in gana.index]
+    gana = pd.concat([gana, pd.Series(np.arange(ultimo_id + 1, ultimo_id + 1 + len(sin_id)), index=sin_id)])
+    partidos = int((n.groupby("viejo").size() > 1).sum())
+    return gana.reindex(g).astype("int64").to_numpy(), fusiones, partidos, ultimo_id + len(sin_id)
+
+
+def actualizar(fecha: str, d: pd.DataFrame | None = None) -> dict:
+    """Aplica los avisos activos de `fecha` sobre el estado unificado y escribe el historial del día.
+    `d`: la tabla de cargar() (por defecto, los estados de los dos portales en data/)."""
+    from src.almacen import COMPRESION
+    from src.fincaraiz_http import guardar_parquet
+    avisos, inmuebles, meta = cargar_estado()
+    if meta["ultimo_dia"] and fecha <= meta["ultimo_dia"]:
+        raise ValueError(f"El {fecha} ya está procesado (último: {meta['ultimo_dia']}).")
+    d = cargar() if d is None else d.reset_index(drop=True)
+    g, _ = grupos(d)
+    ids, fusiones, partidos, meta["ultimo_id"] = asignar(d, g, avisos, inmuebles, meta["ultimo_id"])
+    d["id_unificado"] = ids
+
+    # Avisos: los de hoy activos con su id; los demás, inactivos con el último que tuvieron
+    antes = avisos.set_index("clave")
+    id_antes = d["clave"].map(antes["id_unificado"])
+    activo_antes = d["clave"].map(antes["activo"]).fillna(False).astype(bool)
+    hoy = d[["clave", "portal", "id_inmueble", "url", "precio", "id_unificado"]].assign(
+        activo=True, desde=np.where(id_antes == d["id_unificado"], d["clave"].map(antes["desde"]), fecha))
+    salen = avisos[avisos["activo"].astype(bool) & ~avisos["clave"].isin(d["clave"])]
+    avisos = pd.concat([hoy, avisos[~avisos["clave"].isin(d["clave"])].assign(activo=False)], ignore_index=True)
+    cambia = activo_antes & (id_antes != d["id_unificado"])
+    hist = pd.concat([
+        pd.DataFrame({"clave": d["clave"], "evento": "entra", "id_antes": id_antes, "id_despues": d["id_unificado"]})[~activo_antes],
+        pd.DataFrame({"clave": d["clave"], "evento": "cambia", "id_antes": id_antes, "id_despues": d["id_unificado"]})[cambia],
+        pd.DataFrame({"clave": salen["clave"], "evento": "sale", "id_antes": salen["id_unificado"], "id_despues": np.nan}),
+    ], ignore_index=True).assign(fecha=fecha)
+
+    # Inmuebles: los de hoy activos; los demás inactivos (y fusionado_en si se juntaron con otro)
+    previo = inmuebles.set_index("id_unificado")
+    nuevos = resumir(d).set_index("id_unificado")
+    hoy_pv = nuevos["primera_vez"].astype(str)
+    antes_pv = previo["primera_vez"].reindex(nuevos.index).fillna(hoy_pv).astype(str)
+    nuevos["primera_vez"] = np.where(antes_pv < hoy_pv, antes_pv, hoy_pv)     # la más antigua
+    nuevos = nuevos.assign(activo=True, ultima_vez=fecha, fusionado_en=np.nan)
+    resto = previo.drop(nuevos.index, errors="ignore")
+    era_activo = resto["activo"].astype(bool) & ~resto.index.isin(fusiones["viejo"])
+    resto = resto.assign(activo=False)
+    resto.loc[fusiones["viejo"].to_numpy(), "fusionado_en"] = fusiones["en"].to_numpy()
+    cerrados = int(era_activo.sum())
+    inmuebles = pd.concat([nuevos, resto]).reset_index().astype({"n_avisos": "int64"})
+
+    ESTADO.mkdir(parents=True, exist_ok=True)
+    (ESTADO / "historial").mkdir(exist_ok=True)
+    guardar_parquet(avisos, ESTADO / "avisos.parquet", compression=COMPRESION)
+    guardar_parquet(inmuebles, ESTADO / "inmuebles.parquet", compression=COMPRESION)
+    guardar_parquet(hist, ESTADO / "historial" / f"fecha={fecha}.parquet", compression=COMPRESION)
+    siguen = int(activo_antes.sum())
+    multi = nuevos[nuevos["n_avisos"] > 1]
+    resumen = {"fecha": fecha, "avisos_activos": len(d), "inmuebles_activos": len(nuevos),
+               "con_2_o_mas_avisos": len(multi), "en_los_dos_portales": int(multi["portales"].str.contains(r"\+").sum()),
+               "inmuebles_nuevos": int(len(nuevos) - nuevos.index.isin(previo.index).sum()),
+               "inmuebles_cerrados": cerrados, "fusionados": len(fusiones), "partidos": partidos,
+               "avisos_entran": int((~activo_antes).sum()), "avisos_salen": len(salen),
+               "avisos_cambian": int(cambia.sum()),
+               "estabilidad": round(1 - cambia.sum() / siguen, 4) if siguen else None}
+    meta = meta | {"ultimo_dia": fecha, "dias": meta["dias"] + [fecha], "ultimo_resumen": resumen}
+    (ESTADO / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    print(json.dumps(resumen, ensure_ascii=False))
+    return resumen
+
+
+def subir(fecha: str) -> None:
+    """Estado (+ respaldo diario), historial del día y meta a R2."""
+    from src import almacen
+    for nombre in ("avisos.parquet", "inmuebles.parquet"):
+        almacen.subir_archivo(ESTADO / nombre, f"{R2}/{nombre}")
+        almacen.subir_archivo(ESTADO / nombre, f"respaldos/diario/fecha={fecha}/unificado_{nombre}")
+    almacen.subir_archivo(ESTADO / "historial" / f"fecha={fecha}.parquet", f"{R2}/historial/fecha={fecha}.parquet")
+    almacen.subir_archivo(ESTADO / "meta.json", f"{R2}/meta.json")
+
+
+def bajar() -> None:
+    """Trae de R2 el estado de los dos portales y el unificado (si existe) para continuar desde ahí."""
+    from src import almacen, consolidar
+    for raiz in PORTALES.values():
+        consolidar.bajar(raiz)
+    tmp = BASE_DIR / "data" / "_r2tmp"
+    for nombre in ("avisos.parquet", "inmuebles.parquet", "meta.json"):
+        almacen.traer(f"{R2}/{nombre}", tmp)
+    if (tmp / R2 / "meta.json").exists():
+        ESTADO.mkdir(parents=True, exist_ok=True)
+        for nombre in ("avisos.parquet", "inmuebles.parquet", "meta.json"):
+            (tmp / R2 / nombre).replace(ESTADO / nombre)
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Un solo registro por inmueble (E8)")
-    p.add_argument("--ciudad", help="solo esta ciudad (por defecto, todo el país)")
+    p.add_argument("--ciudad", help="foto del día: solo esta ciudad (por defecto, todo el país)")
+    p.add_argument("--fecha", help="aplica el día al estado unificado (AAAA-MM-DD)")
+    p.add_argument("--bajar", action="store_true", help="trae de R2 los estados antes de aplicar")
+    p.add_argument("--subir", action="store_true", help="sube el estado unificado del día a R2")
     a = p.parse_args()
-    avisos, inmuebles, _ = unificar(a.ciudad)
-    SALIDA.mkdir(parents=True, exist_ok=True)
-    cols = ["clave", "portal", "id_inmueble", "id_unificado", "avisos_en_grupo", "tipo", "ciudad", "barrio",
-            "precio", "m2", "habitaciones", "anunciante_id", "url"]
-    avisos[cols].to_parquet(SALIDA / "avisos.parquet", index=False)
-    inmuebles.to_parquet(SALIDA / "inmuebles.parquet", index=False)
-    por_portal = avisos.groupby("portal").size().to_dict()
-    multi = inmuebles[inmuebles["n_avisos"] > 1]
-    print(f"✅ {len(avisos):,} avisos ({por_portal}) → {len(inmuebles):,} inmuebles "
-          f"({1 - len(inmuebles) / len(avisos):.1%} menos) · {len(multi):,} con 2+ avisos, de ellos "
-          f"{(multi['portales'] == 'fincaraiz+metrocuadrado').sum():,} en los dos portales")
+    if a.bajar:
+        bajar()
+    if a.fecha:
+        try:
+            actualizar(a.fecha)
+        except ValueError as e:                      # p. ej. Metrocuadrado relanzado el mismo día
+            print(f"⚠️  {e} No se aplica de nuevo.")
+        else:
+            if a.subir:
+                subir(a.fecha)
+    elif not a.bajar:
+        avisos, inmuebles, _ = unificar(a.ciudad)
+        SALIDA.mkdir(parents=True, exist_ok=True)
+        cols = ["clave", "portal", "id_inmueble", "id_unificado", "avisos_en_grupo", "tipo", "ciudad", "barrio",
+                "precio", "m2", "habitaciones", "anunciante_id", "url"]
+        avisos[cols].to_parquet(SALIDA / "avisos.parquet", index=False)
+        inmuebles.to_parquet(SALIDA / "inmuebles.parquet", index=False)
+        por_portal = avisos.groupby("portal").size().to_dict()
+        multi = inmuebles[inmuebles["n_avisos"] > 1]
+        print(f"✅ {len(avisos):,} avisos ({por_portal}) → {len(inmuebles):,} inmuebles "
+              f"({1 - len(inmuebles) / len(avisos):.1%} menos) · {len(multi):,} con 2+ avisos, de ellos "
+              f"{(multi['portales'] == 'fincaraiz+metrocuadrado').sum():,} en los dos portales")

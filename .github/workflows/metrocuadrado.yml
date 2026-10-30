@@ -4,7 +4,7 @@
 # Corre al final de todo: arranca cuando termina el barrido diario de FincaRaíz
 # (barrido_http.yml, que a su vez arranca tras el scraper diario), así nunca compite con
 # los workflows que ya existen. No toca nada de FincaRaíz: escribe solo en R2
-# raw/m2_venta_http/fecha=…/ y estado_m2_venta/ (+ su respaldo en respaldos/).
+# raw/m2_venta_http/fecha=…/, estado_m2_venta/ y estado_unificado/ (+ sus respaldos en respaldos/).
 #
 #   Job 1 (plan):    totales por tipo y departamento (los grandes, por habitaciones) → unidades
 #                    repartidas en 4 grupos (src/metrocuadrado_http.py)
@@ -12,7 +12,10 @@
 #                    públicas de listado, ~3,5 s por página con la pausa de cortesía)
 #   Job 3 (juntar):  une, deduplica, mide la cobertura y sube crudo + reporte a R2; luego
 #                    consolida altas, bajas y cambios de precio (src/consolidar.py --raiz m2_venta)
-#   Job 4 (monitor): resumen por Telegram SOLO al administrador (src/monitor.py). Corre siempre.
+#   Job 4 (unificar): un solo registro por inmueble con FincaRaíz y Metrocuadrado, con un id que no
+#                    cambia de un día a otro (src/unificar.py → estado_unificado/)
+#   Job 5 (monitor): resumen por Telegram SOLO al administrador (src/monitor.py), con el registro
+#                    único. Corre siempre.
 #
 # Corre aunque el barrido de FincaRaíz falle: son independientes. También se puede lanzar a mano.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,9 +135,34 @@ jobs:
           echo "fecha=$FECHA" >> "$GITHUB_OUTPUT"
           python -m src.consolidar --raiz m2_venta --bajar --fecha "$FECHA" --subir
 
+  # ── Un solo registro por inmueble (E8): FincaRaíz + Metrocuadrado ─────────
+  unificar:
+    needs: [juntar]
+    if: ${{ !cancelled() && needs.juntar.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30            # ~3 min y ~8 GB con todo el país (29-oct)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Estado unificado del día (id estable por inmueble)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          FECHA: ${{ needs.juntar.outputs.fecha }}
+        run: python -m src.unificar --bajar --fecha "$FECHA" --subir
+
   # ── Monitor de salud ───────────────────────────────────────────────────────
   monitor:
-    needs: [plan, barrer, juntar]
+    needs: [plan, barrer, juntar, unificar]
     if: ${{ !cancelled() && needs.plan.result != 'skipped' }}   # justo cuando algo falla es cuando más importa
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -158,7 +186,7 @@ jobs:
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
           FECHA: ${{ needs.juntar.outputs.fecha }}
         run: |
-          python -m src.monitor resumen --raices m2_venta --titulo "Metrocuadrado" \
+          python -m src.monitor resumen --raices m2_venta --titulo "Metrocuadrado" --unificado \
             ${FECHA:+--fecha "$FECHA"} \
-            --jobs "plan=${{ needs.plan.result }},barrer=${{ needs.barrer.result }},juntar=${{ needs.juntar.result }}" \
+            --jobs "plan=${{ needs.plan.result }},barrer=${{ needs.barrer.result }},juntar=${{ needs.juntar.result }},unificar=${{ needs.unificar.result }}" \
             --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
