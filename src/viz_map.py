@@ -57,8 +57,8 @@ def _cargar_todo() -> pd.DataFrame:
 
 
 def con_zonas(ciudad: str) -> bool:
-    """Hay polígonos oficiales para esta ciudad (por ahora solo Cali)."""
-    return zonas.normalizar(ciudad) == "cali"
+    """Hay polígonos de comunas y de barrios para esta ciudad (el mapa los alterna con el zoom)."""
+    return zonas.tiene_zonas(ciudad) and (zonas.GEO_DIR / f"{zonas.slug(ciudad)}_barrios.geojson").exists()
 
 
 def cargar_ciudad(ciudad: str) -> pd.DataFrame:
@@ -88,11 +88,11 @@ def limpiar_ciudad(df: pd.DataFrame, ciudad: str, precio_min: float = 1e7) -> pd
     lo, hi = df["precio_m2"].quantile([0.01, 0.99])
     df = df[df["precio_m2"].between(lo, hi)]
 
-    if con_zonas(ciudad):
-        df = zonas.asignar_zonas(df)
+    if zonas.tiene_zonas(ciudad):
+        df = zonas.asignar_zonas(df, ciudad)
         df = df[df["barrio_oficial"].notna() | df["Latitud"].notna()]
-    else:
-        df = df.dropna(subset=["Latitud", "Longitud"])
+    else:                       # sin polígonos: la alerta busca comparables a 1 km (src/oportunidades.py)
+        df = df.dropna(subset=["Latitud", "Longitud"]).assign(barrio_oficial=None, comuna=None)
     if df.empty:
         raise ValueError(f"No quedaron inmuebles válidos para '{ciudad}'.")
     return df.reset_index(drop=True)
@@ -112,18 +112,19 @@ def _popup_html(row: pd.Series) -> str:
     </div>"""
 
 
-def _capa_zonas(df: pd.DataFrame, nivel: str, col: str, cmap: LinearColormap) -> folium.GeoJson:
+def _capa_zonas(df: pd.DataFrame, nivel: str, col: str, cmap: LinearColormap, ciudad: str = "Cali") -> folium.GeoJson:
     """Polígonos de `nivel` coloreados por mediana de precio/m² de los avisos en `col`."""
     pm = (df["precio_m2"] / 1e6).groupby(df[col])
     stats = pd.DataFrame({"n": pm.size(), "med": pm.median(),
                           "p25": pm.quantile(.25), "p75": pm.quantile(.75)})
-    gj = zonas.cargar(nivel)
+    gj = zonas.cargar(nivel, ciudad)
     clave = "nombre" if nivel == "barrios" else "codigo"
     for f in gj["features"]:
         p = f["properties"]
         s = stats.loc[p[clave]] if p[clave] in stats.index else None
         n = int(s["n"]) if s is not None else 0
-        titulo = p["nombre"] if nivel == "comunas" else f"{p['nombre']} · Comuna {p['comuna']}"
+        titulo = (p["nombre"] if nivel == "comunas"
+                  else f"{p['nombre']} · {zonas.division(ciudad).capitalize()} {p['comuna']}")
         if n >= MIN_AVISOS:
             p["color"] = cmap(s["med"])
             p["info"] = (f"<b>{titulo}</b><br>{n:,} avisos · mediana <b>{s['med']:.1f}</b> M/m²"
@@ -168,8 +169,8 @@ def construir_mapa(df: pd.DataFrame, ciudad: str) -> folium.Map:
     # --- Zonas oficiales (comunas / barrios) ---
     capas_zona = {}
     if con_zonas(ciudad):
-        capas_zona["comunas"] = _capa_zonas(df, "comunas", "comuna", cmap).add_to(m)
-        capas_zona["barrios"] = _capa_zonas(df, "barrios", "barrio_oficial", cmap).add_to(m)
+        capas_zona["comunas"] = _capa_zonas(df, "comunas", "comuna", cmap, ciudad).add_to(m)
+        capas_zona["barrios"] = _capa_zonas(df, "barrios", "barrio_oficial", cmap, ciudad).add_to(m)
 
     # --- Avisos individuales ---
     fg_avisos = folium.FeatureGroup(name="Avisos", control=False)
