@@ -34,7 +34,7 @@ ZOOM_BARRIOS = 13       # desde este zoom se ven barrios en vez de comunas
 ZOOM_AVISOS = 15        # desde este zoom aparecen los avisos individuales
 
 
-FUENTE = "master"     # "master": scraper actual · "http": barrido por segmentos (src/fuente_http.py)
+FUENTE = "http"       # "http": barrido diario (src/fuente_http.py) · "master": scraper viejo, para comparar
 
 
 def _cargar_todo() -> pd.DataFrame:
@@ -269,8 +269,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ciudad", default="Cali", help="Ciudad a mapear (coincide con la columna Ciudad)")
     parser.add_argument("--out", default=None, help="Ruta del HTML de salida")
-    parser.add_argument("--fuente", choices=["master", "http"], default="master",
-                        help="datos del scraper actual (master) o del barrido por segmentos (http)")
+    parser.add_argument("--fuente", choices=["http", "master"], default="http",
+                        help="datos del barrido diario (http) o del scraper viejo (master), para comparar")
     args = parser.parse_args()
     FUENTE = args.fuente
 

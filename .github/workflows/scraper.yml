@@ -1,11 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Scraper de FincaRaíz por MATRIZ de departamentos.
+# Scraper VIEJO de FincaRaíz por MATRIZ de departamentos. SIN HORARIO desde el cambio
+# de fuente (2-nov-2026): los datos salen del barrido diario (barrido_http.yml) y el mapa
+# de mapa.yml. Queda solo para lanzarlo a mano mientras se confirma que no hace falta.
 #
 #   Job 1 (scrape): un job por departamento en paralelo (máx. N a la vez).
 #                   Cada uno scrapea urls/<depto>.txt y sube sus CSV como artifact.
 #   Job 2 (merge):  descarga todos los artifacts, corre ingest, reconstruye el
 #                   dataset del dashboard y lo sube a Cloudflare R2.
-#   Job 3 (pages):  regenera el mapa con el dataset de R2 y lo publica.
 #
 # Los datos viven en R2 (src/almacen.py), no en git: cada job los baja al
 # empezar y el merge los sube al terminar, con un respaldo diario.
@@ -25,8 +26,6 @@ on:
 
 permissions:
   contents: read      # los datos ya no se commitean: van a R2
-  pages: write        # deploy a GitHub Pages
-  id-token: write     # requerido por actions/deploy-pages
 
 env:
   R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -142,34 +141,3 @@ jobs:
           python -m src.almacen raw --fecha "$(date -u +%F)"
           python -m src.almacen subir --fecha "$(date -u +%F)"
 
-  # ── 3) Regenerar el mapa con datos frescos y publicar en GitHub Pages ──
-  pages:
-    needs: merge                  # solo si el merge terminó OK (dataset fresco listo)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Instalar dependencias
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Bajar el dataset fresco desde R2
-        run: python -m src.almacen bajar --solo app/housing_clean.parquet
-      - name: Regenerar mapas en docs/ con datos frescos
-        run: python -m src.viz_map --ciudad Cali --out docs/cali.html
-      - name: Configurar Pages
-        uses: actions/configure-pages@v5
-      - name: Empaquetar docs/ como artifact de Pages
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-      - name: Deploy a GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4

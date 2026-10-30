@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Barrido diario de FincaRaíz por HTTP y por segmentos: venta (E1) y arriendo (E3).
-#
-# Corre en paralelo al scraper actual (scraper.yml) y NO lo toca: no escribe en
-# master/, events ni app/. Solo deja su crudo en R2: raw/venta_http/fecha=…/
+# Es LA fuente de datos desde el cambio de fuente (2-nov-2026): el scraper viejo
+# (scraper.yml) quedó sin horario. Deja su crudo en R2 (raw/venta_http/fecha=…/) y
+# el estado del mercado (estado/, estado_arriendo/).
 #
 #   Job 1 (plan):   arma el árbol de segmentos (src/segmentos.py) y lo reparte en 4 grupos
 #   Job 2 (barrer): 4 jobs en paralelo, cada uno recorre entero su grupo de segmentos
@@ -12,20 +12,18 @@
 #                   ~30 min), DESPUÉS de venta para no leer el portal dos veces a la vez.
 #                   Corren aunque venta falle. R2: raw/arriendo_http/ y estado_arriendo/
 #   Job 7 (monitor): resumen del día por Telegram SOLO al administrador (src/monitor.py):
-#                   cobertura, altas, bajas, cambios de precio, jobs fallidos y si falló el
-#                   scraper viejo. Corre siempre; si un día no llega, algo no corrió.
+#                   cobertura, altas, bajas, cambios de precio y jobs fallidos. Corre
+#                   siempre; si un día no llega, algo no corrió.
 #
-# Arranca cuando termina el scraper diario (como la alerta), así nunca leen el portal a la vez
-# aunque GitHub atrase las tareas programadas. Corre aunque el scraper diario falle: son
-# independientes. También se puede lanzar a mano.
+# Lo lanza a las 00:00 de Colombia el disparador de Cloudflare (cloudflare/disparador/): las
+# tareas programadas de GitHub llegaban con 4–6 h de retraso. Al terminar se encadenan el mapa
+# (mapa.yml) y Metrocuadrado (metrocuadrado.yml); la alerta de los lunes la lanza el mismo
+# disparador a las 07:00. También se puede lanzar a mano.
 # ─────────────────────────────────────────────────────────────────────────────
 name: Barrido diario (venta y arriendo)
 
 on:
-  workflow_run:
-    workflows: ["Scraper diario FincaRaíz (matriz por departamento)"]
-    types: [completed]
-  workflow_dispatch:
+  workflow_dispatch:             # 00:00 de Colombia, desde Cloudflare
 
 permissions:
   contents: read
@@ -254,5 +252,4 @@ jobs:
         run: |
           python -m src.monitor resumen \
             --jobs "plan=${{ needs.plan.result }},barrer=${{ needs.barrer.result }},juntar=${{ needs.juntar.result }},plan_arriendo=${{ needs.plan_arriendo.result }},barrer_arriendo=${{ needs.barrer_arriendo.result }},juntar_arriendo=${{ needs.juntar_arriendo.result }}" \
-            --scraper "${{ github.event.workflow_run.conclusion }}" \
             --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

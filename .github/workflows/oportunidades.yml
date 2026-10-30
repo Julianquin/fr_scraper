@@ -1,8 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Alerta semanal de oportunidades (Cali).
 #
-#   Corre cuando termina el scraper diario, pero solo sigue si en Colombia es
-#   lunes: así usa siempre los datos recién actualizados. Genera la alerta con
+#   La lanza el disparador de Cloudflare (cloudflare/disparador/) los lunes a las 07:00 de
+#   Colombia: el barrido arranca a medianoche, así que a esa hora ya está consolidado, y los
+#   agentes la reciben en la mañana y no de madrugada. También se puede lanzar a mano (ojo:
+#   a mano se envía a los agentes el día que sea). Lee el estado del
+#   barrido (estado/ y estado_arriendo/ en R2, --fuente http): fecha real de publicación,
+#   bajadas de precio de cada día y rentabilidad con los arriendos. Genera la alerta con
 #   src/oportunidades.py y la envía con src/notificar.py a los canales que
 #   tengan secrets configurados (Settings → Secrets and variables → Actions):
 #     - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
@@ -15,9 +19,6 @@
 name: Alerta semanal de oportunidades
 
 on:
-  workflow_run:
-    workflows: ["Scraper diario FincaRaíz (matriz por departamento)"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       ciudad:
@@ -31,43 +32,31 @@ jobs:
   alerta:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: ¿Es lunes en Colombia?
-        id: dia
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=America/Bogota date +%u)" = "1" ]; then
-            echo "seguir=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Hoy no es lunes en Colombia; no se envía alerta."
-          fi
       - uses: actions/checkout@v4
-        if: steps.dia.outputs.seguir == 'true'
         with:
           ref: ${{ github.event.repository.default_branch }}   # el código; los datos vienen de R2
       - uses: actions/setup-python@v5
-        if: steps.dia.outputs.seguir == 'true'
         with:
           python-version: "3.12"
           cache: pip
       - name: Instalar dependencias
-        if: steps.dia.outputs.seguir == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Bajar datos actuales desde R2
-        if: steps.dia.outputs.seguir == 'true'
+      - name: Bajar el estado del barrido desde R2 (venta, su historial y arriendos)
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.almacen bajar
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.consolidar --raiz arriendo --bajar
+          python -m src.almacen traer estado/historial/ --destino data
       - name: Generar alerta
-        if: steps.dia.outputs.seguir == 'true'
-        run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}"
+        run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}" --fuente http
       - name: Enviar alerta
-        if: steps.dia.outputs.seguir == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

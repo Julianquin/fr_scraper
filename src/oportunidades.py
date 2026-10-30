@@ -22,6 +22,7 @@ Salidas en reports/oportunidades/ (no se versionan; son para revisión humana):
 Uso:
     python -m src.oportunidades                       # Cali, semana que termina en el último dato
     python -m src.oportunidades --fecha 2026-10-23 --umbral 0.2 --top 10
+    python -m src.oportunidades --fuente master       # con el scraper viejo, para comparar
 """
 from __future__ import annotations
 import argparse
@@ -55,7 +56,7 @@ def _etiquetas(s) -> list[str]:
         return []
 
 
-FUENTE = "master"     # "master": scraper actual · "http": barrido por segmentos (src/fuente_http.py)
+FUENTE = "http"       # "http": barrido diario (src/fuente_http.py) · "master": scraper viejo, para comparar
 
 
 def _eventos() -> pd.DataFrame:
@@ -361,8 +362,8 @@ def main() -> None:
     p.add_argument("--dias", type=int, default=7)
     p.add_argument("--umbral", type=float, default=0.20)
     p.add_argument("--top", type=int, default=10)
-    p.add_argument("--fuente", choices=["master", "http"], default="master",
-                   help="datos del scraper actual (master) o del barrido por segmentos (http)")
+    p.add_argument("--fuente", choices=["http", "master"], default="http",
+                   help="datos del barrido diario (http) o del scraper viejo (master), para comparar")
     args = p.parse_args()
     FUENTE = args.fuente
     import src.viz_map as viz_map
