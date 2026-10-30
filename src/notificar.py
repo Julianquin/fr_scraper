@@ -64,6 +64,28 @@ def telegram(texto: str, token: str, chat_id: str) -> None:
             raise RuntimeError(detalle) from None
 
 
+def documento(ruta: str, token: str, chat_id: str, texto: str = "") -> None:
+    """Un archivo (p. ej. el PDF de src/informe_semanal.py) por Telegram, con `texto` como pie."""
+    import mimetypes
+    import uuid
+    from pathlib import Path
+    p, limite = Path(ruta), uuid.uuid4().hex
+    campos = {"chat_id": chat_id, "caption": _a_html(texto)[:1024], "parse_mode": "HTML"}
+    cuerpo = b"".join(f'--{limite}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                      for k, v in campos.items())
+    tipo = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    cuerpo += (f'--{limite}\r\nContent-Disposition: form-data; name="document"; filename="{p.name}"\r\n'
+               f"Content-Type: {tipo}\r\n\r\n").encode() + p.read_bytes() + f"\r\n--{limite}--\r\n".encode()
+    pedido = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendDocument", data=cuerpo,
+                                    headers={"Content-Type": f"multipart/form-data; boundary={limite}"})
+    try:
+        with urllib.request.urlopen(pedido, timeout=120) as r:
+            json.load(r)
+    except urllib.error.HTTPError as e:
+        detalle = json.loads(e.read() or b"{}").get("description", str(e))
+        raise RuntimeError(detalle) from None
+
+
 def whatsapp(texto: str, phone: str, apikey: str) -> None:
     for parte in partir(texto, LIMITE["whatsapp"]):
         q = urllib.parse.urlencode({"phone": phone, "text": parte, "apikey": apikey})

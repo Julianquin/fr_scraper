@@ -1,0 +1,4 @@
+# Informe semanal en PDF para los agentes (src/informe_semanal.py). El CI diario no lo instala.
+# Usa la fuente Inter si está en el sistema (en el CI: apt-get install fonts-inter); si no, DejaVu Sans.
+-r requirements.txt
+weasyprint>=62
