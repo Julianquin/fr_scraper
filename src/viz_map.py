@@ -58,7 +58,7 @@ def _cargar_todo() -> pd.DataFrame:
 
 def con_zonas(ciudad: str) -> bool:
     """Hay polígonos de comunas y de barrios para esta ciudad (el mapa los alterna con el zoom)."""
-    return zonas.tiene_zonas(ciudad) and (zonas.GEO_DIR / f"{zonas.slug(ciudad)}_barrios.geojson").exists()
+    return zonas.tiene_zonas(ciudad) and zonas.archivo("barrios", ciudad).exists()
 
 
 def cargar_ciudad(ciudad: str) -> pd.DataFrame:
@@ -71,17 +71,21 @@ def cargar_ciudad(ciudad: str) -> pd.DataFrame:
 def limpiar_ciudad(df: pd.DataFrame, ciudad: str, precio_min: float = 1e7) -> pd.DataFrame:
     """La limpieza de `cargar_ciudad` sobre cualquier dataset con su formato. Los arriendos
     (src/rentabilidad.py) la usan con un mínimo de canon en vez del de venta."""
-    # Nombre exacto: con "contiene", "Cali" también traía "Calima" y "Cali, Yumbo"
-    df = df[df["Ciudad"].map(zonas.normalizar) == zonas.normalizar(ciudad)].copy()
+    area = ciudad in zonas.AREAS
+    if area:                    # un área metropolitana: los avisos por sus coordenadas, no por el texto
+        df = df[zonas.en_area(ciudad, df["Latitud"], df["Longitud"], df["Ciudad"])].copy()
+    else:                       # nombre exacto: con "contiene", "Cali" también traía "Calima" y "Cali, Yumbo"
+        df = df[df["Ciudad"].map(zonas.normalizar) == zonas.normalizar(ciudad)].copy()
     for c in ["Latitud", "Longitud", "Precio", "Area_m2", "Habitaciones", "Baños"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["Precio", "Area_m2"])
     df = df[(df["Area_m2"] > 10) & (df["Precio"] > precio_min)]
 
-    # Coordenadas lejanas (fuera del área urbana) se descartan como coordenadas
-    lat0, lon0 = df["Latitud"].median(), df["Longitud"].median()
-    lejos = (df["Latitud"].sub(lat0).abs() >= 0.25) | (df["Longitud"].sub(lon0).abs() >= 0.25)
-    df.loc[lejos, ["Latitud", "Longitud"]] = None
+    # Coordenadas lejanas (fuera del área urbana) se descartan como coordenadas (en un área ya están dentro)
+    if not area:
+        lat0, lon0 = df["Latitud"].median(), df["Longitud"].median()
+        lejos = (df["Latitud"].sub(lat0).abs() >= 0.25) | (df["Longitud"].sub(lon0).abs() >= 0.25)
+        df.loc[lejos, ["Latitud", "Longitud"]] = None
 
     # Precio por m² y recorte de outliers absurdos (errores de captura)
     df["precio_m2"] = df["Precio"] / df["Area_m2"]

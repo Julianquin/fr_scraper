@@ -60,8 +60,10 @@ def _retiradas(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> int:
     """Viviendas de la ciudad con la baja confirmada en la semana (historial de src/consolidar.py)."""
     from src.consolidar import rutas
     r = rutas("venta")
-    todos = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo"])
-    viv = todos.loc[(todos["ciudad"] == ciudad) & todos["tipo"].isin(op.TIPOS), "id_inmueble"].astype(str)
+    todos = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud"])
+    aqui = (zonas.en_area(ciudad, todos["latitud"], todos["longitud"], todos["ciudad"]) if ciudad in zonas.AREAS
+            else todos["ciudad"].map(zonas.canonica) == ciudad)
+    viv = todos.loc[aqui & todos["tipo"].isin(op.TIPOS), "id_inmueble"].astype(str)
     dias = pd.date_range(desde, hasta).strftime("%Y-%m-%d")
     partes = [pd.read_parquet(p) for d in dias if (p := r.historial / f"fecha={d}.parquet").exists()]
     if not partes:
@@ -83,9 +85,12 @@ def _por_comuna(inm: pd.DataFrame, arr: pd.DataFrame, venta: pd.DataFrame) -> pd
     urbanos = urbanos[~urbanos["barrio_oficial"].str.contains(NO_BARRIO, na=False)]
     barrios = urbanos.groupby("comuna")["barrio_oficial"].agg(
         lambda s: ", ".join(PREFIJO.sub("", b)[:28] for b in s.value_counts().index[:BARRIOS_POR_COMUNA]))
-    t["barrios"] = barrios
-    t = t[t["viviendas"] >= MIN_VIVIENDAS].nlargest(MAX_FILAS, "viviendas")
-    return t.sort_values("precio_m2", ascending=False)
+    # Sin barrios oficiales (los municipios vecinos de un área): los que más escriben los avisos
+    del_aviso = inm.dropna(subset=["comuna", "Barrio"]).assign(
+        Barrio=lambda x: x["Barrio"].astype(str).str.split(",").str[0].str.strip().str.title())
+    t["barrios"] = barrios.combine_first(del_aviso.groupby("comuna")["Barrio"].agg(
+        lambda s: ", ".join(b[:28] for b in s.value_counts().index[:BARRIOS_POR_COMUNA]))).fillna("")
+    return t[t["viviendas"] >= MIN_VIVIENDAS].sort_values("precio_m2", ascending=False)   # la tabla: MAX_FILAS
 
 
 def _en_metrocuadrado(sel: pd.DataFrame, avisos: pd.DataFrame) -> pd.DataFrame:
@@ -149,7 +154,8 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     lo, hi = venta["precio_m2"].quantile([0.01, 0.99])
     con_precio = inm[inm["precio_m2"].between(lo, hi) & (inm["precio_mediano"] > 1e7)]
     arr_ok = arr[arr["motivo_exclusion"].isna()]
-    tabla = _por_comuna(con_precio, arr_ok, venta) if con_zonas else pd.DataFrame()
+    todas = _por_comuna(con_precio, arr_ok, venta) if con_zonas else pd.DataFrame()      # el mapa: todas
+    tabla = todas.nlargest(MAX_FILAS, "viviendas").sort_values("precio_m2", ascending=False) if len(todas) else todas
     config = zonas.CIUDADES.get(ciudad, {})
 
     precio_m2 = con_precio["precio_m2"].median()
@@ -166,7 +172,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "bajadas": len(bj), "bajada_mediana": float(bj["baja"].median()) if len(bj) else None,
         "arriendos": len(arr_ok), "canon_mediano": float(arr_ok["Precio"].median()),
         "precio_m2": float(precio_m2), "rentab": float(12 * canon_m2 / precio_m2),
-        "tabla": tabla,
+        "tabla": tabla, "todas": todas, "puntos": con_precio[["Latitud", "Longitud"]],
         "evaluadas": len(ev), "con_comparables": int(ev["nivel_comps"].notna().sum()) if len(ev) else 0,
         "bajo_umbral": int((ev["descuento"] >= UMBRAL).sum()) if len(ev) else 0,
         "sel": sel, "sel_bj": sel_bj,
@@ -230,14 +236,21 @@ def _txt(x: float, y: float, s: str, size: float = 6.6, color: str = "#0b0b0b", 
             f'font-weight="{weight}" fill="{color}" text-anchor="middle">{s}</text>')
 
 
-def mapa(valores: pd.Series, ciudad: str, w: int = 250, h: int = 330) -> tuple[str, str]:
+def mapa(valores: pd.Series, ciudad: str, puntos: pd.DataFrame, w: int = 250, h: int = 330) -> tuple[str, str]:
     """(SVG de las comunas o localidades coloreadas por `valores` en 5 quintiles, leyenda HTML). El encuadre
-    es el de las zonas con datos: las rurales enormes (Sumapaz en Bogotá) no achican la ciudad."""
+    es el de los avisos (`puntos`, Latitud y Longitud; del 3% al 97%): las zonas rurales enormes (Sumapaz en
+    Bogotá, Palmira junto a Cali) no achican la ciudad. Solo llevan número las zonas donde cabe."""
     import shapely
     from shapely.geometry import shape
     feats = [(f["properties"]["codigo"], shape(f["geometry"])) for f in zonas.cargar("comunas", ciudad)["features"]]
     etiquetas = zonas.etiquetas(ciudad)
-    x0, y0, x1, y1 = shapely.total_bounds(shapely.GeometryCollection([g for c, g in feats if c in valores.index]))
+    lat, lon = (pd.to_numeric(puntos[c], errors="coerce").dropna() for c in ("Latitud", "Longitud"))
+    if len(lat) > 20:
+        (y0, y1), (x0, x1) = lat.quantile([.03, .97]).to_numpy(), lon.quantile([.03, .97]).to_numpy()
+        my, mx = (y1 - y0) * .06, (x1 - x0) * .06
+        x0, y0, x1, y1 = x0 - mx, y0 - my, x1 + mx, y1 + my
+    else:
+        x0, y0, x1, y1 = shapely.total_bounds(shapely.GeometryCollection([g for c, g in feats if c in valores.index]))
     cl = np.cos(np.radians((y0 + y1) / 2))
     k = min((w - 8) / ((x1 - x0) * cl), (h - 8) / (y1 - y0))
     punto = lambda x, y: (4 + (x - x0) * cl * k, 4 + (y1 - y) * k)
@@ -254,7 +267,9 @@ def mapa(valores: pd.Series, ciudad: str, w: int = 250, h: int = 330) -> tuple[s
         fondo.append(f'<path d="{camino(g)}" fill="{RAMPA[clase(v)] if pd.notna(v) else "#f0efec"}" '
                      f'stroke="#ffffff" stroke-width="1"/>')
         cx, cy = punto(*g.representative_point().coords[0])
-        if etiquetas.get(cod) and 0 <= cx <= w and 0 <= cy <= h:
+        bx0, by1, bx1, by0 = g.bounds
+        ancho, alto = (bx1 - bx0) * cl * k, (by0 - by1) * k
+        if etiquetas.get(cod) and 4 <= cx <= w - 4 and 6 <= cy <= h - 4 and min(ancho, alto) >= 16:
             textos.append(_txt(cx, cy + 2.5, etiquetas[cod], color="#ffffff" if pd.notna(v) and clase(v) >= 3 else "#0b0b0b"))
     lims = [valores.min(), *cortes, valores.max()]
     leyenda = "".join(f'<span class="ley"><i style="background:{c}"></i>{_mill(lims[i])}–{_mill(lims[i + 1])}</span>'
@@ -349,7 +364,7 @@ def _por_zona_html(d: dict, periodo: str) -> str:
     """El mapa (página 1) y la tabla por comuna o localidad (página 2)."""
     t, nombres, div = d["tabla"], d["nombres"], d["division"]
     filas = "".join(_fila(nombres.get(c, c), r, t["precio_m2"].max(), t["rentab"].max()) for c, r in t.iterrows())
-    svg_mapa, leyenda = mapa(t["precio_m2"], d["ciudad"])
+    svg_mapa, leyenda = mapa(d["todas"]["precio_m2"], d["ciudad"], d["puntos"])
     lista = lambda cs: ", ".join(html.escape(nombres.get(c, c)) for c in cs)
     Div, divs = div.capitalize(), _plural(div)
     return f"""<h2>Precio por m² por {div}</h2>

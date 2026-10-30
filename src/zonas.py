@@ -9,6 +9,9 @@ Zonas oficiales de las ciudades (barrios y comunas o localidades), en data/geo/<
     con solo comunas de OSM), la comuna sale de su polígono. Las columnas se llaman `comuna` y
     `barrio_oficial` en todas las ciudades; CIUDADES dice cómo se llaman de verdad (comuna o localidad).
   - `canonica(ciudad)`: el nombre de la ciudad igual en los dos portales ("Bogotá D.C." → "Bogotá").
+  - Áreas metropolitanas (AREAS): el núcleo con sus comunas o localidades y barrios, su parte rural y cada
+    municipio vecino como una zona (límites municipales del DANE). Los avisos entran por sus coordenadas
+    dentro del área (`en_area`), no por el texto del portal: "Medellín" en un aviso de Envigado no engaña.
 
 Uso:
     python -m src.zonas            # (re)descarga los polígonos de Cali a data/geo/
@@ -43,6 +46,21 @@ CIUDADES = {
     "Armenia": {"division": "comuna", "fuente": "OpenStreetMap", "transporte": "transporte masivo"},
     "Pereira": {"division": "comuna", "fuente": "OpenStreetMap", "transporte": "Megabús"},
 }
+# Áreas metropolitanas: núcleo y municipios vecinos (nombre y departamento como los escribe el DANE)
+AREAS = {
+    "Valle de Aburrá": ("Medellín", "Antioquia", ["Bello", "Itagüí", "Envigado", "Sabaneta", "La Estrella", "Caldas",
+                                                  "Copacabana", "Girardota", "Barbosa"]),
+    "Área metropolitana de Barranquilla": ("Barranquilla", "Atlántico", ["Soledad", "Malambo", "Puerto Colombia",
+                                                                         "Galapa"]),
+    "Área metropolitana de Bucaramanga": ("Bucaramanga", "Santander", ["Floridablanca", "Girón", "Piedecuesta"]),
+    "Área metropolitana de Pereira": ("Pereira", "Risaralda", ["Dosquebradas", "La Virginia"]),
+    "Bogotá y la Sabana": ("Bogotá", "Cundinamarca", ["Chía", "Cajicá", "Cota", "Funza", "Mosquera", "Madrid", "Soacha",
+                                                     "La Calera", "Sopó", "Zipaquirá", "Tenjo", "Tabio", "Tocancipá"]),
+    "Cali y alrededores": ("Cali", "Valle del Cauca", ["Jamundí", "Yumbo", "Palmira", "Candelaria"]),
+}
+for _area, (_nucleo, _, _) in AREAS.items():
+    CIUDADES[_area] = {"division": "zona", "transporte": CIUDADES[_nucleo]["transporte"],
+                       "fuente": CIUDADES[_nucleo]["fuente"] + "; municipios: DANE (MGN, vía HDX)"}
 CANONICA = {"bogota d.c.": "Bogotá", "bogota, d.c.": "Bogotá", "bogota dc": "Bogotá",
             "cartagena de indias": "Cartagena"}
 
@@ -74,9 +92,38 @@ def canonica(ciudad) -> str:
     return CANONICA.get(normalizar(ciudad), ciudad) if isinstance(ciudad, str) else ciudad
 
 
+def nucleo(ciudad: str) -> str:
+    """La ciudad central de un área metropolitana (o la misma ciudad)."""
+    return AREAS[ciudad][0] if ciudad in AREAS else ciudad
+
+
+_POLIGONO: dict = {}
+
+
+def en_area(area: str, lat, lon, texto=None) -> np.ndarray:
+    """Qué avisos son del área metropolitana: los que caen dentro de sus zonas (data/geo/) y, sin coordenadas,
+    los que dicen uno de sus municipios (`texto`, la ciudad del aviso)."""
+    if area not in _POLIGONO:
+        _POLIGONO[area] = shapely.union_all([shape(f["geometry"]) for f in cargar("comunas", area)["features"]])
+        shapely.prepare(_POLIGONO[area])
+    lat, lon = pd.to_numeric(pd.Series(lat), errors="coerce"), pd.to_numeric(pd.Series(lon), errors="coerce")
+    dentro = np.zeros(len(lat), dtype=bool)
+    ok = (lat.notna() & lon.notna()).to_numpy()
+    dentro[ok] = shapely.contains_xy(_POLIGONO[area], lon.to_numpy()[ok], lat.to_numpy()[ok])
+    if texto is not None:
+        nombres = {normalizar(AREAS[area][0]), *map(normalizar, AREAS[area][2])}
+        dentro |= ~ok & pd.Series(texto).map(canonica).map(normalizar).isin(nombres).to_numpy()
+    return dentro
+
+
+def archivo(nivel: str, ciudad: str) -> Path:
+    """data/geo/<ciudad>_<nivel>.geojson; los barrios de un área son los de su núcleo."""
+    return GEO_DIR / f"{slug(nucleo(ciudad) if nivel == 'barrios' else ciudad)}_{nivel}.geojson"
+
+
 def tiene_zonas(ciudad: str) -> bool:
     """Hay polígonos oficiales de esta ciudad en data/geo/."""
-    return (GEO_DIR / f"{slug(ciudad)}_comunas.geojson").exists()
+    return archivo("comunas", ciudad).exists()
 
 
 def division(ciudad: str) -> str:
@@ -93,7 +140,7 @@ def nombres(ciudad: str) -> dict[str, str]:
         m = re.match(r"comuna\s+0*(\d+)$", p["nombre"], re.I)
         if m:
             salida[p["codigo"]] = f"Comuna {m.group(1)}"
-        elif ciudad == "Medellín" and p.get("etiqueta") and int(p["etiqueta"]) < 50:
+        elif nucleo(ciudad) == "Medellín" and p.get("etiqueta") and int(p["etiqueta"]) < 50:
             salida[p["codigo"]] = f"{p['nombre']} ({p['etiqueta']})"
         else:
             salida[p["codigo"]] = p["nombre"]
@@ -125,7 +172,7 @@ def descargar() -> None:
 
 def cargar(nivel: str, ciudad: str = "Cali") -> dict:
     """GeoJSON de 'barrios' o 'comunas' de la ciudad desde data/geo/."""
-    return json.loads((GEO_DIR / f"{slug(ciudad)}_{nivel}.geojson").read_text(encoding="utf-8"))
+    return json.loads(archivo(nivel, ciudad).read_text(encoding="utf-8"))
 
 
 def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
@@ -141,7 +188,7 @@ def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
     df["zona_por"] = None
     con_geo = df["Latitud"].notna() & df["Longitud"].notna()
     puntos = shapely.points(df.loc[con_geo, "Longitud"], df.loc[con_geo, "Latitud"])
-    if not (GEO_DIR / f"{slug(ciudad)}_barrios.geojson").exists():
+    if not archivo("barrios", ciudad).exists():
         feats = cargar("comunas", ciudad)["features"]
         i_pt, i_pol = shapely.STRtree([shape(f["geometry"]) for f in feats]).query(puntos, predicate="within")
         idx = df.index[con_geo][i_pt]
@@ -169,6 +216,16 @@ def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
     df.loc[match.index, "barrio_oficial"] = match.str[0]
     df.loc[match.index, "comuna"] = match.str[1]
     df.loc[match.index, "zona_por"] = "nombre"
+
+    # 3) Sin comuna (fuera de los barrios, o en un municipio vecino del área): por el polígono de la comuna
+    falta = df["comuna"].isna() & con_geo
+    if falta.any():
+        feats = cargar("comunas", ciudad)["features"]
+        pts = shapely.points(df.loc[falta, "Longitud"], df.loc[falta, "Latitud"])
+        i_pt, i_pol = shapely.STRtree([shape(f["geometry"]) for f in feats]).query(pts, predicate="within")
+        idx = df.index[falta][i_pt]
+        df.loc[idx, "comuna"] = np.array([f["properties"]["codigo"] for f in feats], dtype=object)[i_pol]
+        df.loc[idx, "zona_por"] = df.loc[idx, "zona_por"].fillna("coordenadas")
     return df
 
 

@@ -17,6 +17,9 @@ Fuentes (31-oct-2026):
   Bucaramanga, Manizales, Armenia, Pereira
                 comunas de OpenStreetMap (límites administrativos de nivel 8 dentro del municipio, del extract
                 de Colombia en data/osm/, ODbL)
+  Áreas metropolitanas (zonas.AREAS)
+                las zonas del núcleo, su parte rural (lo del municipio que queda fuera de ellas) y cada
+                municipio vecino como una zona: límites municipales del DANE (MGN, COD-AB de HDX, CC BY-IGO)
 Cali tiene las suyas de la IDESC (src/zonas.py). Cartagena no tiene capa oficial publicada: va sin mapa.
 
 Lo descargado se guarda en data/geo_fuentes/ (local, no se versiona) y se reutiliza: algunos servidores cortan
@@ -42,7 +45,7 @@ from shapely.geometry import mapping, shape
 from shapely.ops import polygonize, unary_union
 
 from src.config import BASE_DIR
-from src.zonas import GEO_DIR, TOLERANCIA, slug
+from src.zonas import AREAS, GEO_DIR, TOLERANCIA, normalizar, slug
 
 MEDELLIN = "https://www.medellin.gov.co/servidormapas/rest/services/ServiciosCatastro/Base_Catastral/MapServer"
 FUENTES = {
@@ -53,7 +56,10 @@ FUENTES = {
     "medellin_comunas": f"{MEDELLIN}/0",
     "medellin_barrios": f"{MEDELLIN}/1",
     "barranquilla_barrios": "https://www.datos.gov.co/resource/qui6-qeux.geojson?$limit=5000",
+    "municipios": "https://data.humdata.org/dataset/50ea7fee-f9af-45a7-8a52-abb9c790a0b6/resource/"
+                  "32fba556-0109-4d1c-84cb-c8abddf7775b/download/col-administrative-divisions-shapefiles.zip",
 }
+TOLERANCIA_MUNICIPIOS = 0.0002          # ~20 m: los municipios vecinos pesan poco y no necesitan más
 CACHE = BASE_DIR / "data" / "geo_fuentes"
 COPIA = {"bogota_localidades": "bogota_localidades_oficial.json", "bogota_sectores": "bogota_sectores_catastrales.geojson",
          "medellin_comunas": "medellin_comunas.geojson", "medellin_barrios": "medellin_barrios.geojson",
@@ -122,11 +128,11 @@ def _con_comuna(barrios: list[tuple[dict, object]], comunas: list[tuple[dict, ob
         props["comuna"] = comunas[i[0]][0]["codigo"] if len(i) else None
 
 
-def _guardar(nombre: str, feats: list[tuple[dict, object]], fuente: str) -> None:
+def _guardar(nombre: str, feats: list[tuple[dict, object]], fuente: str, tolerancia: float = TOLERANCIA) -> None:
     salida = []
     for props, g in feats:
         g = shapely.make_valid(g)
-        geom = shapely.set_precision(g.simplify(TOLERANCIA), 1e-5)
+        geom = shapely.set_precision(g.simplify(props.pop("_tolerancia", tolerancia)), 1e-5)
         if not geom.is_empty:
             salida.append({"type": "Feature", "geometry": mapping(geom), "properties": props})
     p = GEO_DIR / f"{nombre}.geojson"
@@ -226,6 +232,54 @@ def osm(rels: pd.DataFrame, ciudad: str) -> None:
              "OpenStreetMap (ODbL), límites administrativos de nivel 8")
 
 
+def _municipios() -> pd.DataFrame:
+    """Los 1.122 municipios del DANE (MGN, COD-AB de HDX): nombre, departamento, pcode y geometría."""
+    copia = CACHE / "colombia_municipios.parquet"
+    if not copia.exists():
+        import duckdb
+        destino = CACHE / "hdx"
+        destino.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(FUENTES["municipios"], timeout=600) as r:
+            zipfile.ZipFile(io.BytesIO(r.read())).extractall(destino)
+        shp = sorted(destino.glob("*adm2*.shp"))[0]
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute(f"""SELECT ADM2_ES AS nombre, ADM2_PCODE AS pcode, ADM1_ES AS departamento, ST_AsWKB(geom) AS wkb
+                        FROM ST_Read('{shp}')""").df().to_parquet(copia)
+    m = pd.read_parquet(copia)
+    m["geometry"] = shapely.from_wkb(m["wkb"].map(bytes))
+    return m
+
+
+def _municipio(m: pd.DataFrame, nombre: str, departamento: str):
+    """La fila del municipio: nombre exacto (sin tildes) y su departamento; Bogotá es «Bogotá, D.C.»."""
+    n, d = m["nombre"].map(normalizar), m["departamento"].map(normalizar)
+    fila = m[(n == normalizar(nombre)) & d.str.startswith(normalizar(departamento)[:6])]
+    if fila.empty:
+        fila = m[n.str.startswith(normalizar(nombre) + ",")]
+    if len(fila) != 1:
+        raise ValueError(f"{nombre} ({departamento}): {len(fila)} municipios")
+    return fila.iloc[0]
+
+
+def area(nombre: str, m: pd.DataFrame) -> None:
+    """Las zonas del área: las del núcleo, su parte rural y cada municipio vecino."""
+    nucleo, departamento, vecinos = AREAS[nombre]
+    base = json.loads((GEO_DIR / f"{slug(nucleo)}_comunas.geojson").read_text(encoding="utf-8"))
+    zonas_ = [(f["properties"] | {"_tolerancia": 0}, shape(f["geometry"])) for f in base["features"]]
+    resto = _municipio(m, nucleo, departamento)["geometry"].difference(unary_union([g for _, g in zonas_]))
+    partes = [g for g in getattr(resto, "geoms", [resto]) if g.area > 2e-5]       # sin las astillas del borde
+    if partes:
+        zonas_.append(({"codigo": "rural", "nombre": f"{nucleo}, expansión y zona rural", "etiqueta": ""},
+                       unary_union(partes)))
+    for v in vecinos:
+        f = _municipio(m, v, departamento)
+        zonas_.append(({"codigo": f["pcode"].removeprefix("CO"), "nombre": f["nombre"], "etiqueta": "",
+                        "_tolerancia": TOLERANCIA_MUNICIPIOS}, f["geometry"]))
+    fuente = f"{base.get('fuente', '')}; municipios: DANE (MGN, COD-AB de HDX, CC BY-IGO)"
+    _guardar(f"{slug(nombre)}_comunas", zonas_, fuente)          # los barrios: los del núcleo (zonas.archivo)
+
+
 CONSTRUCTORES = {"Bogotá": bogota, "Medellín": medellin}
 
 
@@ -242,3 +296,8 @@ if __name__ == "__main__":
         rels = _osm_limites()
         for ciudad in con_osm:
             barranquilla(rels) if ciudad == "Barranquilla" else osm(rels, ciudad)
+    areas = [x for x in AREAS if not a.ciudad or a.ciudad == x]          # después de sus núcleos
+    if areas:
+        m = _municipios()
+        for x in areas:
+            area(x, m)

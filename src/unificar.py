@@ -34,7 +34,7 @@ import pandas as pd
 
 from src.config import BASE_DIR
 from src.deduplicar import _km, _texto, diferencia_area, matriz_texto, puntaje, señales
-from src.zonas import canonica
+from src.zonas import AREAS, canonica, en_area
 
 PORTALES = {"fincaraiz": "venta", "metrocuadrado": "m2_venta"}          # portal → raíz de consolidar
 TIPOS = {"Apartamento": "Apartamento", "Apartaestudio": "Apartamento", "Casa": "Casa"}   # M2 no separa apartaestudios
@@ -56,7 +56,9 @@ def cargar(ciudad: str | None = None) -> pd.DataFrame:
     for portal, raiz in PORTALES.items():
         a = pd.read_parquet(rutas(raiz).avisos, columns=COLUMNAS + ["estado_aviso"])
         a = a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)]
-        if ciudad:                      # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
+        if ciudad in AREAS:             # un área metropolitana: por coordenadas
+            a = a[en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"])]
+        elif ciudad:                    # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
             a = a[a["ciudad"].map(canonica) == canonica(ciudad)]
         partes.append(a[COLUMNAS].assign(portal=portal, tipo=a["tipo"].map(TIPOS)))
     d = pd.concat(partes, ignore_index=True)
