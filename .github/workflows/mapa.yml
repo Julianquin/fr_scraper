@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Mapa de precios de Cali en GitHub Pages.
+#
+# Corre cuando termina el barrido diario (barrido_http.yml): baja el estado del barrido
+# (estado/ en R2), regenera docs/cali.html con los avisos activos (--fuente http) y lo
+# publica. Antes lo hacía el job "pages" del scraper viejo (scraper.yml).
+#
+# Requiere Settings → Pages → Source = GitHub Actions.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Mapa (GitHub Pages)
+
+on:
+  workflow_run:
+    workflows: ["Barrido diario (venta y arriendo)"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write        # deploy a GitHub Pages
+  id-token: write     # requerido por actions/deploy-pages
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  pages:
+    # Si falla un grupo del barrido el estado se consolida igual: el mapa sale salvo cancelación
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Bajar el estado del barrido desde R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python -m src.consolidar --bajar
+      - name: Regenerar el mapa en docs/
+        run: python -m src.viz_map --ciudad Cali --out docs/cali.html --fuente http
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+      - name: Empaquetar docs/ como artifact de Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Deploy a GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+      - name: Avisar al administrador si algo falló
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: >-
+          python -m src.monitor fallo "El mapa de Cali no se pudo publicar"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
