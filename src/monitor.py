@@ -10,14 +10,15 @@ Monitor de salud del pipeline: un resumen diario por Telegram SOLO para el admin
             frente a la anterior (fichas en R2, modelos/historial/), con aviso si empeora.
 
 Metrocuadrado (metrocuadrado.yml) manda su propio resumen al terminar, con
-`--raices m2_venta --titulo Metrocuadrado`.
+`--raices m2_venta --titulo Metrocuadrado --unificado`: el último añade el registro único por inmueble
+(E8, estado_unificado/meta.json).
 
 Si un día no llega el resumen, algo no corrió (GitHub no lanzó el scraper, se canceló…).
 
 Uso:
     python -m src.monitor resumen [--fecha AAAA-MM-DD] [--jobs plan=success,barrer=failure…]
                                   [--scraper success|failure] [--url URL] [--local] [--no-enviar]
-                                  [--raices venta,arriendo] [--titulo "Barrido diario"]
+                                  [--raices venta,arriendo] [--titulo "Barrido diario"] [--unificado]
     python -m src.monitor fallo "La alerta semanal falló" [--url URL]
     python -m src.monitor modelo [--fecha AAAA-MM-DD] [--url URL] [--no-enviar]
 """
@@ -39,6 +40,8 @@ CAMBIOS_MAX = 0.03      # cambios de precio del día / activos
 MODELO_SUBE_MAX = 0.01  # el error mediano en avisos nuevos no debe subir más de 1 punto en una semana
 COBERTURA_RANGO = (0.75, 0.85)   # el rango p10–p90 debe contener ~80% de los precios
 RAICES = {"venta": "Venta", "arriendo": "Arriendo", "m2_venta": "Metrocuadrado venta"}
+ESTABILIDAD_MIN = 0.98  # registro único: avisos que conservan su inmueble de un día a otro (29-oct: 99,6%)
+SALEN_MAX = 0.05        # registro único: avisos que salen en un día / activos (un portal sin estado)
 
 
 def _n(x) -> str:
@@ -111,8 +114,37 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
     return lineas, avisos
 
 
+def unificado(fecha: str, local: bool) -> tuple[list[str], list[str]]:
+    """(líneas, avisos) del registro único por inmueble (src/unificar.py)."""
+    from src.unificar import ESTADO, R2
+    if local:
+        ruta = ESTADO / "meta.json"
+    else:
+        from src import almacen
+        tmp = BASE_DIR / "data" / "_monitor"
+        shutil.rmtree(tmp / R2, ignore_errors=True)
+        almacen.traer(f"{R2}/meta.json", tmp)
+        ruta = tmp / R2 / "meta.json"
+    meta = json.loads(ruta.read_text()) if ruta.exists() else {}
+    if meta.get("ultimo_dia") != fecha:
+        return ([f"*Registro único:* sin actualizar (último: {meta.get('ultimo_dia', 'ninguno')})"],
+                [f"Registro único: no se actualizó el {fecha}"])
+    r, avisos = meta["ultimo_resumen"], []
+    lineas = [f"*Registro único* · {_n(r['inmuebles_activos'])} inmuebles de {_n(r['avisos_activos'])} avisos · "
+              f"{_n(r['en_los_dos_portales'])} en los dos portales",
+              f"🆕 {_n(r['inmuebles_nuevos'])} nuevos · {_n(r['inmuebles_cerrados'])} cerrados · "
+              f"{_n(r['fusionados'])} fusionados · {_n(r['partidos'])} partidos"
+              + (f" · {_pct(r['estabilidad'])} conservan su inmueble" if r["estabilidad"] is not None else "")]
+    if r["estabilidad"] is not None and r["estabilidad"] < ESTABILIDAD_MIN:
+        avisos.append(f"Registro único: solo el {_pct(r['estabilidad'])} de los avisos conservó su inmueble")
+    if r["avisos_salen"] > SALEN_MAX * max(r["avisos_activos"], 1):
+        avisos.append(f"Registro único: salieron {_n(r['avisos_salen'])} avisos en un día")
+    return lineas, avisos
+
+
 def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | None, local: bool,
-            raices: tuple[str, ...] = ("venta", "arriendo"), titulo: str = "Barrido diario") -> str:
+            raices: tuple[str, ...] = ("venta", "arriendo"), titulo: str = "Barrido diario",
+            con_unificado: bool = False) -> str:
     bloques, avisos = [], []
     fallidos = [f"{j} ({r})" for j, r in jobs.items() if r != "success"]
     if fallidos:
@@ -123,6 +155,10 @@ def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | No
                       + (": hoy es lunes y la alerta NO salió" if lunes else ""))
     for raiz in raices:
         lineas, av = revisar(raiz, fecha, *leer(raiz, fecha, local))
+        bloques.append("\n".join(lineas))
+        avisos += av
+    if con_unificado:
+        lineas, av = unificado(fecha, local)
         bloques.append("\n".join(lineas))
         avisos += av
     cabeza = (f"*⚠️ {titulo} · {fecha} · {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}*\n"
@@ -188,6 +224,7 @@ def main() -> None:
     r.add_argument("--no-enviar", action="store_true", help="solo imprime")
     r.add_argument("--raices", default="venta,arriendo", help=f"separadas por coma: {', '.join(RAICES)}")
     r.add_argument("--titulo", default="Barrido diario")
+    r.add_argument("--unificado", action="store_true", help="añade el registro único por inmueble (E8)")
     f = sub.add_parser("fallo", help="aviso corto de que algo falló")
     f.add_argument("texto")
     f.add_argument("--url")
@@ -208,7 +245,8 @@ def main() -> None:
         texto = modelo(a.fecha, a.url)
     else:
         jobs = dict(j.split("=", 1) for j in a.jobs.split(",") if "=" in j)
-        texto = resumen(a.fecha, jobs, a.scraper, a.url, a.local, tuple(a.raices.split(",")), a.titulo)
+        texto = resumen(a.fecha, jobs, a.scraper, a.url, a.local, tuple(a.raices.split(",")), a.titulo,
+                        a.unificado)
     print(texto)
     if a.accion == "fallo" or not a.no_enviar:
         try:
