@@ -14,6 +14,8 @@ OSM dibuja como polígono: en Cali quedaban 98 colegios y 28 parques. Ahora:
 
 Uso:
     python -m src.osm_pois                       # (re)construye el parquet desde el .pbf (~1 min)
+    python -m src.osm_pois --subir               # lo sube a R2 (osm/), de donde lo baja el entrenamiento
+                                                 # semanal del CI (modelo.yml): el .pbf no sale de tu disco
 
     from src.osm_pois import features_servicios
     extra = features_servicios(df)               # SOLO las columnas nuevas: dist_*_km y n_*_500m
@@ -156,4 +158,14 @@ def features_servicios(df: pd.DataFrame, pois: pd.DataFrame | None = None) -> pd
 
 
 if __name__ == "__main__":
-    extraer_pois(force=True)
+    import argparse
+    p = argparse.ArgumentParser(description="Servicios cercanos desde OpenStreetMap")
+    p.add_argument("--subir", action="store_true",
+                   help="sube el parquet a R2 (osm/pois_colombia.parquet); lo construye solo si no existe")
+    a = p.parse_args()
+    if a.subir:
+        from src import almacen
+        extraer_pois()
+        almacen.subir_archivo(POIS_PARQUET, f"osm/{POIS_PARQUET.name}")
+    else:
+        extraer_pois(force=True)
