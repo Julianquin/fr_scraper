@@ -97,7 +97,8 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
     activos = max(res["activos"], 1)
     lineas += [f"🆕 {_n(res.get('alta', 0))} altas · {_n(res.get('descubierto', 0))} descubiertos · "
                f"❌ {_n(res.get('baja', 0))} bajas · ↩️ {_n(res.get('reaparece', 0))} reaparecen"
-               + (f" · {_n(res['reactivado'])} rescatados vuelven" if res.get("reactivado") else ""),
+               + (f" · {_n(res['reactivado'])} rescatados vuelven" if res.get("reactivado") else "")
+               + (f" · 🔁 {_n(res['republicado'])} republicados" if res.get("republicado") else ""),
                f"💲 {_n(res.get('precio_baja', 0))} bajaron y {_n(res.get('precio_sube', 0))} subieron de precio · "
                f"{_n(res['activos'])} activos"]
     acu = meta.get("acumulado", {})
@@ -105,7 +106,10 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
         lineas.append(f"Desde el inicio: {_n(acu['baja'])} bajas, de las que reaparecieron "
                       f"{_n(acu.get('reaparece', 0))} ({_pct(acu.get('reaparece', 0) / acu['baja'])})")
     if len(meta["barridos"]) > 1 and not res["ausencias_contadas"]:
-        avisos.append(f"{nombre}: el barrido trajo menos del 90% de los activos; hoy no se contaron ausencias")
+        avisos.append(f"{nombre}: barrido incompleto ({_pct(res['cobertura_portal'])} de lo que declara el portal, "
+                      f"{_pct(res['vistos'] / activos)} de los activos); hoy no se contaron ausencias"
+                      if res.get("cobertura_portal") is not None else
+                      f"{nombre}: el barrido trajo menos del 90% de los activos; hoy no se contaron ausencias")
     if res.get("baja", 0) > BAJAS_MAX * activos:
         avisos.append(f"{nombre}: {_n(res['baja'])} bajas en un día ({_pct(res['baja'] / activos)} de los activos)")
     if res.get("cambio_precio", 0) > CAMBIOS_MAX * activos:
