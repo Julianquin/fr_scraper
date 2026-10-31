@@ -298,3 +298,6 @@ config_local.yaml
 # === DOCUMENTACIÓN PRIVADA (no se publica) ===
 # Ningún .md va a GitHub: handoff, backlog, guías y notas quedan solo en local
 *.md
+
+# Mapas por ciudad (src/mapa_ciudad.py): los genera y publica el CI; llevan enlaces a avisos
+/docs/mapa/

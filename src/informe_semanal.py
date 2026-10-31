@@ -43,6 +43,7 @@ TOP_BAJADAS = 6
 MIN_VIVIENDAS = 50          # una comuna entra en la tabla con al menos estas viviendas en venta
 MAX_FILAS = 20              # y, si son más, las que tienen más oferta (la tabla cabe en una página)
 MIN_ARRIENDOS = 15          # y su canon, con al menos estos arriendos
+MIN_BARRIO = 5              # en el mapa, un barrio lleva color con al menos estas viviendas en venta
 BARRIOS_POR_COMUNA = 2
 CAPTAR_DIAS = (121, 365)    # para captar: entre 4 y 12 meses publicadas (más viejas suelen estar abandonadas)
 CAPTAR_SOBRE = (0.10, 0.60)  # y entre un 10% y un 60% sobre sus comparables (más suele ser un error del aviso)
@@ -52,6 +53,7 @@ PREFIJO = re.compile(r"^(urbanizaci[oó]n|parcelaci[oó]n(es)?|ciudadela|conjunt
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
          "noviembre", "diciembre"]
 RAMPA = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#1c5cab"]    # secuencial azul, de menos a más
+ALREDEDORES = "#d9d8d2"                                             # fuera del núcleo de un área: neutro
 
 
 # ── Datos ─────────────────────────────────────────────────────────────────────
@@ -155,6 +157,8 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     con_precio = inm[inm["precio_m2"].between(lo, hi) & (inm["precio_mediano"] > 1e7)]
     arr_ok = arr[arr["motivo_exclusion"].isna()]
     todas = _por_comuna(con_precio, arr_ok, venta) if con_zonas else pd.DataFrame()      # el mapa: todas
+    b = con_precio.dropna(subset=["barrio_oficial"]).groupby(["comuna", "barrio_oficial"])["precio_m2"].agg(["size", "median"])
+    barrios = b.loc[b["size"] >= MIN_BARRIO, "median"]                                  # el mapa por barrio
     tabla = todas.nlargest(MAX_FILAS, "viviendas").sort_values("precio_m2", ascending=False) if len(todas) else todas
     config = zonas.CIUDADES.get(ciudad, {})
 
@@ -172,7 +176,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "bajadas": len(bj), "bajada_mediana": float(bj["baja"].median()) if len(bj) else None,
         "arriendos": len(arr_ok), "canon_mediano": float(arr_ok["Precio"].median()),
         "precio_m2": float(precio_m2), "rentab": float(12 * canon_m2 / precio_m2),
-        "tabla": tabla, "todas": todas, "puntos": con_precio[["Latitud", "Longitud"]],
+        "tabla": tabla, "todas": todas, "barrios": barrios, "puntos": con_precio[["Latitud", "Longitud", "comuna"]],
         "evaluadas": len(ev), "con_comparables": int(ev["nivel_comps"].notna().sum()) if len(ev) else 0,
         "bajo_umbral": int((ev["descuento"] >= UMBRAL).sum()) if len(ev) else 0,
         "sel": sel, "sel_bj": sel_bj,
@@ -236,45 +240,92 @@ def _txt(x: float, y: float, s: str, size: float = 6.6, color: str = "#0b0b0b", 
             f'font-weight="{weight}" fill="{color}" text-anchor="middle">{s}</text>')
 
 
-def mapa(valores: pd.Series, ciudad: str, puntos: pd.DataFrame, w: int = 250, h: int = 330) -> tuple[str, str]:
-    """(SVG de las comunas o localidades coloreadas por `valores` en 5 quintiles, leyenda HTML). El encuadre
-    es el de los avisos (`puntos`, Latitud y Longitud; del 3% al 97%): las zonas rurales enormes (Sumapaz en
-    Bogotá, Palmira junto a Cali) no achican la ciudad. Solo llevan número las zonas donde cabe."""
+def _encuadre(feats: list, valores: pd.Series, puntos: pd.DataFrame, ciudad: str) -> tuple[float, ...]:
+    """La caja del mapa: la ciudad entera (en un área metropolitana, su núcleo) sin que la distorsionen las zonas
+    grandes de alrededor. Cada comuna o localidad con datos entra entera; las enormes (más de 3 veces la mediana:
+    corregimientos de Medellín, Usme o Ciudad Bolívar con su parte rural), solo por donde están sus avisos.
+    Sumapaz, sin avisos, y los municipios vecinos quedan fuera (siguen en la tabla)."""
+    del_nucleo = {f["properties"]["codigo"] for f in zonas.cargar("comunas", zonas.nucleo(ciudad))["features"]}
+    zs = [(c, g) for c, g in feats if c in valores.index and c in del_nucleo] or \
+         [(c, g) for c, g in feats if c in valores.index]
+    mediana = np.median([g.area for _, g in zs])
+    cajas = []
+    for c, g in zs:
+        p = puntos[puntos["comuna"] == c]
+        if g.area <= 3 * mediana or len(p) < 10:
+            cajas.append(g.bounds)
+        else:
+            lat, lon = (pd.to_numeric(p[k], errors="coerce").dropna() for k in ("Latitud", "Longitud"))
+            cajas.append((lon.quantile(.05), lat.quantile(.05), lon.quantile(.95), lat.quantile(.95)))
+    x0, y0 = min(b[0] for b in cajas), min(b[1] for b in cajas)
+    x1, y1 = max(b[2] for b in cajas), max(b[3] for b in cajas)
+    mx, my = (x1 - x0) * .03, (y1 - y0) * .03
+    return x0 - mx, y0 - my, x1 + mx, y1 + my
+
+
+def mapa(valores: pd.Series, ciudad: str, puntos: pd.DataFrame, barrios: pd.Series | None = None,
+         w: int = 300, h: int = 400) -> tuple[str, str]:
+    """(SVG coloreado en 5 quintiles, leyenda HTML), con el encuadre de `_encuadre` (por comunas o localidades).
+    Con `barrios` (precio mediano por m² de cada barrio con datos, índice (comuna, barrio)), el color es por
+    barrio y las comunas van como líneas con su número encima; sin barrios, el color es por comuna (`valores`).
+    En un área metropolitana, lo que está fuera del núcleo (los municipios vecinos) va en gris:
+    sus precios están en la tabla y en color confundirían. Solo llevan número las zonas donde cabe."""
     import shapely
     from shapely.geometry import shape
     feats = [(f["properties"]["codigo"], shape(f["geometry"])) for f in zonas.cargar("comunas", ciudad)["features"]]
     etiquetas = zonas.etiquetas(ciudad)
-    lat, lon = (pd.to_numeric(puntos[c], errors="coerce").dropna() for c in ("Latitud", "Longitud"))
-    if len(lat) > 20:
-        (y0, y1), (x0, x1) = lat.quantile([.03, .97]).to_numpy(), lon.quantile([.03, .97]).to_numpy()
-        my, mx = (y1 - y0) * .06, (x1 - x0) * .06
-        x0, y0, x1, y1 = x0 - mx, y0 - my, x1 + mx, y1 + my
-    else:
-        x0, y0, x1, y1 = shapely.total_bounds(shapely.GeometryCollection([g for c, g in feats if c in valores.index]))
+    x0, y0, x1, y1 = _encuadre(feats, valores, puntos, ciudad)
+    area = ciudad in zonas.AREAS
+    del_nucleo = {f["properties"]["codigo"] for f in zonas.cargar("comunas", zonas.nucleo(ciudad))["features"]}
     cl = np.cos(np.radians((y0 + y1) / 2))
     k = min((w - 8) / ((x1 - x0) * cl), (h - 8) / (y1 - y0))
     punto = lambda x, y: (4 + (x - x0) * cl * k, 4 + (y1 - y) * k)
-    cortes = valores.quantile([.2, .4, .6, .8]).to_numpy()
+    por_barrio = barrios is not None and len(barrios) >= 10
+    base = barrios if por_barrio else valores
+    cortes = base.quantile([.2, .4, .6, .8]).to_numpy()
     clase = lambda v: int(np.searchsorted(cortes, v))
 
     def camino(g) -> str:
         polys = g.geoms if g.geom_type == "MultiPolygon" else [g]
         return " ".join("M" + " L".join(f"{a:.1f},{b:.1f}" for a, b in (punto(*c) for c in p.exterior.coords)) + "Z"
                         for p in polys)
-    fondo, textos = [], []
+    fondo, lineas, textos = [], [], []
+    if por_barrio:
+        for f in zonas.cargar("barrios", ciudad)["features"]:
+            v = barrios.get((f["properties"].get("comuna"), f["properties"]["nombre"]))
+            fondo.append(f'<path d="{camino(shape(f["geometry"]))}" fill="{RAMPA[clase(v)] if pd.notna(v) else "#f0efec"}" '
+                         f'stroke="#ffffff" stroke-width="0.4"/>')
     for cod, g in feats:
-        v = valores.get(cod)
-        fondo.append(f'<path d="{camino(g)}" fill="{RAMPA[clase(v)] if pd.notna(v) else "#f0efec"}" '
-                     f'stroke="#ffffff" stroke-width="1"/>')
-        cx, cy = punto(*g.representative_point().coords[0])
-        bx0, by1, bx1, by0 = g.bounds
+        fuera = area and cod not in del_nucleo
+        v = None if fuera else valores.get(cod)
+        if por_barrio:
+            if fuera:
+                fondo.insert(0, f'<path d="{camino(g)}" fill="{ALREDEDORES}" stroke="#ffffff" stroke-width="1"/>')
+            else:
+                lineas.append(f'<path d="{camino(g)}" fill="none" stroke="#52514e" stroke-width="0.9"/>')
+        else:
+            relleno = ALREDEDORES if fuera else (RAMPA[clase(v)] if pd.notna(v) else "#f0efec")
+            fondo.append(f'<path d="{camino(g)}" fill="{relleno}" stroke="#ffffff" stroke-width="1"/>')
+        visible = shapely.clip_by_rect(g, x0, y0, x1, y1)
+        if visible.is_empty:
+            continue
+        cx, cy = punto(*visible.representative_point().coords[0])
+        bx0, by1, bx1, by0 = visible.bounds
         ancho, alto = (bx1 - bx0) * cl * k, (by0 - by1) * k
         if etiquetas.get(cod) and 4 <= cx <= w - 4 and 6 <= cy <= h - 4 and min(ancho, alto) >= 16:
-            textos.append(_txt(cx, cy + 2.5, etiquetas[cod], color="#ffffff" if pd.notna(v) and clase(v) >= 3 else "#0b0b0b"))
-    lims = [valores.min(), *cortes, valores.max()]
+            if por_barrio:                  # sobre barrios de colores: el número en un círculo blanco
+                textos.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="5.5" fill="#ffffff" fill-opacity="0.85"/>')
+                textos.append(_txt(cx, cy + 2.2, etiquetas[cod], size=5.8))
+            else:
+                textos.append(_txt(cx, cy + 2.5, etiquetas[cod], color="#ffffff" if pd.notna(v) and clase(v) >= 3 else "#0b0b0b"))
+    lims = [base.min(), *cortes, base.max()]
     leyenda = "".join(f'<span class="ley"><i style="background:{c}"></i>{_mill(lims[i])}–{_mill(lims[i + 1])}</span>'
                       for i, c in enumerate(RAMPA)) + '<span class="ley"><i style="background:#f0efec"></i>pocos datos</span>'
-    return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}">{"".join(fondo + textos)}</svg>', leyenda
+    if por_barrio:
+        leyenda += f'<span class="ley"><i class="linea"></i>{_plural(zonas.division(ciudad))}</span>'
+    if area:
+        leyenda += f'<span class="ley"><i style="background:{ALREDEDORES}"></i>alrededores: ver la tabla</span>'
+    return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}">{"".join(fondo + lineas + textos)}</svg>', leyenda
 
 
 def frases(d: dict) -> list[str]:
@@ -290,7 +341,7 @@ def frases(d: dict) -> list[str]:
     if len(t):
         cara, rent = t.index[0], t["rentab"].dropna()
         lineas.append(
-            f"La {d['division']} más cara por m² es <b>{html.escape(nombres[cara])}</b> "
+            f"La zona más cara por m² es <b>{html.escape(nombres[cara])}</b> "
             f"({html.escape(str(t.loc[cara, 'barrios']))}), con {_mill(t.loc[cara, 'precio_m2'])}/m²"
             + (f"; la de mayor rentabilidad bruta típica, <b>{html.escape(nombres[rent.idxmax()])}</b> "
                f"({html.escape(str(t.loc[rent.idxmax(), 'barrios']))}), con {_pct(rent.max(), 1)}." if len(rent) else "."))
@@ -364,13 +415,21 @@ def _por_zona_html(d: dict, periodo: str) -> str:
     """El mapa (página 1) y la tabla por comuna o localidad (página 2)."""
     t, nombres, div = d["tabla"], d["nombres"], d["division"]
     filas = "".join(_fila(nombres.get(c, c), r, t["precio_m2"].max(), t["rentab"].max()) for c, r in t.iterrows())
-    svg_mapa, leyenda = mapa(d["todas"]["precio_m2"], d["ciudad"], d["puntos"])
+    svg_mapa, leyenda = mapa(d["todas"]["precio_m2"], d["ciudad"], d["puntos"], d["barrios"])
     lista = lambda cs: ", ".join(html.escape(nombres.get(c, c)) for c in cs)
     Div, divs = div.capitalize(), _plural(div)
-    return f"""<h2>Precio por m² por {div}</h2>
+    por_barrio = len(d["barrios"]) >= 10
+    aproximados = por_barrio and any(f["properties"].get("aproximado") for f in zonas.cargar("barrios", d["ciudad"])["features"])
+    nota_mapa = (f"<p>Cada barrio con al menos {MIN_BARRIO} viviendas en venta lleva su color; las líneas son las "
+                 f"{divs}.{' Barrios aproximados a partir de OpenStreetMap.' if aproximados else ''}</p>"
+                 if por_barrio else "")
+    from src.mapa_ciudad import URL as URL_MAPAS
+    enlace = (f'<p class="enlace"><a href="{URL_MAPAS}/{zonas.slug(d["ciudad"])}.html">Ver mapa interactivo ↗</a> '
+              f'todos los avisos de los dos portales, por barrio y con su enlace</p>')
+    return f"""<h2>Precio por m² por {'barrio' if por_barrio else div}</h2>
 <div class="mapa-fila"><div>{svg_mapa}</div>
-  <div class="mapa-txt"><div class="leyenda">{leyenda}</div>
-    <p>Las más caras por m²: {lista(t.index[:4])}. Las de mayor rentabilidad bruta típica: {lista(t["rentab"].nlargest(3).index)}.</p>
+  <div class="mapa-txt">{enlace}<div class="leyenda">{leyenda}</div>{nota_mapa}
+    <p>Las zonas más caras por m²: {lista(t.index[:4])}. Las de mayor rentabilidad bruta típica: {lista(t["rentab"].nlargest(3).index)}.</p>
     <p>El detalle de cada {div}, con los días que llevan publicados sus avisos, el canon y la rentabilidad, en la
       página siguiente.</p></div></div>
 
@@ -431,11 +490,14 @@ def informe_html(d: dict) -> str:
   .t-note {{ color: var(--muted); font-size: 7pt; line-height: 1.3; }}
   .resumen {{ border-left: 2.5pt solid var(--blue); padding: 1pt 0 1pt 9pt; margin: 8pt 0 0; }}
   .resumen ul {{ margin: 0; padding-left: 10pt; }} .resumen li {{ margin-bottom: 2pt; }}
-  .mapa-fila {{ display: grid; grid-template-columns: 250pt 1fr; gap: 14pt; align-items: start; margin-top: 4pt; }}
+  .mapa-fila {{ display: grid; grid-template-columns: 300pt 1fr; gap: 14pt; align-items: start; margin-top: 4pt; }}
   .mapa-txt p {{ color: var(--ink-2); margin: 7pt 0 0; }}
   .leyenda {{ line-height: 1.9; }}
   .ley {{ display: inline-block; margin-right: 9pt; font-size: 7.2pt; color: var(--ink-2); white-space: nowrap; }}
   .ley i {{ display: inline-block; width: 9pt; height: 9pt; border-radius: 2pt; vertical-align: -1.5pt; margin-right: 3pt; }}
+  .ley i.linea {{ background: none; border: 1.2pt solid #52514e; border-radius: 1pt; }}
+  .enlace {{ margin: 0 0 8pt !important; color: var(--ink-2); font-size: 7.6pt; }}
+  .enlace a {{ font-size: 9pt; display: block; margin-bottom: 1pt; }}
   table {{ width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }}
   th {{ text-align: left; font-weight: 500; color: var(--ink-2); font-size: 7.4pt; padding: 0 4pt 4pt;
         border-bottom: 1px solid var(--line); vertical-align: bottom; }}

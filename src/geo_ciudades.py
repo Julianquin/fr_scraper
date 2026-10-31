@@ -16,11 +16,23 @@ Fuentes (31-oct-2026):
                 localidades o ninguna): cada barrio va a la que contiene su punto interior
   Bucaramanga, Manizales, Armenia, Pereira
                 comunas de OpenStreetMap (límites administrativos de nivel 8 dentro del municipio, del extract
-                de Colombia en data/osm/, ODbL)
+                de Colombia en data/osm/, ODbL). Barrios: en Pereira, sus polígonos de OSM (nivel 9, sin los
+                conjuntos residenciales); en Bucaramanga, Manizales y Armenia, APROXIMADOS a partir de los puntos
+                de barrio de OSM (place=neighbourhood): cada lugar va al barrio más cercano dentro de su comuna
   Áreas metropolitanas (zonas.AREAS)
                 las zonas del núcleo, su parte rural (lo del municipio que queda fuera de ellas) y cada
                 municipio vecino como una zona: límites municipales del DANE (MGN, COD-AB de HDX, CC BY-IGO)
-Cali tiene las suyas de la IDESC (src/zonas.py). Cartagena no tiene capa oficial publicada: va sin mapa.
+  Cartagena     barrios y localidades del Catastro Distrital (cartografía catastral en datos.gov.co, d7hk-qg8h;
+                1,2 GB: se guardan solo las capas Barrio y Localidadcomuna, de MAGNA-SIRGAS Origen Nacional a WGS84)
+  Cali          las 22 comunas y sus barrios (IDESC, src/zonas.py) + la zona de expansión urbana con sus 20
+                sectores + los 15 corregimientos con sus 95 veredas (IDESC, Acuerdo 0636 de 2026): sin ellos, los
+                avisos del corredor Cali–Jamundí y de Pance o La Buitrera quedaban sin zona
+  Todas las ciudades: lo que quede del municipio (límite del DANE) fuera de sus zonas va como una zona
+  «expansión y zona rural», para que ningún aviso del municipio se quede sin zona (si es más del 2% del
+  municipio: lo demás son diferencias de trazado entre la fuente oficial y el DANE). Y <slug>_vecinos.geojson:
+  los municipios que lindan con ella (y los de su área), para el mapa interactivo: ahí caen los avisos que
+  dicen «Cali» pero están en Yumbo o Jamundí, o «Barranquilla» pero están en Puerto Colombia
+  Cali, tras `python -m src.zonas` (que vuelve a bajar solo lo urbano): `python -m src.geo_ciudades --ciudad Cali`
 
 Lo descargado se guarda en data/geo_fuentes/ (local, no se versiona) y se reutiliza: algunos servidores cortan
 descargas largas, y así basta con bajarlo una vez.
@@ -56,6 +68,7 @@ FUENTES = {
     "medellin_comunas": f"{MEDELLIN}/0",
     "medellin_barrios": f"{MEDELLIN}/1",
     "barranquilla_barrios": "https://www.datos.gov.co/resource/qui6-qeux.geojson?$limit=5000",
+    "cartagena": "https://www.datos.gov.co/download/d7hk-qg8h/application%2Fzip",
     "municipios": "https://data.humdata.org/dataset/50ea7fee-f9af-45a7-8a52-abb9c790a0b6/resource/"
                   "32fba556-0109-4d1c-84cb-c8abddf7775b/download/col-administrative-divisions-shapefiles.zip",
 }
@@ -107,7 +120,7 @@ def _arcgis(capa: str) -> list[dict]:
 
 
 # Tildes y números romanos que las fuentes no traen (Catastro escribe en mayúsculas sin tildes)
-ARREGLOS = {"usaquen": "Usaquén", "martires": "Mártires", "fontibon": "Fontibón", "engativa": "Engativá",
+ARREGLOS = {"pichinde": "Pichindé", "usaquen": "Usaquén", "martires": "Mártires", "fontibon": "Fontibón", "engativa": "Engativá",
             "bolivar": "Bolívar", "cristobal": "Cristóbal", "belen": "Belén", "america": "América", "area": "Área",
             "expansion": "Expansión", "rincon": "Rincón", "nicolas": "Nicolás", "jose": "José", "maria": "María",
             "ii": "II", "iii": "III", "iv": "IV"}
@@ -227,9 +240,54 @@ def _comunas_osm(rels: pd.DataFrame, ciudad: str) -> list[tuple[dict, object]]:
     return comunas
 
 
-def osm(rels: pd.DataFrame, ciudad: str) -> None:
-    _guardar(f"{slug(ciudad)}_comunas", _comunas_osm(rels, ciudad),
-             "OpenStreetMap (ODbL), límites administrativos de nivel 8")
+def _puntos_barrio() -> pd.DataFrame:
+    """Los puntos de barrio de OSM (place = neighbourhood, suburb o quarter, con nombre)."""
+    import duckdb
+    pbf = sorted(glob.glob(str(BASE_DIR / "data" / "osm" / "*.pbf")))[-1]
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    return con.execute(f"""SELECT id, lat, lon, tags['name'] AS nombre FROM ST_ReadOSM('{pbf}')
+                           WHERE kind = 'node' AND tags['place'] IN ('neighbourhood', 'suburb', 'quarter')
+                             AND tags['name'] IS NOT NULL""").df()
+
+
+def _barrios_aproximados(comunas: list[tuple[dict, object]], puntos: pd.DataFrame) -> list[tuple[dict, object]]:
+    """Polígonos de Voronoi de los puntos de barrio, recortados a su comuna: cada lugar de la comuna va al
+    barrio más cercano. Las comunas sin puntos quedan sin barrios."""
+    puntos = puntos[~puntos["nombre"].str.match(r"(?i)comuna\b")]
+    barrios = []
+    for props, g in comunas:
+        p = puntos[shapely.contains_xy(g, puntos["lon"], puntos["lat"])]
+        if p.empty:
+            continue
+        pts = shapely.points(p["lon"], p["lat"])
+        celdas = [g] if len(p) == 1 else list(shapely.voronoi_polygons(shapely.MultiPoint(pts), extend_to=g).geoms)
+        for celda in celdas:
+            i = [k for k, pt in enumerate(pts) if celda.contains(pt)]
+            if i:
+                r = p.iloc[i[0]]
+                barrios.append(({"codigo": f"osm{r['id']}", "nombre": str(r["nombre"]), "comuna": props["codigo"],
+                                 "aproximado": True}, celda.intersection(g)))
+    return barrios
+
+
+def osm(rels: pd.DataFrame, ciudad: str, puntos: pd.DataFrame) -> None:
+    comunas = _comunas_osm(rels, ciudad)
+    _guardar(f"{slug(ciudad)}_comunas", comunas, "OpenStreetMap (ODbL), límites administrativos de nivel 8")
+    if ciudad == "Pereira":                     # sus barrios de OSM, sin los conjuntos residenciales
+        muni = rels.loc[rels["id"] == OSM_MUNICIPIOS[ciudad], "geometry"].iloc[0]
+        sub = rels[rels["nivel"] == "9"]
+        sub = sub[shapely.contains(muni, shapely.point_on_surface(sub["geometry"].to_numpy()))
+                  & ~sub["nombre"].fillna("").str.match(r"(?i)(conjunto|condominio|unidad|edificio|urbanizaci[oó]n cerrada)")]
+        barrios = [({"codigo": f"osm{r['id']}", "nombre": str(r["nombre"])}, r["geometry"]) for _, r in sub.iterrows()]
+        _con_comuna(barrios, comunas)
+        fuente = "OpenStreetMap (ODbL), barrios (nivel 9)"
+    else:
+        barrios = _barrios_aproximados(comunas, puntos)
+        fuente = ("OpenStreetMap (ODbL), barrios APROXIMADOS a partir de sus puntos: cada lugar va al barrio más "
+                  "cercano dentro de su comuna")
+    if barrios:
+        _guardar(f"{slug(ciudad)}_barrios", barrios, fuente)
 
 
 def _municipios() -> pd.DataFrame:
@@ -269,7 +327,7 @@ def area(nombre: str, m: pd.DataFrame) -> None:
     zonas_ = [(f["properties"] | {"_tolerancia": 0}, shape(f["geometry"])) for f in base["features"]]
     resto = _municipio(m, nucleo, departamento)["geometry"].difference(unary_union([g for _, g in zonas_]))
     partes = [g for g in getattr(resto, "geoms", [resto]) if g.area > 2e-5]       # sin las astillas del borde
-    if partes:
+    if partes and not any(p["codigo"] == "rural" for p, _ in zonas_):    # completar() ya la suele dejar
         zonas_.append(({"codigo": "rural", "nombre": f"{nucleo}, expansión y zona rural", "etiqueta": ""},
                        unary_union(partes)))
     for v in vecinos:
@@ -280,7 +338,114 @@ def area(nombre: str, m: pd.DataFrame) -> None:
     _guardar(f"{slug(nombre)}_comunas", zonas_, fuente)          # los barrios: los del núcleo (zonas.archivo)
 
 
-CONSTRUCTORES = {"Bogotá": bogota, "Medellín": medellin}
+def cartagena() -> None:
+    """Barrios y localidades del Catastro Distrital: solo las dos capas que sirven del ZIP de 1,2 GB."""
+    import duckdb
+    carpeta = CACHE / "cartagena" / "SHP_Catastro_AMB_Cartagena"
+    if not (carpeta / "Barrio.shp").exists():
+        zip_ = CACHE / "cartagena" / "catastro_cartagena.zip"
+        zip_.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(FUENTES["cartagena"], zip_)
+        with zipfile.ZipFile(zip_) as z:
+            z.extractall(zip_.parent, [n for n in z.namelist() if re.search(r"/(Barrio|Localidadcomuna)\.", n)])
+        zip_.unlink()
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    leer = lambda capa: con.execute(f"""
+        SELECT * EXCLUDE (geom), ST_AsWKB(ST_Transform(ST_Force2D(geom), 'EPSG:9377', 'EPSG:4326', always_xy := true)) AS wkb
+        FROM ST_Read('{carpeta / capa}.shp')""").df()
+    loc = leer("Localidadcomuna").sort_values("nombre").reset_index(drop=True)
+    comunas = [({"codigo": f"{i:02d}", "nombre": _titulo(r["nombre"]).replace("Turistica", "Turística")
+                 .replace("Bahia", "Bahía").replace("Historica", "Histórica"), "etiqueta": ""},
+                shapely.from_wkb(bytes(r["wkb"]))) for i, r in enumerate(loc.to_dict("records"), 1)]
+    barrios = [({"codigo": str(r["OGC_FID"]), "nombre": _titulo(r["nombre"])}, shapely.from_wkb(bytes(r["wkb"])))
+               for r in leer("Barrio").to_dict("records") if r["nombre"]]
+    _con_comuna(barrios, comunas)
+    fuente = "Catastro Distrital de Cartagena de Indias (cartografía catastral, datos.gov.co)"
+    _guardar("cartagena_comunas", comunas, fuente)
+    _guardar("cartagena_barrios", barrios, fuente)
+
+
+def _idesc(capa: str) -> dict:
+    """Una capa del WFS de la IDESC (Cali), con copia en data/geo_fuentes/cali/."""
+    from src.zonas import WFS
+    copia = CACHE / "cali" / f"{capa.split(':')[1]}.geojson"
+    if not copia.exists():
+        copia.parent.mkdir(parents=True, exist_ok=True)
+        copia.write_text(json.dumps(_json(WFS + capa), ensure_ascii=False), encoding="utf-8")
+    return json.loads(copia.read_text(encoding="utf-8"))
+
+
+def cali() -> None:
+    """Cali completa: a las 22 comunas urbanas y sus barrios (src/zonas.py) les suma la zona de expansión
+    urbana (código 81, con sus sectores como barrios) y los 15 corregimientos (con sus veredas)."""
+    urbanas = {f"{i:02d}" for i in range(1, 23)}
+    base_c = json.loads((GEO_DIR / "cali_comunas.geojson").read_text(encoding="utf-8"))
+    base_b = json.loads((GEO_DIR / "cali_barrios.geojson").read_text(encoding="utf-8"))
+    comunas = [(f["properties"] | {"etiqueta": str(int(f["properties"]["codigo"])), "_tolerancia": 0}, shape(f["geometry"]))
+               for f in base_c["features"] if f["properties"]["codigo"] in urbanas]
+    barrios = [(f["properties"] | {"_tolerancia": 0}, shape(f["geometry"]))
+               for f in base_b["features"] if f["properties"].get("comuna") in urbanas]
+    urbano = unary_union([g for _, g in comunas])
+    expansion = unary_union([shape(f["geometry"]) for f in _idesc("dapm:pdt_dpa_suelo_exp_urb")["features"]]).difference(urbano)
+    comunas.append(({"codigo": "81", "nombre": "Zona de expansión (corredor Cali–Jamundí)", "etiqueta": ""}, expansion))
+    barrios += [({"codigo": f["properties"]["ssecodigo"], "nombre": f["properties"]["ssenombre"], "comuna": "81"},
+                 shape(f["geometry"]).difference(urbano)) for f in _idesc("dapm:pdt_dpa_sectores_suelo_exp_urb")["features"]]
+    ocupado = unary_union([urbano, expansion])
+    comunas += [({"codigo": f["properties"]["corrcod"], "nombre": f"Corregimiento {_titulo(f['properties']['corrnombre'])}",
+                  "etiqueta": ""}, shape(f["geometry"]).difference(ocupado))
+                for f in _idesc("dapm:pdt_dpa_corregimientos")["features"]]
+    barrios += [({"codigo": f["properties"]["vercodigo"], "nombre": _titulo(f["properties"]["vernombre"]),
+                  "comuna": f["properties"]["vercodcorr"]}, shape(f["geometry"]).difference(ocupado))
+                for f in _idesc("dapm:pdt_dpa_veredas")["features"]]
+    fuente = ("IDESC, Alcaldía de Cali (Acuerdo 0636 de 2026): comunas y barrios, zona de expansión urbana y sus "
+              "sectores, corregimientos y veredas")
+    _guardar("cali_comunas", comunas, fuente)
+    _guardar("cali_barrios", barrios, fuente)
+
+
+# El municipio de cada ciudad en el DANE (nombre y departamento) para completar sus zonas
+MUNICIPIO = {"Cali": ("Cali", "Valle del Cauca"), "Bogotá": ("Bogotá", "Bogotá"), "Medellín": ("Medellín", "Antioquia"),
+             "Barranquilla": ("Barranquilla", "Atlántico"), "Cartagena": ("Cartagena de Indias", "Bolívar"),
+             "Bucaramanga": ("Bucaramanga", "Santander"), "Manizales": ("Manizales", "Caldas"),
+             "Armenia": ("Armenia", "Quindío"), "Pereira": ("Pereira", "Risaralda")}
+
+
+MIN_RURAL = 0.02       # la zona rural, si es al menos esta parte del municipio (lo demás son astillas del borde)
+
+
+def completar(ciudad: str, m: pd.DataFrame) -> None:
+    """Lo que quede del municipio fuera de las zonas de la ciudad va como una zona más: «<ciudad>, expansión y
+    zona rural» (en Barranquilla, Alameda del Río y La Playa; en Pereira, Cerritos)."""
+    nombre, depto = MUNICIPIO[ciudad]
+    p = GEO_DIR / f"{slug(ciudad)}_comunas.geojson"
+    gj = json.loads(p.read_text(encoding="utf-8"))
+    gj["features"] = [f for f in gj["features"] if f["properties"]["codigo"] != "rural"]
+    municipio = _municipio(m, nombre, depto)["geometry"]
+    resto = municipio.difference(unary_union([shape(f["geometry"]) for f in gj["features"]]))
+    partes = [g for g in getattr(resto, "geoms", [resto]) if g.area > 2e-5]                # sin las astillas del borde
+    rural = sum(g.area for g in partes) >= MIN_RURAL * municipio.area
+    if rural:
+        geom = shapely.set_precision(unary_union(partes).simplify(TOLERANCIA_MUNICIPIOS), 1e-5)
+        gj["features"].append({"type": "Feature", "geometry": mapping(geom),
+                               "properties": {"codigo": "rural", "nombre": f"{ciudad}, expansión y zona rural", "etiqueta": ""}})
+    p.write_text(json.dumps(gj, ensure_ascii=False), encoding="utf-8")
+    print(f"   {ciudad}: {'añadida su zona rural' if rural else 'sus zonas ya cubren el municipio'}")
+
+
+def vecinos(ciudad: str, m: pd.DataFrame) -> None:
+    """<slug>_vecinos.geojson: los municipios que lindan con la ciudad y los de su área metropolitana."""
+    nombre, depto = MUNICIPIO[ciudad]
+    propio = _municipio(m, nombre, depto)
+    del_area = [_municipio(m, v, d)["pcode"] for a, (n, d, vs) in AREAS.items() if n == ciudad for v in vs]
+    lindan = m["geometry"].map(lambda g: g.intersects(propio["geometry"].buffer(0.002)))
+    sel = m[(lindan | m["pcode"].isin(del_area)) & (m["pcode"] != propio["pcode"])]
+    feats = [({"codigo": f["pcode"].removeprefix("CO"), "nombre": f["nombre"].split(",")[0],
+               "departamento": f["departamento"]}, f["geometry"]) for _, f in sel.iterrows()]
+    _guardar(f"{slug(ciudad)}_vecinos", feats, "DANE (MGN, COD-AB de HDX, CC BY-IGO)", 0.001)   # solo de contexto: ~100 m
+
+
+CONSTRUCTORES = {"Bogotá": bogota, "Medellín": medellin, "Cartagena": cartagena, "Cali": cali}
 
 
 if __name__ == "__main__":
@@ -293,11 +458,13 @@ if __name__ == "__main__":
             f()
     con_osm = [c for c in ["Barranquilla", *SOLO_OSM] if not a.ciudad or a.ciudad == c]
     if con_osm:
-        rels = _osm_limites()
+        rels, puntos = _osm_limites(), _puntos_barrio()
         for ciudad in con_osm:
-            barranquilla(rels) if ciudad == "Barranquilla" else osm(rels, ciudad)
-    areas = [x for x in AREAS if not a.ciudad or a.ciudad == x]          # después de sus núcleos
-    if areas:
-        m = _municipios()
-        for x in areas:
-            area(x, m)
+            barranquilla(rels) if ciudad == "Barranquilla" else osm(rels, ciudad, puntos)
+    m = _municipios()
+    for ciudad in MUNICIPIO:                                             # después de construir cada ciudad
+        if not a.ciudad or a.ciudad == ciudad:
+            completar(ciudad, m)
+            vecinos(ciudad, m)
+    for x in [x for x in AREAS if not a.ciudad or a.ciudad == x]:       # después de sus núcleos
+        area(x, m)

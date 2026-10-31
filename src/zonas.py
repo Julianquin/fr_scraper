@@ -2,7 +2,7 @@
 Zonas oficiales de las ciudades (barrios y comunas o localidades), en data/geo/<ciudad>_{comunas,barrios}.geojson.
 
   - Cali: `descargar()` baja los polígonos del WFS de la IDESC (Alcaldía de Santiago de Cali).
-  - Bogotá, Medellín, Barranquilla, Bucaramanga, Manizales, Armenia y Pereira: src/geo_ciudades.py (E6).
+  - Bogotá, Medellín, Barranquilla, Cartagena, Bucaramanga, Manizales, Armenia y Pereira: src/geo_ciudades.py (E6).
   - Se versionan simplificados: el CI no depende de que las fuentes estén arriba.
   - `asignar_zonas(df, ciudad)` le pone a cada aviso su barrio y su comuna (o localidad) oficial:
     por coordenadas (punto dentro del polígono) y, si no tiene, por nombre. Sin barrios (las ciudades
@@ -45,6 +45,7 @@ CIUDADES = {
     "Manizales": {"division": "comuna", "fuente": "OpenStreetMap", "transporte": "transporte masivo"},
     "Armenia": {"division": "comuna", "fuente": "OpenStreetMap", "transporte": "transporte masivo"},
     "Pereira": {"division": "comuna", "fuente": "OpenStreetMap", "transporte": "Megabús"},
+    "Cartagena": {"division": "localidad", "fuente": "Catastro Distrital de Cartagena", "transporte": "Transcaribe"},
 }
 # Áreas metropolitanas: núcleo y municipios vecinos (nombre y departamento como los escribe el DANE)
 AREAS = {
@@ -73,6 +74,8 @@ CAPAS = {
                              {"comcodigo": "codigo", "comnombre": "nombre"}),
 }
 TOLERANCIA = 0.00005   # ~5 m: simplificación de bordes para aligerar el HTML
+CERCA = 0.0018         # ~200 m: un aviso fuera de toda zona pero a menos de esto va a la más cercana (la costa
+                       # de Cartagena, los bordes entre la fuente oficial y el DANE)
 
 
 def normalizar(s) -> str:
@@ -176,11 +179,13 @@ def cargar(nivel: str, ciudad: str = "Cali") -> dict:
 
 
 def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
-    """Añade `barrio_oficial`, `comuna` y `zona_por` ('coordenadas' | 'nombre').
+    """Añade `barrio_oficial`, `comuna` y `zona_por` ('coordenadas' | 'nombre' | 'cercanía').
 
     Las coordenadas mandan: el campo Barrio del aviso coincide con el barrio
     oficial solo ~40% de las veces. El nombre se usa solo si no hay coordenadas.
-    Sin capa de barrios, la comuna sale directamente de su polígono.
+    Sin capa de barrios, la comuna sale directamente de su polígono. Lo que quede
+    fuera de toda zona a menos de CERCA va a la comuna más cercana; más lejos,
+    sin zona (casi siempre, otro municipio: Yumbo, Puerto Colombia…).
     """
     df = df.copy()
     df["barrio_oficial"] = None
@@ -194,7 +199,7 @@ def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
         idx = df.index[con_geo][i_pt]
         df.loc[idx, "comuna"] = np.array([f["properties"]["codigo"] for f in feats], dtype=object)[i_pol]
         df.loc[idx, "zona_por"] = "coordenadas"
-        return df
+        return _cercanos(df, ciudad)
 
     feats = cargar("barrios", ciudad)["features"]
     geoms = [shape(f["geometry"]) for f in feats]
@@ -209,7 +214,7 @@ def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
     df.loc[idx, "zona_por"] = "coordenadas"
 
     # 2) Sin coordenadas: por nombre normalizado
-    por_nombre = dict(zip(map(normalizar, nombres), zip(nombres, comunas)))
+    por_nombre = dict(zip(map(normalizar, nombres[::-1]), zip(nombres[::-1], comunas[::-1])))  # gana el primero (urbano)
     sin_geo = ~con_geo & df["Barrio"].notna()
     match = df.loc[sin_geo, "Barrio"].map(lambda b: por_nombre.get(normalizar(b)))
     match = match.dropna()
@@ -226,6 +231,20 @@ def asignar_zonas(df: pd.DataFrame, ciudad: str = "Cali") -> pd.DataFrame:
         idx = df.index[falta][i_pt]
         df.loc[idx, "comuna"] = np.array([f["properties"]["codigo"] for f in feats], dtype=object)[i_pol]
         df.loc[idx, "zona_por"] = df.loc[idx, "zona_por"].fillna("coordenadas")
+    return _cercanos(df, ciudad)
+
+
+def _cercanos(df: pd.DataFrame, ciudad: str) -> pd.DataFrame:
+    """4) Fuera de toda zona pero a menos de CERCA: la comuna más cercana (zona_por 'cercanía')."""
+    falta = df["comuna"].isna() & df["Latitud"].notna() & df["Longitud"].notna()
+    if falta.any():
+        feats = cargar("comunas", ciudad)["features"]
+        pts = shapely.points(df.loc[falta, "Longitud"], df.loc[falta, "Latitud"])
+        i_pt, i_pol = shapely.STRtree([shape(f["geometry"]) for f in feats]).query_nearest(
+            pts, max_distance=CERCA, all_matches=False)
+        idx = df.index[falta][i_pt]
+        df.loc[idx, "comuna"] = np.array([f["properties"]["codigo"] for f in feats], dtype=object)[i_pol]
+        df.loc[idx, "zona_por"] = "cercanía"
     return df
 
 

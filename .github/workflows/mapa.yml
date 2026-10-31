@@ -1,9 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Mapa de precios de Cali en GitHub Pages.
+# Mapas de mercado en GitHub Pages.
 #
-# Corre cuando termina el barrido diario (barrido_http.yml): baja el estado del barrido
-# (estado/ en R2), regenera docs/cali.html con los avisos activos (--fuente http) y lo
-# publica. Antes lo hacía el job "pages" del scraper viejo (scraper.yml).
+# Corre cuando termina el barrido de Metrocuadrado (metrocuadrado.yml, el último de la cadena), así
+# los mapas llevan los dos portales del mismo día. Baja los estados (estado/ y estado_m2_venta/) de R2
+# y regenera:
+#   - docs/cali.html: el mapa de Cali de siempre (src/viz_map.py, solo FincaRaíz)
+#   - docs/mapa/: un mapa ligero por ciudad y área metropolitana, con los dos portales sin repetidos,
+#     y su índice (src/mapa_ciudad.py). El informe semanal enlaza a ellos. No se versionan (llevan
+#     enlaces a avisos y el repo es público): solo se publican.
 #
 # Requiere Settings → Pages → Source = GitHub Actions.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11,7 +15,7 @@ name: Mapa (GitHub Pages)
 
 on:
   workflow_run:
-    workflows: ["Barrido diario (venta y arriendo)"]
+    workflows: ["Barrido diario Metrocuadrado"]
     types: [completed]
   workflow_dispatch:
 
@@ -29,7 +33,7 @@ jobs:
     # Si falla un grupo del barrido el estado se consolida igual: el mapa sale salvo cancelación
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45            # ~15 mapas, unos 10–15 min
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -49,9 +53,13 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.consolidar --bajar
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.consolidar --raiz m2_venta --bajar
       - name: Regenerar el mapa en docs/
         run: python -m src.viz_map --ciudad Cali --out docs/cali.html --fuente http
+      - name: Un mapa por ciudad y área en docs/mapa/
+        run: python -m src.mapa_ciudad --todas
       - name: Configurar Pages
         uses: actions/configure-pages@v5
       - name: Empaquetar docs/ como artifact de Pages
@@ -67,5 +75,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
         run: >-
-          python -m src.monitor fallo "El mapa de Cali no se pudo publicar"
+          python -m src.monitor fallo "Los mapas no se pudieron publicar"
           --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
