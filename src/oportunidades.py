@@ -33,7 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src import eventos, master
+from src import eventos, master, zonas
 from src.config import BASE_DIR
 from src.viz_map import cargar_ciudad
 
@@ -76,6 +76,7 @@ def cargar(ciudad: str) -> pd.DataFrame:
         df = df.merge(m.astype({"id_inmueble": str}), on="id_inmueble", how="left")
     df["first_seen"] = pd.to_datetime(df["first_seen"])
     df["etiquetas"] = df["Etiquetas"].map(_etiquetas)
+    df["zona_nombre"] = df["comuna"].map(zonas.nombres(ciudad)) if zonas.tiene_zonas(ciudad) else None
     for c in ["Estrato", "Habitaciones", "Baños"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.reset_index(drop=True)
@@ -213,9 +214,16 @@ def _zona(r: pd.Series) -> str:
     return f"{barrio}{estrato}"
 
 
+def _en_zona(r: pd.Series) -> str:
+    """'en la comuna 2', 'en Chapinero', 'en el corregimiento Pance', 'en la zona de expansión (…)'."""
+    nombre = r.get("zona_nombre") if pd.notna(r.get("zona_nombre")) else f"Comuna {r['comuna']}"
+    articulo = {"Comuna": "la comuna", "Corregimiento": "el corregimiento", "Zona": "la zona", "Localidad": "la localidad"}
+    primera, _, resto = nombre.partition(" ")
+    return f"en {articulo[primera]} {resto}" if primera in articulo else f"en {nombre}"
+
+
 def _comps_txt(r: pd.Series) -> str:
-    donde = {"barrio": "en el barrio", "1 km": "a menos de 1 km",
-             "comuna": f"en la comuna {r['comuna']}"}[r["nivel_comps"]]
+    donde = {"barrio": "en el barrio", "1 km": "a menos de 1 km", "comuna": _en_zona(r)}[r["nivel_comps"]]
     return (f"{r['n_comps']} similares {donde}: mediana {_m2(r['med_comps'])} M/m² "
             f"(rango {_m2(r['p25_comps'])}–{_m2(r['p75_comps'])})")
 
