@@ -45,7 +45,7 @@ import pandas as pd
 
 from src.config import BASE_DIR
 from src.deduplicar import _km, _texto, diferencia_area, matriz_texto, puntaje, señales
-from src.zonas import AREAS, canonica, en_area
+from src.zonas import AREAS, canonica, corregir_ubicacion, en_area
 
 PORTALES = {"fincaraiz": "venta", "metrocuadrado": "m2_venta"}          # portal → raíz de consolidar
 TIPOS = {"Apartamento": "Apartamento", "Apartaestudio": "Apartamento", "Casa": "Casa"}   # M2 no separa apartaestudios
@@ -63,17 +63,18 @@ R2 = "estado_unificado"
 
 
 def cargar(ciudad: str | None = None) -> pd.DataFrame:
-    """Avisos de vivienda activos de los dos portales, en una sola tabla con `portal` y `clave`."""
+    """Avisos de vivienda activos de los dos portales, en una sola tabla con `portal` y `clave`, y la
+    ubicación corregida (zonas.corregir_ubicacion: `ubicacion` 'aviso', 'barrio' o vacía)."""
     from src.consolidar import rutas
     partes = []
     for portal, raiz in PORTALES.items():
         a = pd.read_parquet(rutas(raiz).avisos, columns=COLUMNAS + ["estado_aviso"])
-        a = a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)]
+        a = corregir_ubicacion(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)])
         if ciudad in AREAS:             # un área metropolitana: por coordenadas
             a = a[en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"])]
         elif ciudad:                    # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
             a = a[a["ciudad"].map(canonica) == canonica(ciudad)]
-        partes.append(a[COLUMNAS].assign(portal=portal, tipo=a["tipo"].map(TIPOS)))
+        partes.append(a[COLUMNAS + ["ubicacion"]].assign(portal=portal, tipo=a["tipo"].map(TIPOS)))
     d = pd.concat(partes, ignore_index=True)
     d["id_inmueble"] = d["id_inmueble"].astype(str)
     d["anunciante_id"] = d["anunciante_id"].astype(str).where(d["anunciante_id"].notna())
@@ -153,15 +154,24 @@ def grupos(d: pd.DataFrame) -> tuple[np.ndarray, pd.DataFrame]:
 
 
 def resumir(d: pd.DataFrame) -> pd.DataFrame:
-    """Una fila por inmueble (`id_unificado`) con sus avisos, portales, ficha y precios."""
+    """Una fila por inmueble (`id_unificado`) con sus avisos, portales, ficha y precios. La ubicación es la
+    media de sus avisos con ubicación propia; si todos fueron llevados a su barrio, la de ellos
+    (`ubicacion` 'barrio')."""
     num = lambda c: pd.to_numeric(d[c], errors="coerce")
-    return d.assign(precio=num("precio"), m2=num("m2"), habitaciones=num("habitaciones"),
-                    latitud=num("latitud"), longitud=num("longitud")).groupby("id_unificado").agg(
+    propia = (d["ubicacion"] == "aviso") if "ubicacion" in d else pd.Series(True, index=d.index)
+    inm = d.assign(precio=num("precio"), m2=num("m2"), habitaciones=num("habitaciones"),
+                   lat_propia=num("latitud").where(propia), lon_propia=num("longitud").where(propia),
+                   latitud=num("latitud"), longitud=num("longitud"), propia=propia).groupby("id_unificado").agg(
         n_avisos=("clave", "size"), portales=("portal", lambda s: "+".join(sorted(set(s)))),
         primera_vez=("primera_vez", "min"), tipo=("tipo", "first"), ciudad=("ciudad", "first"),
-        barrio=("barrio", "first"), latitud=("latitud", "mean"), longitud=("longitud", "mean"), m2=("m2", "median"),
+        barrio=("barrio", "first"), lat_propia=("lat_propia", "mean"), lon_propia=("lon_propia", "mean"),
+        latitud=("latitud", "mean"), longitud=("longitud", "mean"), propia=("propia", "any"), m2=("m2", "median"),
         habitaciones=("habitaciones", "median"), precio_min=("precio", "min"),
         precio_mediano=("precio", "median"), precio_max=("precio", "max")).reset_index()
+    inm["latitud"] = inm.pop("lat_propia").fillna(inm["latitud"])
+    inm["longitud"] = inm.pop("lon_propia").fillna(inm["longitud"])
+    inm["ubicacion"] = np.where(inm.pop("propia"), "aviso", np.where(inm["latitud"].notna(), "barrio", None))
+    return inm
 
 
 def unificar(ciudad: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

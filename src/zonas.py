@@ -76,6 +76,8 @@ CAPAS = {
 TOLERANCIA = 0.00005   # ~5 m: simplificación de bordes para aligerar el HTML
 CERCA = 0.0018         # ~200 m: un aviso fuera de toda zona pero a menos de esto va a la más cercana (la costa
                        # de Cartagena, los bordes entre la fuente oficial y el DANE)
+COLOMBIA = (-4.3, 13.6, -82.0, -66.8)   # latitud y longitud mínima y máxima (con San Andrés)
+LEJOS_BARRIO = 3       # km: más lejos que esto del barrio que nombra, y fuera de su ciudad, el punto está mal
 
 
 def normalizar(s) -> str:
@@ -171,6 +173,59 @@ def descargar() -> None:
         out.write_text(json.dumps({"type": "FeatureCollection", "fuente": FUENTE,
                                    "features": feats}, ensure_ascii=False), encoding="utf-8")
         print(f"✅ {len(feats)} polígonos → {out} ({out.stat().st_size / 1e3:.0f} KB)")
+
+
+_UBICACION: dict = {}
+
+
+def _ubicacion(ciudad: str) -> tuple:
+    """(toda la ciudad, {barrio normalizado: [(polígono, su punto interior)]}), una vez por ciudad."""
+    if ciudad not in _UBICACION:
+        toda = shapely.union_all([shape(f["geometry"]) for f in cargar("comunas", ciudad)["features"]])
+        shapely.prepare(toda)
+        barrios: dict = {}
+        for f in cargar("barrios", ciudad)["features"]:
+            g = shape(f["geometry"])
+            barrios.setdefault(normalizar(f["properties"]["nombre"]), []).append((g, g.representative_point()))
+        _UBICACION[ciudad] = toda, barrios
+    return _UBICACION[ciudad]
+
+
+def corregir_ubicacion(df: pd.DataFrame) -> pd.DataFrame:
+    """Corrige dos errores claros en `latitud`/`longitud` (casi siempre de Metrocuadrado, donde el anunciante
+    ubica el aviso a mano) y añade `ubicacion`: 'aviso' (la del aviso), 'barrio' (llevada al barrio que nombra)
+    o None (sin coordenadas). Lo guardado no cambia: se corrige al leer.
+      1. Fuera de Colombia o en (0, 0): sin coordenadas (salían en el mar o en otro país; 132 avisos el 31-oct).
+      2. Fuera de su ciudad (de todas sus zonas, con CERCA de margen) y a más de LEJOS_BARRIO km del barrio
+         oficial que nombra el aviso (`barrio`, de `ciudad`): al punto interior de ese barrio, el más cercano si
+         hay varios con el nombre. Ejemplo: "Cali, Valle del Lili" ubicado en Palmira.
+    Los avisos sin coordenadas siguen sin ellas (su zona sale del nombre del barrio, en asignar_zonas).
+    No se toca lo demás: en otro municipio y sin un barrio reconocible de la ciudad, el aviso suele estar de
+    verdad allí (Villa Campestre, de Puerto Colombia, vendido como Barranquilla); y dentro de la ciudad el
+    barrio escrito no es fiable (Bogotá tiene varios «Santa Bárbara»)."""
+    df = df.copy()
+    lat, lon = pd.to_numeric(df["latitud"], errors="coerce"), pd.to_numeric(df["longitud"], errors="coerce")
+    valida = (lat.between(COLOMBIA[0], COLOMBIA[1]) & lon.between(COLOMBIA[2], COLOMBIA[3])).to_numpy()
+    lat, lon = np.array(lat.where(valida), dtype=float), np.array(lon.where(valida), dtype=float)   # copias editables
+    ubicacion = np.where(valida, "aviso", None).astype(object)
+    canon = df["ciudad"].map(canonica).to_numpy()
+    nombre = df["barrio"].map(lambda b: normalizar(b) if isinstance(b, str) else None).to_numpy()
+    for ciudad in [c for c in CIUDADES if c not in AREAS and archivo("barrios", c).exists()]:
+        idx = np.flatnonzero(canon == ciudad)
+        if not len(idx):
+            continue
+        idx = idx[valida[idx]]
+        toda, barrios = _ubicacion(ciudad)
+        fuera = ~shapely.dwithin(toda, shapely.points(lon[idx], lat[idx]), CERCA)
+        for i in idx[fuera]:
+            if nombre[i] not in barrios:
+                continue
+            p = shapely.Point(lon[i], lat[i])
+            g, centro = min(barrios[nombre[i]], key=lambda o: o[0].distance(p))
+            if g.distance(p) * 111 > LEJOS_BARRIO:
+                lon[i], lat[i], ubicacion[i] = centro.x, centro.y, "barrio"
+    df["latitud"], df["longitud"], df["ubicacion"] = lat, lon, ubicacion
+    return df
 
 
 def cargar(nivel: str, ciudad: str = "Cali") -> dict:

@@ -12,6 +12,10 @@ Mapa interactivo por ciudad (E6): una página ligera por ciudad o área metropol
                                             ser de ella (en gris, con el enlace al mapa de su área)
   docs/mapa/index.html                      el índice de ciudades
 
+Ubicación: la de cada aviso, salvo los errores claros (zonas.corregir_ubicacion): fuera de Colombia, sin punto;
+fuera de su ciudad pero nombrando un barrio de ella, en ese barrio y con borde punteado ("ubicación aproximada").
+En el celular, los puntos son más grandes, se pueden tocar con margen y los del mismo edificio se abren en abanico.
+
 Ligero a propósito: los puntos van en un JSON compacto que la página carga al abrir (el mapa de Cali hecho con
 folium pesa 18 MB por los popups de cada punto). Sin datos de anunciantes: solo lo que muestra el aviso público
 y su enlace. El informe semanal (src/informe_semanal.py) enlaza a la página de su ciudad.
@@ -64,14 +68,14 @@ def puntos(ciudad: str) -> tuple[pd.DataFrame, pd.DataFrame]:
                      pm=m2.set_index("id_unificado")["precio"], um=m2.set_index("id_unificado")["url"]).reset_index()
 
     # Los demás tipos: solo FincaRaíz (Metrocuadrado solo barre vivienda)
-    cols = ["tipo", "precio", "m2", "habitaciones", "latitud", "longitud", "url", "ciudad", "estado_aviso"]
+    cols = ["tipo", "precio", "m2", "habitaciones", "latitud", "longitud", "url", "ciudad", "barrio", "estado_aviso"]
     o = pd.read_parquet(rutas("venta").avisos, columns=cols)
-    o = o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)]
+    o = zonas.corregir_ubicacion(o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)])
     o = o[zonas.en_area(ciudad, o["latitud"], o["longitud"], o["ciudad"])] if ciudad in zonas.AREAS \
         else o[o["ciudad"].map(zonas.canonica) == ciudad]
     otros = pd.DataFrame({"tipo": o["tipo"], "latitud": o["latitud"], "longitud": o["longitud"], "m2": o["m2"],
-                          "habitaciones": o["habitaciones"], "pf": o["precio"], "uf": o["url"]})
-    p = pd.concat([viv[["tipo", "latitud", "longitud", "m2", "habitaciones", "pf", "uf", "pm", "um"]], otros],
+                          "habitaciones": o["habitaciones"], "pf": o["precio"], "uf": o["url"], "ubicacion": o["ubicacion"]})
+    p = pd.concat([viv[["tipo", "latitud", "longitud", "m2", "habitaciones", "pf", "uf", "pm", "um", "ubicacion"]], otros],
                   ignore_index=True)
     for c in ("latitud", "longitud", "m2", "habitaciones", "pf", "pm"):
         p[c] = pd.to_numeric(p[c], errors="coerce")
@@ -136,6 +140,7 @@ def generar(ciudad: str, fecha: str) -> dict:
     filas = [[round(r.latitud, 5), round(r.longitud, 5), indice[r.tipo], redondo(r.pf / 1e6 if pd.notna(r.pf) else None, 1),
               redondo(r.pm / 1e6 if pd.notna(r.pm) else None, 1), redondo(r.m2), redondo(r.habitaciones),
               _ruta(r.uf, DOMINIOS["fr"]) or None, _ruta(r.um, DOMINIOS["m2"]) or None]
+             + ([1] if r.ubicacion == "barrio" else [])            # 1: llevado al barrio que nombra el aviso
              for r in p.itertuples()]
     lat, lon = p["latitud"], p["longitud"]
     caja = [[round(lat.quantile(.03), 4), round(lon.quantile(.03), 4)], [round(lat.quantile(.97), 4), round(lon.quantile(.97), 4)]]
@@ -231,7 +236,10 @@ PAGINA = r"""<!doctype html>
 <script>
 const C = __CONFIG__;
 const COLOR = {"Vivienda": "#2a78d6", "Comercial": "#eb6834", "Lotes y campo": "#1baf7a", "Otros": "#898781"};
-const mapa = L.map("mapa", {preferCanvas: true, zoomControl: false}).fitBounds(C.caja);
+// En el celular: puntos más grandes y que se puedan tocar con margen (tolerance, en píxeles)
+const tactil = matchMedia("(pointer: coarse)").matches;
+const mapa = L.map("mapa", {renderer: L.canvas({tolerance: tactil ? 12 : 4}), zoomControl: false, maxZoom: 19})
+  .fitBounds(C.caja);
 L.control.zoom({position: "bottomright"}).addTo(mapa);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   {attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>', maxZoom: 19}).addTo(mapa);
@@ -275,8 +283,9 @@ document.getElementById("leyenda").innerHTML = lims.length ?
   `<br><span>Al acercarse: barrios. Toque una zona o un punto para ver el detalle.</span>` : "";
 
 // Puntos: cargados al abrir, agrupados hasta acercarse
-const grupo = L.markerClusterGroup({chunkedLoading: true, maxClusterRadius: 45, disableClusteringAtZoom: 17,
-                                    showCoverageOnHover: false});
+// Agrupados hasta el zoom máximo: ahí, los del mismo edificio se abren en abanico al tocarlos
+const grupo = L.markerClusterGroup({chunkedLoading: true, maxClusterRadius: z => z >= 16 ? 25 : 45,
+                                    spiderfyDistanceMultiplier: tactil ? 2 : 1, showCoverageOnHover: false});
 mapa.addLayer(grupo);
 let marcas = [], datos;
 function popup(p) {
@@ -285,6 +294,7 @@ function popup(p) {
   let h = `<b>${tipo}</b>${m2 ? " · " + m2 + " m²" : ""}${hab ? " · " + hab + " hab" : ""}<br><b>${mill(precio)}</b>${pm2}<br>`;
   if (uf) h += `FincaRaíz ${pf && pm && pf !== pm ? mill(pf) + " " : ""}<a href="${C.dominios.fr}${uf}" target="_blank" rel="noopener">ver ↗</a><br>`;
   if (um) h += `Metrocuadrado ${pf && pm && pf !== pm ? mill(pm) + " " : ""}<a href="${C.dominios.m2}${um}" target="_blank" rel="noopener">ver ↗</a>`;
+  if (p[9]) h += `<br><i style="color:#52514e">Ubicación aproximada: el centro del barrio que dice el aviso<br>(sus coordenadas caían fuera de la ciudad)</i>`;
   return h;
 }
 function pintar() {
@@ -301,8 +311,10 @@ fetch(`datos/${C.slug}.json`).then(r => r.json()).then(d => {
   datos = d;
   marcas = d.puntos.map(p => {
     const g = d.grupos[p[2]], ambos = p[7] && p[8];
-    const m = L.circleMarker([p[0], p[1]], {radius: 5, weight: ambos ? 2 : 1, color: ambos ? "#0b0b0b" : "#ffffff",
-                                            fillColor: COLOR[g] || COLOR.Otros, fillOpacity: .9});
+    const m = L.circleMarker([p[0], p[1]], {radius: tactil ? 7 : 5, weight: ambos || p[9] ? 2 : 1,
+                                            color: ambos ? "#0b0b0b" : p[9] ? "#52514e" : "#ffffff",
+                                            dashArray: p[9] ? "2 2" : null, fillColor: COLOR[g] || COLOR.Otros,
+                                            fillOpacity: p[9] ? .55 : .9});
     m.grupo = g;
     m.on("click", () => m.bindPopup(popup(p)).openPopup());
     return m;
@@ -311,7 +323,8 @@ fetch(`datos/${C.slug}.json`).then(r => r.json()).then(d => {
   marcas.forEach(m => cuenta[m.grupo] = (cuenta[m.grupo] || 0) + 1);
   document.getElementById("filtros").innerHTML = Object.keys(COLOR).filter(g => cuenta[g]).map(g =>
     `<label><input type="checkbox" value="${g}" checked><i style="background:${COLOR[g]}"></i>${g} · ${cuenta[g].toLocaleString("es-CO")}</label>`).join("") +
-    `<label><i style="background:#fff;border:2px solid #0b0b0b"></i>borde oscuro: en los dos portales</label>`;
+    `<label><i style="background:#fff;border:2px solid #0b0b0b"></i>borde oscuro: en los dos portales</label>` +
+    (d.puntos.some(p => p[9]) ? `<label><i style="background:#fff;border:2px dashed #52514e"></i>punteado: ubicación aproximada</label>` : "");
   document.querySelectorAll("#filtros input").forEach(i => i.addEventListener("change", pintar));
   pintar();
 });
