@@ -69,7 +69,8 @@ def cargar(ciudad: str | None = None) -> pd.DataFrame:
     partes = []
     for portal, raiz in PORTALES.items():
         a = pd.read_parquet(rutas(raiz).avisos, columns=COLUMNAS + ["estado_aviso"])
-        a = corregir_ubicacion(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)])
+        a = corregir_ubicacion(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)],
+                               solo_imposibles=portal == "fincaraiz")     # FincaRaíz: coordenadas fiables
         if ciudad in AREAS:             # un área metropolitana: por coordenadas
             a = a[en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"])]
         elif ciudad:                    # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
@@ -89,6 +90,8 @@ def candidatos(d: pd.DataFrame, lote: int = 5_000_000) -> tuple[np.ndarray, np.n
     from scipy.spatial import cKDTree
     X = _km(d)
     ok = np.isfinite(X).all(axis=1)
+    if "ubicacion" in d:                # un punto llevado al centro de su barrio no es la ubicación del inmueble
+        ok &= (d["ubicacion"] == "aviso").to_numpy()
     precio = pd.to_numeric(d["precio"], errors="coerce").where(lambda v: v > 0).to_numpy()
     portal, anunciante = d["portal"].to_numpy(), d["anunciante_id"].to_numpy()
     ii, jj = [], []

@@ -12,8 +12,9 @@ Mapa interactivo por ciudad (E6): una página ligera por ciudad o área metropol
                                             ser de ella (en gris, con el enlace al mapa de su área)
   docs/mapa/index.html                      el índice de ciudades
 
-Ubicación: la de cada aviso, salvo los errores claros (zonas.corregir_ubicacion): fuera de Colombia, sin punto;
-fuera de su ciudad pero nombrando un barrio de ella, en ese barrio y con borde punteado ("ubicación aproximada").
+Ubicación: la de cada aviso, salvo los errores claros de Metrocuadrado (zonas.corregir_ubicacion): sin coordenadas,
+fuera de Colombia o en otro sitio, el aviso va al barrio o lugar que nombra, con borde punteado ("ubicación
+aproximada"); si no se encuentra, no sale en el mapa.
 En el celular, los puntos son más grandes, se pueden tocar con margen y los del mismo edificio se abren en abanico.
 
 Ligero a propósito: los puntos van en un JSON compacto que la página carga al abrir (el mapa de Cali hecho con
@@ -70,7 +71,7 @@ def puntos(ciudad: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Los demás tipos: solo FincaRaíz (Metrocuadrado solo barre vivienda)
     cols = ["tipo", "precio", "m2", "habitaciones", "latitud", "longitud", "url", "ciudad", "barrio", "estado_aviso"]
     o = pd.read_parquet(rutas("venta").avisos, columns=cols)
-    o = zonas.corregir_ubicacion(o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)])
+    o = zonas.corregir_ubicacion(o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)], solo_imposibles=True)
     o = o[zonas.en_area(ciudad, o["latitud"], o["longitud"], o["ciudad"])] if ciudad in zonas.AREAS \
         else o[o["ciudad"].map(zonas.canonica) == ciudad]
     otros = pd.DataFrame({"tipo": o["tipo"], "latitud": o["latitud"], "longitud": o["longitud"], "m2": o["m2"],
@@ -294,7 +295,7 @@ function popup(p) {
   let h = `<b>${tipo}</b>${m2 ? " · " + m2 + " m²" : ""}${hab ? " · " + hab + " hab" : ""}<br><b>${mill(precio)}</b>${pm2}<br>`;
   if (uf) h += `FincaRaíz ${pf && pm && pf !== pm ? mill(pf) + " " : ""}<a href="${C.dominios.fr}${uf}" target="_blank" rel="noopener">ver ↗</a><br>`;
   if (um) h += `Metrocuadrado ${pf && pm && pf !== pm ? mill(pm) + " " : ""}<a href="${C.dominios.m2}${um}" target="_blank" rel="noopener">ver ↗</a>`;
-  if (p[9]) h += `<br><i style="color:#52514e">Ubicación aproximada: el centro del barrio que dice el aviso<br>(sus coordenadas caían fuera de la ciudad)</i>`;
+  if (p[9]) h += `<br><i style="color:#52514e">Ubicación aproximada: el centro del barrio que dice el aviso<br>(no traía coordenadas o caían en otro lugar)</i>`;
   return h;
 }
 function pintar() {

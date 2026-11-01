@@ -31,7 +31,9 @@ Fuentes (31-oct-2026):
   «expansión y zona rural», para que ningún aviso del municipio se quede sin zona (si es más del 2% del
   municipio: lo demás son diferencias de trazado entre la fuente oficial y el DANE). Y <slug>_vecinos.geojson:
   los municipios que lindan con ella (y los de su área), para el mapa interactivo: ahí caen los avisos que
-  dicen «Cali» pero están en Yumbo o Jamundí, o «Barranquilla» pero están en Puerto Colombia
+  dicen «Cali» pero están en Yumbo o Jamundí, o «Barranquilla» pero están en Puerto Colombia. Y
+  <slug>_lugares.json: los lugares con nombre de OSM alrededor de la ciudad, para ubicar por su nombre los avisos
+  mal ubicados (zonas.corregir_ubicacion)
   Cali, tras `python -m src.zonas` (que vuelve a bajar solo lo urbano): `python -m src.geo_ciudades --ciudad Cali`
 
 Lo descargado se guarda en data/geo_fuentes/ (local, no se versiona) y se reutiliza: algunos servidores cortan
@@ -445,6 +447,33 @@ def vecinos(ciudad: str, m: pd.DataFrame) -> None:
     _guardar(f"{slug(ciudad)}_vecinos", feats, "DANE (MGN, COD-AB de HDX, CC BY-IGO)", 0.001)   # solo de contexto: ~100 m
 
 
+def _lugares_osm() -> pd.DataFrame:
+    """Los lugares con nombre de OSM (barrios, veredas, caseríos, pueblos…), con copia en data/geo_fuentes/."""
+    copia = CACHE / "osm_lugares.parquet"
+    if not copia.exists():
+        import duckdb
+        pbf = sorted(glob.glob(str(BASE_DIR / "data" / "osm" / "*.pbf")))[-1]
+        con = duckdb.connect()
+        con.execute("INSTALL spatial; LOAD spatial;")
+        con.execute(f"""SELECT lat, lon, tags['name'] AS nombre, tags['place'] AS tipo FROM ST_ReadOSM('{pbf}')
+            WHERE kind = 'node' AND tags['name'] IS NOT NULL AND tags['place'] IN ('neighbourhood', 'suburb', 'quarter',
+              'hamlet', 'village', 'locality', 'isolated_dwelling', 'town')""").df().to_parquet(copia)
+    return pd.read_parquet(copia)
+
+
+def lugares(ciudad: str, osm: pd.DataFrame, margen: float = 0.15) -> None:
+    """<slug>_lugares.json: los lugares de OSM a menos de ~15 km de la ciudad (nombre, lat, lon). Con ellos
+    zonas.corregir_ubicacion encuentra el sitio que nombra un aviso mal ubicado ("Cali, Dapa" → Dapa, Yumbo)."""
+    gj = json.loads((GEO_DIR / f"{slug(ciudad)}_comunas.geojson").read_text(encoding="utf-8"))
+    x0, y0, x1, y1 = unary_union([shape(f["geometry"]) for f in gj["features"]]).bounds
+    cerca = osm[osm["lon"].between(x0 - margen, x1 + margen) & osm["lat"].between(y0 - margen, y1 + margen)]
+    filas = [[n, round(la, 5), round(lo, 5)] for n, la, lo in zip(cerca["nombre"], cerca["lat"], cerca["lon"])]
+    p = GEO_DIR / f"{slug(ciudad)}_lugares.json"
+    p.write_text(json.dumps({"fuente": "OpenStreetMap (ODbL), lugares con nombre (place=*)", "lugares": filas},
+                            ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"✅ {len(filas)} lugares → {p.relative_to(BASE_DIR)} ({p.stat().st_size / 1e3:.0f} KB)")
+
+
 CONSTRUCTORES = {"Bogotá": bogota, "Medellín": medellin, "Cartagena": cartagena, "Cali": cali}
 
 
@@ -466,5 +495,6 @@ if __name__ == "__main__":
         if not a.ciudad or a.ciudad == ciudad:
             completar(ciudad, m)
             vecinos(ciudad, m)
+            lugares(ciudad, _lugares_osm())
     for x in [x for x in AREAS if not a.ciudad or a.ciudad == x]:       # después de sus núcleos
         area(x, m)

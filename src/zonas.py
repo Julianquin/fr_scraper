@@ -78,6 +78,7 @@ CERCA = 0.0018         # ~200 m: un aviso fuera de toda zona pero a menos de est
                        # de Cartagena, los bordes entre la fuente oficial y el DANE)
 COLOMBIA = (-4.3, 13.6, -82.0, -66.8)   # latitud y longitud mínima y máxima (con San Andrés)
 LEJOS_BARRIO = 3       # km: más lejos que esto del barrio que nombra, y fuera de su ciudad, el punto está mal
+LEJOS_CIUDAD = 10      # km: más lejos que esto de su ciudad, el punto es de otro sitio (Bogotá para un aviso de Cali)
 
 
 def normalizar(s) -> str:
@@ -176,54 +177,142 @@ def descargar() -> None:
 
 
 _UBICACION: dict = {}
+# Palabras que no distinguen un lugar: se quitan antes de comparar nombres
+VACIAS = {"el", "la", "los", "las", "de", "del", "y", "barrio", "urbanizacion", "urb", "sector", "conjunto",
+          "condominio", "corregimiento", "comuna", "zona", "vereda", "parcelacion", "na", "n", "a"}
+# Nombres de una palabra demasiado comunes para emparejar solo por estar contenidos en otro
+GENERICAS = {"ciudad", "villa", "san", "santa", "nueva", "nuevo", "jardin", "jardines", "parque", "alto", "altos",
+             "bosque", "bosques", "campestre", "country", "club", "real", "reserva", "portal", "torres", "colinas",
+             "lomas", "brisas", "prados", "valle", "centro", "norte", "sur", "oeste", "oriente", "occidente", "rural",
+             "expansion", "cabecera", "industrial", "residencial", "etapa", "manzana", "mz", "casa", "lote"}
+
+
+def clave(nombre) -> str:
+    """'Urbanización La Nueva Base' → 'nueva base'; 'Pance (cabecera)' → 'pance' (para emparejar nombres)."""
+    s = re.sub(r"\(.*?\)", " ", normalizar(nombre))
+    return " ".join(t for t in re.sub(r"[^a-z0-9 ]", " ", s).split() if t not in VACIAS)
+
+
+def _alias(nombre: str) -> list[str]:
+    """Las claves de un nombre y de cada parte de un nombre compuesto ('Tejares - Cristales' → 3 claves)."""
+    partes = [nombre] + (nombre.split(" - ") if " - " in nombre else [])
+    return [k for k in dict.fromkeys(clave(x) for x in partes) if k]
+
+
+def _coinciden(k: str, c: str) -> bool:
+    """La clave `c` es `k`, o una contiene a la otra palabra por palabra (no vale una sola palabra genérica)."""
+    if c == k:
+        return True
+    unica = lambda x: " " not in x and x in GENERICAS
+    return len(c) >= 4 and not unica(c) and not unica(k) and (f" {c} " in f" {k} " or f" {k} " in f" {c} ")
+
+
+def _comparten(k: str, c: str) -> int:
+    return len(set(k.split()) & set(c.split()))
+
+
+def _buscar(k: str, oficiales: list, tablas: list[dict]):
+    """El punto del lugar que nombra `k`. Primero los barrios oficiales (`oficiales`: [(clave, polígono, punto)])
+    que coincidan, el que más palabras comparta y, a igualdad, el más pequeño (el urbano antes que la vereda:
+    "Pance" → Parcelaciones Pance y no la cabecera del corregimiento); si no hay, la primera de `tablas`
+    (clave → punto) con alguno: la misma clave o la que más palabras comparta."""
+    if not k:
+        return None
+    cand = [(c, g, pt) for c, g, pt in oficiales if _coinciden(k, c)]
+    if cand:
+        return max(cand, key=lambda o: (_comparten(k, o[0]), -o[1].area))[2]
+    for tabla in tablas:
+        if k in tabla:
+            return tabla[k]
+        cand = [c for c in tabla if _coinciden(k, c)]
+        if cand:
+            return tabla[max(cand, key=lambda c: (_comparten(k, c), -abs(len(c) - len(k))))]
+    return None
 
 
 def _ubicacion(ciudad: str) -> tuple:
-    """(toda la ciudad, {barrio normalizado: [(polígono, su punto interior)]}), una vez por ciudad."""
+    """(toda la ciudad, barrios oficiales [(clave, polígono, punto interior)], otras tablas clave → punto), una vez
+    por ciudad. Las otras tablas, por orden de preferencia: las zonas (comunas, corregimientos…), los lugares de
+    OSM dentro de la ciudad y los de alrededor (<ciudad>_lugares.json). Un aviso que dice "Cali" prefiere un
+    lugar de Cali."""
     if ciudad not in _UBICACION:
-        toda = shapely.union_all([shape(f["geometry"]) for f in cargar("comunas", ciudad)["features"]])
+        comunas = cargar("comunas", ciudad)["features"]
+        toda = shapely.union_all([shape(f["geometry"]) for f in comunas])
         shapely.prepare(toda)
-        barrios: dict = {}
+        oficiales = []
         for f in cargar("barrios", ciudad)["features"]:
             g = shape(f["geometry"])
-            barrios.setdefault(normalizar(f["properties"]["nombre"]), []).append((g, g.representative_point()))
-        _UBICACION[ciudad] = toda, barrios
+            oficiales += [(k, g, g.representative_point()) for k in _alias(f["properties"]["nombre"])]
+        zonas_, dentro, cerca = {}, {}, {}
+        for f in comunas:
+            for k in _alias(f["properties"]["nombre"]):
+                zonas_.setdefault(k, shape(f["geometry"]).representative_point())
+        p = GEO_DIR / f"{slug(ciudad)}_lugares.json"
+        for nombre, la, lo in (json.loads(p.read_text(encoding="utf-8"))["lugares"] if p.exists() else []):
+            pt = shapely.Point(lo, la)
+            for k in _alias(nombre):
+                (dentro if toda.contains(pt) else cerca).setdefault(k, pt)
+        _UBICACION[ciudad] = toda, oficiales, [zonas_, dentro, cerca]
     return _UBICACION[ciudad]
 
 
-def corregir_ubicacion(df: pd.DataFrame) -> pd.DataFrame:
-    """Corrige dos errores claros en `latitud`/`longitud` (casi siempre de Metrocuadrado, donde el anunciante
-    ubica el aviso a mano) y añade `ubicacion`: 'aviso' (la del aviso), 'barrio' (llevada al barrio que nombra)
-    o None (sin coordenadas). Lo guardado no cambia: se corrige al leer.
+def corregir_ubicacion(df: pd.DataFrame, solo_imposibles: bool = False) -> pd.DataFrame:
+    """Corrige los errores claros en `latitud`/`longitud` (casi siempre de Metrocuadrado, donde el anunciante
+    ubica el aviso a mano) y añade `ubicacion`: 'aviso' (la del aviso), 'barrio' (llevada al lugar que nombra)
+    o None (sin coordenadas). Lo guardado no cambia: se corrige al leer. Los nombres se comparan con `clave`
+    (sin tildes, artículos ni paréntesis, y cada parte de un nombre compuesto: "Tejares - Cristales").
       1. Fuera de Colombia o en (0, 0): sin coordenadas (salían en el mar o en otro país; 132 avisos el 31-oct).
       2. Fuera de su ciudad (de todas sus zonas, con CERCA de margen) y a más de LEJOS_BARRIO km del barrio
-         oficial que nombra el aviso (`barrio`, de `ciudad`): al punto interior de ese barrio, el más cercano si
-         hay varios con el nombre. Ejemplo: "Cali, Valle del Lili" ubicado en Palmira.
-    Los avisos sin coordenadas siguen sin ellas (su zona sale del nombre del barrio, en asignar_zonas).
-    No se toca lo demás: en otro municipio y sin un barrio reconocible de la ciudad, el aviso suele estar de
-    verdad allí (Villa Campestre, de Puerto Colombia, vendido como Barranquilla); y dentro de la ciudad el
-    barrio escrito no es fiable (Bogotá tiene varios «Santa Bárbara»)."""
+         oficial que nombra el aviso con la misma clave (`barrio`, de `ciudad`): al punto interior de ese barrio,
+         el más cercano si hay varios. Ejemplo: "Cali, Valle del Lili" ubicado en Palmira.
+      3. A más de LEJOS_CIUDAD km de su ciudad: el punto es de otro sitio. Va al lugar que nombra el aviso, con
+         la búsqueda más flexible de `_buscar` (un nombre puede contener al otro; barrios oficiales, zonas y
+         lugares de OSM: "Cali, Dapa" → Dapa, en Yumbo) y, si no se encuentra, queda sin coordenadas. Ejemplos
+         del 1-nov: "Cali, Pance" en Bogotá; "Cali, Nueva Base" en el Meta.
+      4. Sin coordenadas (de origen o por la regla 1): al lugar que nombra, como en la 3; si no se encuentra,
+         siguen sin ellas. El 1-nov, 3.986 avisos de Metrocuadrado de las 9 ciudades llegaban sin coordenadas
+         (Cali 655) y no salían en el mapa; el 86% nombra un lugar que se encuentra.
+    "Si se puede, donde toca; si no, fuera del mapa" (pedido del usuario, 1-nov).
+    Con `solo_imposibles` (FincaRaíz, cuyas coordenadas sí son fiables: su campo de barrio trae varios nombres y
+    la regla 2 movía avisos que de verdad están en Puerto Colombia), solo la 1.
+    No se toca lo demás: en otro municipio cercano y sin un barrio de la ciudad con su nombre, el aviso suele
+    estar de verdad allí (Villa Campestre, de Puerto Colombia, vendido como Barranquilla); y dentro de la ciudad
+    el barrio escrito no es fiable (Bogotá tiene varios «Santa Bárbara»)."""
     df = df.copy()
     lat, lon = pd.to_numeric(df["latitud"], errors="coerce"), pd.to_numeric(df["longitud"], errors="coerce")
     valida = (lat.between(COLOMBIA[0], COLOMBIA[1]) & lon.between(COLOMBIA[2], COLOMBIA[3])).to_numpy()
     lat, lon = np.array(lat.where(valida), dtype=float), np.array(lon.where(valida), dtype=float)   # copias editables
     ubicacion = np.where(valida, "aviso", None).astype(object)
     canon = df["ciudad"].map(canonica).to_numpy()
-    nombre = df["barrio"].map(lambda b: normalizar(b) if isinstance(b, str) else None).to_numpy()
-    for ciudad in [c for c in CIUDADES if c not in AREAS and archivo("barrios", c).exists()]:
-        idx = np.flatnonzero(canon == ciudad)
+    nombre = df["barrio"].map(lambda b: clave(b) if isinstance(b, str) else "").to_numpy()
+    for ciudad in [] if solo_imposibles else [c for c in CIUDADES if c not in AREAS and archivo("barrios", c).exists()]:
+        toda, oficiales, tablas = _ubicacion(ciudad)
+        hallado: dict = {}                                                  # muchos avisos repiten el barrio
+        buscar = lambda k: hallado[k] if k in hallado else hallado.setdefault(k, _buscar(k, oficiales, tablas))
+        for i in np.flatnonzero((canon == ciudad) & ~valida):              # 4: sin coordenadas
+            centro = buscar(nombre[i])
+            if centro is not None:
+                lon[i], lat[i], ubicacion[i] = centro.x, centro.y, "barrio"
+        idx = np.flatnonzero((canon == ciudad) & valida)
         if not len(idx):
             continue
-        idx = idx[valida[idx]]
-        toda, barrios = _ubicacion(ciudad)
-        fuera = ~shapely.dwithin(toda, shapely.points(lon[idx], lat[idx]), CERCA)
-        for i in idx[fuera]:
-            if nombre[i] not in barrios:
-                continue
-            p = shapely.Point(lon[i], lat[i])
-            g, centro = min(barrios[nombre[i]], key=lambda o: o[0].distance(p))
-            if g.distance(p) * 111 > LEJOS_BARRIO:
-                lon[i], lat[i], ubicacion[i] = centro.x, centro.y, "barrio"
+        idx = idx[~shapely.dwithin(toda, shapely.points(lon[idx], lat[idx]), CERCA)]      # fuera de la ciudad
+        km = shapely.distance(toda, shapely.points(lon[idx], lat[idx])) * 111
+        for i, d in zip(idx, km):
+            if d > LEJOS_CIUDAD:                                            # 3: el punto es de otro sitio
+                centro = buscar(nombre[i])
+                if centro is None:
+                    lon[i], lat[i], ubicacion[i] = np.nan, np.nan, None
+                    continue
+            else:                                                           # 2: cerca, pero lejos de su barrio
+                p = shapely.Point(lon[i], lat[i])
+                opciones = [(g, pt) for c, g, pt in oficiales if c == nombre[i] and nombre[i]]
+                if not opciones:
+                    continue
+                g, centro = min(opciones, key=lambda o: o[0].distance(p))
+                if g.distance(p) * 111 <= LEJOS_BARRIO:
+                    continue
+            lon[i], lat[i], ubicacion[i] = centro.x, centro.y, "barrio"
     df["latitud"], df["longitud"], df["ubicacion"] = lat, lon, ubicacion
     return df
 

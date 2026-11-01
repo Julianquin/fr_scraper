@@ -301,3 +301,5 @@ config_local.yaml
 
 # Mapas por ciudad (src/mapa_ciudad.py): los genera y publica el CI; llevan enlaces a avisos
 /docs/mapa/
+# Lugares de OSM por ciudad (zonas.corregir_ubicacion): los necesita el CI
+!/data/geo/*_lugares.json
