@@ -10,6 +10,8 @@ Mapa interactivo por ciudad (E6): una página ligera por ciudad o área metropol
                                             las zonas, coloreadas por el precio mediano por m² de la vivienda
   docs/mapa/datos/<ciudad>_vecinos.geojson  en una ciudad, los municipios vecinos donde caen avisos que dicen
                                             ser de ella (en gris, con el enlace al mapa de su área)
+  docs/mapa/datos/<ciudad>_resumen.json     viviendas, precio por m² (mediana y rango típico) y barrios; la portada
+                                            (docs/index.html) muestra las de Cali y su mapa
   docs/mapa/index.html                      el índice de ciudades
 
 Ubicación: la de cada aviso, salvo los errores claros de Metrocuadrado (zonas.corregir_ubicacion): sin coordenadas,
@@ -88,6 +90,7 @@ def puntos(ciudad: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 def _zonas(ciudad: str, inm: pd.DataFrame) -> dict[str, dict]:
     """Los GeoJSON de comunas y barrios con n (viviendas), m (mediana en M/m²) y c (clase de color, -1 sin datos)."""
     inm = zonas.asignar_zonas(inm.rename(columns={"latitud": "Latitud", "longitud": "Longitud", "barrio": "Barrio"}), ciudad)
+    viviendas = len(inm)                # todas, como el informe; el precio por m² descarta los extremos
     pm2 = inm["precio_mediano"] / inm["m2"].where(inm["m2"] > 10)
     lo, hi = pm2.quantile([0.01, 0.99])
     inm = inm.assign(pm2=pm2)[pm2.between(lo, hi)]
@@ -113,6 +116,10 @@ def _zonas(ciudad: str, inm: pd.DataFrame) -> dict[str, dict]:
         salida[nivel] = gj
         if nivel == "comunas":
             salida["cortes"] = [round(x / 1e6, 1) for x in cortes]
+    m = inm["pm2"] / 1e6
+    salida["resumen"] = {"viviendas": int(viviendas), "mediana_m2": round(float(m.median()), 2),
+                         "p25_m2": round(float(m.quantile(.25)), 2), "p75_m2": round(float(m.quantile(.75)), 2),
+                         "barrios": int(inm["barrio_oficial"].nunique())}
     return salida
 
 
@@ -153,6 +160,10 @@ def generar(ciudad: str, fecha: str) -> dict:
                                      encoding="utf-8")
     if (v := _vecinos(ciudad, p)) is not None:
         z["vecinos"] = v
+    if "resumen" in z:                  # las cifras de la portada (docs/index.html lee las de Cali)
+        (datos / f"{s}_resumen.json").write_text(json.dumps(
+            {"ciudad": ciudad, "actualizado": fecha, "puntos": len(filas), **z["resumen"]}, ensure_ascii=False),
+            encoding="utf-8")
     for nivel in ("comunas", "barrios", "vecinos"):
         if nivel in z:
             (datos / f"{s}_{nivel}.geojson").write_text(json.dumps(z[nivel], separators=(",", ":"), ensure_ascii=False),

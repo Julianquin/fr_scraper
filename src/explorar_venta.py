@@ -8,9 +8,11 @@ Hallazgos que motivan este módulo (25-oct-2026):
   - El buscador solo deja recorrer los primeros 10.000 resultados de cada consulta (página 476).
     Desde la 477 repite siempre la misma página. Para barrer todo hay que segmentar.
 
+La segmentación del barrido diario la arma src/segmentos.py (el antiguo `segmentos` de aquí usaba las URLs del
+scraper viejo, que se borraron el 4-nov).
+
 Acciones (resultados en data/analisis/e1/, que no se versiona):
     python -m src.explorar_venta ventana                 # confirma dónde se congela la paginación
-    python -m src.explorar_venta segmentos               # total de avisos por ciudad (urls/*.txt)
     python -m src.explorar_venta muestra --paginas 30    # recientes: tiempo, campos, cobertura
 """
 from __future__ import annotations
@@ -34,39 +36,6 @@ def ventana(sesion: requests.Session) -> None:
         print(f"página {n}: primer id {data[0]['id'] if data else '-'} · "
               f"{data[0]['created_at'] if data else '-'} · total {pi.get('total')} · {dt:.2f}s")
         time.sleep(1)
-
-
-def rutas_ciudad() -> list[str]:
-    """Las rutas ciudad/departamento de urls/*.txt, sin el tipo de inmueble."""
-    rutas = set()
-    for f in (BASE_DIR / "urls").glob("*.txt"):
-        for u in f.read_text().split():
-            partes = u.split("fincaraiz.com.co/")[-1].strip("/").split("/")
-            if partes[0] == "venta" and len(partes) >= 3:
-                rutas.add(f"venta/{partes[-2]}/{partes[-1]}")
-    return sorted(rutas)
-
-
-def segmentos(sesion: requests.Session, pausa: float) -> pd.DataFrame:
-    """Total de avisos por ciudad: ¿cuáles pasan de 10.000 y hay que partir más?"""
-    filas = []
-    for ruta in ["venta"] + rutas_ciudad():
-        try:
-            _, pi, dt = pedir(sesion, ruta, 1)
-            filas.append({"ruta": ruta, "total": pi.get("total"), "paginas": pi.get("lastPage"), "segundos": round(dt, 2)})
-        except Exception as e:  # noqa: BLE001
-            filas.append({"ruta": ruta, "total": None, "error": str(e)[:80]})
-        time.sleep(pausa)
-    df = pd.DataFrame(filas).sort_values("total", ascending=False)
-    df["supera_10k"] = df["total"] > MAX_RESULTADOS
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUT_DIR / "segmentos.csv", index=False)
-    ciudades = df[df["ruta"] != "venta"]
-    print(df.head(15).to_string(index=False))
-    print(f"\n{len(ciudades)} ciudades · suman {ciudades['total'].sum():,.0f} avisos "
-          f"(el total nacional dice {df.loc[df['ruta'] == 'venta', 'total'].iloc[0]:,.0f}) · "
-          f"{ciudades['supera_10k'].sum()} pasan de 10.000")
-    return df
 
 
 def muestra(sesion: requests.Session, paginas: int, pausa: float) -> pd.DataFrame:
@@ -112,10 +81,8 @@ if __name__ == "__main__":
     p.add_argument("--pausa", type=float, default=1.0, help="segundos entre peticiones (cortesía)")
     sub = p.add_subparsers(dest="accion", required=True)
     sub.add_parser("ventana")
-    sub.add_parser("segmentos")
     m = sub.add_parser("muestra")
     m.add_argument("--paginas", type=int, default=30)
     a = p.parse_args()
     s = requests.Session()
-    {"ventana": lambda: ventana(s), "segmentos": lambda: segmentos(s, a.pausa),
-     "muestra": lambda: muestra(s, a.paginas, a.pausa)}[a.accion]()
+    {"ventana": lambda: ventana(s), "muestra": lambda: muestra(s, a.paginas, a.pausa)}[a.accion]()

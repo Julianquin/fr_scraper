@@ -3,11 +3,11 @@
 #
 # Corre cuando termina el barrido de Metrocuadrado (metrocuadrado.yml, el último de la cadena), así
 # los mapas llevan los dos portales del mismo día. Baja los estados (estado/ y estado_m2_venta/) de R2
-# y regenera:
-#   - docs/cali.html: el mapa de Cali de siempre (src/viz_map.py, solo FincaRaíz)
-#   - docs/mapa/: un mapa ligero por ciudad y área metropolitana, con los dos portales sin repetidos,
-#     y su índice (src/mapa_ciudad.py). El informe semanal enlaza a ellos. No se versionan (llevan
-#     enlaces a avisos y el repo es público): solo se publican.
+# y regenera docs/mapa/: un mapa ligero por ciudad y área metropolitana, con los dos portales sin
+# repetidos, y su índice (src/mapa_ciudad.py). La portada (docs/index.html) muestra el de Cali y sus
+# cifras; el informe semanal enlaza a ellos. No se versionan (llevan enlaces a avisos y el repo es
+# público): solo se publican. Hasta el 4-nov también regeneraba docs/cali.html con folium (18 MB, solo
+# FincaRaíz); ahora docs/cali.html solo redirige a docs/mapa/cali.html, para los enlaces viejos.
 #
 # Requiere Settings → Pages → Source = GitHub Actions.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,8 +56,6 @@ jobs:
         run: |
           python -m src.consolidar --bajar
           python -m src.consolidar --raiz m2_venta --bajar
-      - name: Regenerar el mapa en docs/
-        run: python -m src.viz_map --ciudad Cali --out docs/cali.html --fuente http
       - name: Un mapa por ciudad y área en docs/mapa/
         run: python -m src.mapa_ciudad --todas
       - name: Configurar Pages

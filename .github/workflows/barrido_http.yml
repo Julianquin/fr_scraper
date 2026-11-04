@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Barrido diario de FincaRaíz por HTTP y por segmentos: venta (E1) y arriendo (E3).
-# Es LA fuente de datos desde el cambio de fuente (2-nov-2026): el scraper viejo
-# (scraper.yml) quedó sin horario. Deja su crudo en R2 (raw/venta_http/fecha=…/) y
+# Es LA fuente de datos desde el cambio de fuente (30-oct-2026); el scraper viejo
+# (scraper.yml) se borró el 4-nov. Deja su crudo en R2 (raw/venta_http/fecha=…/) y
 # el estado del mercado (estado/, estado_arriendo/).
 #
 #   Job 1 (plan):   arma el árbol de segmentos (src/segmentos.py) y lo reparte en 4 grupos

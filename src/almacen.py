@@ -17,7 +17,8 @@ Estructura del bucket (detalle en DATOS.md):
     app/housing_clean.parquet                     dataset activo (mapa y alerta)
     raw/venta/fecha=AAAA-MM-DD/scrape.parquet     lo scrapeado ese día; nunca se borra
     respaldos/diario/fecha=AAAA-MM-DD/<archivo>   master y bitácora del día; R2 los borra a los 30 días
-    respaldos/semanal/fecha=AAAA-MM-DD/<archivo>  los de cada lunes; se guardan siempre
+    respaldos/mensual/fecha=AAAA-MM-DD/<archivo>  los del día 1 de cada mes; se guardan siempre
+    respaldos/semanal/fecha=AAAA-MM-DD/<archivo>  los de cada lunes hasta el 4-nov-2026; se guardan siempre
     respaldos/historico/fecha=AAAA-MM-DD/...      las fotos que venían de git (ago–oct 2026)
 
 La regla de 30 días es de R2 (bucket → Settings → Object lifecycle rules, prefijo
@@ -119,9 +120,9 @@ def bajar(claves: list[str] | None = None) -> None:
 
 def subir(fecha: str, claves: list[str] | None = None, respaldo: bool = True) -> None:
     """Sube los datos actuales y, con `respaldo`, una copia del master y la bitácora en
-    respaldos/diario/ (y también en respaldos/semanal/ si `fecha` es lunes)."""
+    respaldos/diario/ (y también en respaldos/mensual/ si `fecha` es día 1)."""
     s3, bucket = _cliente()
-    carpetas = ["diario"] + (["semanal"] if pd.Timestamp(fecha).dayofweek == 0 else [])
+    carpetas = ["diario"] + (["mensual"] if pd.Timestamp(fecha).day == 1 else [])
     for clave in claves or ACTUALES:
         origen = ACTUALES[clave]
         if not origen.exists():
@@ -248,7 +249,7 @@ def listar() -> None:
             total += o["Size"]
             n += 1
             partes = o["Key"].split("/")
-            # respaldos se desglosa en diario/semanal/historico; el resto por carpeta raíz
+            # respaldos se desglosa en diario/mensual/semanal/historico; el resto por carpeta raíz
             prefijo = "/".join(partes[:2]) if partes[0] == "respaldos" and not partes[1].startswith("fecha=") \
                 else partes[0]
             por_prefijo[prefijo] = por_prefijo.get(prefijo, 0) + o["Size"]

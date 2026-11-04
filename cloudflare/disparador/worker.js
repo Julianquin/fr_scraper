@@ -4,8 +4,8 @@
 // Este Worker le pide a GitHub (workflow_dispatch) que lance los workflows a la hora exacta:
 //
 //   "0 5 * * *"   todos los días 05:00 UTC = 00:00 Colombia → env.WORKFLOW
-//                 (scraper.yml hasta el cambio de fuente; desde el 2-nov, barrido_http.yml,
-//                 que encadena el mapa y Metrocuadrado)
+//                 (barrido_http.yml desde el cambio de fuente del 30-oct; encadena Metrocuadrado,
+//                 el mapa y, los lunes, el modelo)
 //   "0 12 * * MON" los lunes 12:00 UTC = 07:00 Colombia → oportunidades.yml (la alerta). Ojo: en
 //                 Cloudflare el día 1 es DOMINGO (no lunes como en GitHub): por eso MON y no 1
 //

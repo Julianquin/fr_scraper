@@ -1,7 +1,4 @@
-# --- Scraping ---
-selenium>=4.20
-webdriver-manager>=4.0
-beautifulsoup4>=4.12
+# --- Lectura de los portales (páginas públicas por HTTP) ---
 requests>=2.31
 
 # --- Datos / limpieza ---

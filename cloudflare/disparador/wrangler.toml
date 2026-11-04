@@ -11,5 +11,5 @@ crons = ["0 5 * * *", "0 12 * * MON"]  # 00:00 Colombia todos los días · lunes
 
 [vars]
 REPO = "Julianquin/fr_scraper"
-WORKFLOW = "scraper.yml"       # desde el cambio de fuente (2-nov): "barrido_http.yml"
+WORKFLOW = "barrido_http.yml"  # desde el cambio de fuente (30-oct; antes "scraper.yml", borrado el 4-nov)
 RAMA = "main"

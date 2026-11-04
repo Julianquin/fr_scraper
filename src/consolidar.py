@@ -82,7 +82,7 @@ class Rutas(NamedTuple):
     historial: Path
     meta: Path
     r2: str             # prefijo en R2
-    respaldo: str       # nombre del archivo en respaldos/{diario,semanal}/fecha=…/
+    respaldo: str       # nombre del archivo en respaldos/{diario,mensual}/fecha=…/
 
 
 def rutas(raiz: str = "venta") -> Rutas:
@@ -370,15 +370,16 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
 
 
 def subir(fecha: str, raiz: str = "venta") -> None:
-    """avisos (+ respaldo diario y, los lunes, semanal), historial del día y meta a R2."""
+    """avisos (+ respaldo diario y, el día 1, mensual), historial del día y meta a R2. Hasta el 4-nov-2026 el
+    respaldo largo era semanal (cada lunes, ~120 MB de los tres estados: ~6 GB al año); mensual, ~1,5 GB."""
     from src import almacen
     r = rutas(raiz)
     almacen.subir_archivo(r.avisos, f"{r.r2}/avisos.parquet")
     almacen.subir_archivo(r.meta, f"{r.r2}/meta.json")
     almacen.subir_archivo(r.historial / f"fecha={fecha}.parquet", f"{r.r2}/historial/fecha={fecha}.parquet")
     almacen.subir_archivo(r.avisos, f"respaldos/diario/fecha={fecha}/{r.respaldo}")
-    if pd.Timestamp(fecha).dayofweek == 0:
-        almacen.subir_archivo(r.avisos, f"respaldos/semanal/fecha={fecha}/{r.respaldo}")
+    if pd.Timestamp(fecha).day == 1:
+        almacen.subir_archivo(r.avisos, f"respaldos/mensual/fecha={fecha}/{r.respaldo}")
 
 
 def bajar(raiz: str = "venta") -> None:
