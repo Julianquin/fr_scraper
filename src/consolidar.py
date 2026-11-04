@@ -42,6 +42,7 @@ Reglas:
     (`reporte.json`) y trae al menos el 80% de nuestros activos; sin reporte, el 90% de los activos.
     Hasta el 30-oct se comparaba solo con los activos, y una republicación masiva la dejaba saltando
     cada día (los avisos viejos nunca llegaban a baja porque no se contaban sus ausencias).
+  - Un aviso nuevo de un tipo que el estado no tenía (el barrido empezó a recorrer ese tipo) es "descubierto".
   - Cada fecha se procesa una sola vez y en orden.
 
 Arriendos (`--raiz arriendo`): mismas reglas, con su propio estado (data/estado_arriendo/ y
@@ -270,6 +271,9 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         es_alta = (publicado >= meta["ultimo_barrido"]).to_numpy()
         if hoy["fecha_publicacion"].isna().all():      # el portal no la publica (Metrocuadrado)
             es_alta = np.ones(len(nuevos), dtype=bool)
+        # Un tipo que el barrido no recorría (Metrocuadrado sumó lotes, locales… el 5-nov): lo de ese tipo ya
+        # existía, así que es "descubierto" el primer día y no ~37.000 altas de golpe
+        es_alta &= hoy.loc[nuevos, "tipo"].isin(previo["tipo"].dropna().unique()).to_numpy()
         for ids, nombre in ((nuevos[es_alta], "alta"), (nuevos[~es_alta], "descubierto")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
         volvieron = comunes[previo.loc[comunes, "estado_aviso"].eq("retirado").to_numpy()]

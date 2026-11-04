@@ -1,5 +1,6 @@
 """
-Barrido diario de Metrocuadrado por HTTP (bloque E8): vivienda en venta de todo el país. Corre DESPUÉS
+Barrido diario de Metrocuadrado por HTTP (bloque E8): inmuebles en venta de todo el país (vivienda y, desde
+el 5-nov-2026, lotes, locales, oficinas, bodegas, fincas y consultorios: ~37.000 avisos más). Corre DESPUÉS
 de los de FincaRaíz y no toca nada de ellos: escribe solo su propio crudo y su propio estado.
 SOLO páginas públicas de listado, con pausas de cortesía; nada de APIs internas. El robots.txt permite
 /venta/ y prohíbe /detail/: no se visita el detalle.
@@ -20,10 +21,11 @@ Lo que hay (exploración del 27-oct-2026):
   - No hay fecha de publicación: consolidar cuenta como alta lo que aparece desde el barrido anterior.
   - Trae el teléfono y el WhatsApp del anunciante: NO se guardan (`aplanar` no los toma).
 
-Cómo se recorre: el país se parte en unidades tipo × departamento (los departamentos grandes, además, por
-habitaciones). Cada unidad se camina por precio: el techo baja al precio más bajo de cada página. Cuando
+Cómo se recorre: el país se parte en unidades tipo × departamento (en vivienda, los departamentos grandes,
+además, por habitaciones). Cada unidad se camina por precio: el techo baja al precio más bajo de cada página. Cuando
 más de 50 avisos caen en el mismo escalón de un millón (p. ej. 250 millones justos), ese escalón se parte
-por habitaciones, baños y estrato (EMPATES); lo que no se resuelve ni así queda en `sin_resolver`.
+por habitaciones, baños y estrato (EMPATES; en los demás tipos, sin habitaciones, solo por estrato:
+EMPATES_OTROS); lo que no se resuelve ni así queda en `sin_resolver`.
 Cali, 27-oct: 99,2% de cobertura en 496 páginas (~3,5 s por página con la pausa).
 
 Tres pasos, como el barrido de FincaRaíz (en el CI, .github/workflows/metrocuadrado.yml):
@@ -51,7 +53,11 @@ from src.scraper_http import carpetas, hoy
 RAIZ = "m2_venta"
 BASE = "https://www.metrocuadrado.com"
 POR_PAGINA = 50
-TIPOS = {"apartamentos": "Apartamento", "casas": "Casa"}     # vivienda (lo que usan la alerta y el modelo)
+VIVIENDA = {"apartamentos": "Apartamento", "casas": "Casa"}   # lo que usan la alerta, el modelo y los informes
+OTROS = {"lotes": "Lote", "locales": "Local", "oficinas": "Oficina", "bodegas": "Bodega", "fincas": "Finca",
+         "consultorios": "Consultorio"}                        # desde el 5-nov; el mapa interactivo los muestra
+TIPOS = VIVIENDA | OTROS
+NOMBRES = {"Local Comercial": "Local"}                         # el nombre del tipo, como en FincaRaíz
 DEPARTAMENTOS = ["amazonas", "antioquia", "arauca", "atlantico", "bolivar", "boyaca", "caldas", "caqueta",
                  "casanare", "cauca", "cesar", "choco", "cordoba", "cundinamarca", "guainia", "guaviare", "huila",
                  "la-guajira", "magdalena", "meta", "narino", "putumayo", "quindio", "risaralda", "san-andres",
@@ -60,6 +66,7 @@ GRANDE = 3_000            # una unidad con más avisos se parte por habitaciones
 HABITACIONES = [1, 2, 3, 4, 5]                               # «5-habitaciones» incluye 5 o más
 TECHO = 100_000                                              # millones: el primer techo, sobre cualquier aviso
 EMPATES = (("{}-habitaciones", HABITACIONES), ("{}-banos", [1, 2, 3, 4, 5]), ("estrato-{}", [1, 2, 3, 4, 5, 6]))
+EMPATES_OTROS = (("estrato-{}", [1, 2, 3, 4, 5, 6]),)        # lotes, locales…: sin habitaciones ni baños
 _BLOQUE = re.compile(r'self\.__next_f\.push\(\[1,"(.*?)"\]\)</script>', re.S)
 
 
@@ -113,7 +120,7 @@ def aplanar(a: dict) -> dict:
     fila = {
         "id_inmueble": str(a.get("midinmueble")),
         "url": BASE + (a.get("link") or ""),
-        "tipo": (a.get("mtipoinmueble") or {}).get("nombre"),
+        "tipo": NOMBRES.get((a.get("mtipoinmueble") or {}).get("nombre"), (a.get("mtipoinmueble") or {}).get("nombre")),
         "precio": a.get("mvalorventa"),
         "administracion": datos.get("mvaloradministracion"),
         "fecha_publicacion": None,
@@ -238,7 +245,8 @@ class Barrido:
 
     def partir(self, tipo: str, zona: str, filtros: tuple[str, ...], techo: int) -> None:
         """Parte un escalón de empate por el primer filtro de EMPATES que la unidad aún no use."""
-        libres = [(p, v) for p, v in EMPATES if not any(re.fullmatch(p.replace("{}", r"\d+"), f) for f in filtros)]
+        empates = EMPATES if tipo in VIVIENDA else EMPATES_OTROS
+        libres = [(p, v) for p, v in empates if not any(re.fullmatch(p.replace("{}", r"\d+"), f) for f in filtros)]
         if not libres:
             self.sin_resolver.append(ruta(tipo, zona, *filtros, f"{techo}-millones"))
             return
@@ -274,7 +282,7 @@ def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
         for d in DEPARTAMENTOS:
             zona = f"dep-{d}"
             n = total(ruta(tipo, zona))
-            if n > GRANDE:
+            if n > GRANDE and tipo in VIVIENDA:
                 filas += [{"tipo": tipo, "zona": zona, "filtro": f"{h}-habitaciones",
                            "declarado": total(ruta(tipo, zona, f"{h}-habitaciones"))} for h in HABITACIONES]
             elif n:

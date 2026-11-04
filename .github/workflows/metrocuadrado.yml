@@ -1,12 +1,13 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Barrido diario de Metrocuadrado (E8): vivienda en venta de todo el país.
+# Barrido diario de Metrocuadrado (E8): inmuebles en venta de todo el país (vivienda y, desde el 5-nov,
+# lotes, locales, oficinas, bodegas, fincas y consultorios: ~180.000 avisos, ~2 h 30 min).
 #
 # Corre al final de todo: arranca cuando termina el barrido diario de FincaRaíz
-# (barrido_http.yml, que a su vez arranca tras el scraper diario), así nunca compite con
+# (barrido_http.yml, que lanza el disparador de Cloudflare), así nunca compite con
 # los workflows que ya existen. No toca nada de FincaRaíz: escribe solo en R2
 # raw/m2_venta_http/fecha=…/, estado_m2_venta/ y estado_unificado/ (+ sus respaldos en respaldos/).
 #
-#   Job 1 (plan):    totales por tipo y departamento (los grandes, por habitaciones) → unidades
+#   Job 1 (plan):    totales por tipo y departamento (en vivienda, los grandes por habitaciones) → unidades
 #                    repartidas en 4 grupos (src/metrocuadrado_http.py)
 #   Job 2 (barrer):  4 jobs en paralelo; cada uno camina por precio sus unidades (solo páginas
 #                    públicas de listado, ~3,5 s por página con la pausa de cortesía)
@@ -40,7 +41,7 @@ jobs:
     # siguiente eslabón (un workflow_run cancelado cuenta como "completed")
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45            # ~280 consultas de totales con 8 tipos (~10 min)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

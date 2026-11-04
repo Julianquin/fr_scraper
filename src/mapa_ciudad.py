@@ -2,10 +2,11 @@
 Mapa interactivo por ciudad (E6): una página ligera por ciudad o área metropolitana, para GitHub Pages.
 
   docs/mapa/<ciudad>.html                   la página (Leaflet y su agrupación de puntos, de cdnjs)
-  docs/mapa/datos/<ciudad>.json             los puntos: los avisos activos de FincaRaíz (todos los tipos) y de
-                                            Metrocuadrado (apartamentos y casas: lo único que barre). Un inmueble
-                                            en los dos portales es un solo punto con el enlace a cada uno
-                                            (registro único, src/unificar.py)
+  docs/mapa/datos/<ciudad>.json             los puntos: los avisos activos de FincaRaíz y Metrocuadrado, todos los
+                                            tipos (Metrocuadrado: vivienda, lotes, locales, oficinas, bodegas, fincas y
+                                            consultorios desde el 5-nov). Un inmueble en los dos portales es un solo
+                                            punto con el enlace a cada uno (vivienda: registro único, src/unificar.py;
+                                            los demás: gemelo exacto de ciudad, tipo, precio y área)
   docs/mapa/datos/<ciudad>_{comunas,barrios}.geojson
                                             las zonas, coloreadas por el precio mediano por m² de la vivienda
   docs/mapa/datos/<ciudad>_vecinos.geojson  en una ciudad, los municipios vecinos donde caen avisos que dicen
@@ -70,14 +71,34 @@ def puntos(ciudad: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     viv = viv.assign(pf=fr.set_index("id_unificado")["precio"], uf=fr.set_index("id_unificado")["url"],
                      pm=m2.set_index("id_unificado")["precio"], um=m2.set_index("id_unificado")["url"]).reset_index()
 
-    # Los demás tipos: solo FincaRaíz (Metrocuadrado solo barre vivienda)
+    # Los demás tipos (lotes, locales, oficinas…): FincaRaíz y, desde el 5-nov, Metrocuadrado. El registro único
+    # es solo de vivienda: aquí un aviso de Metrocuadrado con un gemelo exacto en FincaRaíz (misma ciudad, tipo,
+    # precio y área redondeada; único) es el mismo punto, con los dos enlaces
     cols = ["tipo", "precio", "m2", "habitaciones", "latitud", "longitud", "url", "ciudad", "barrio", "estado_aviso"]
-    o = pd.read_parquet(rutas("venta").avisos, columns=cols)
-    o = zonas.corregir_ubicacion(o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)], solo_imposibles=True)
-    o = o[zonas.en_area(ciudad, o["latitud"], o["longitud"], o["ciudad"])] if ciudad in zonas.AREAS \
-        else o[o["ciudad"].map(zonas.canonica) == ciudad]
-    otros = pd.DataFrame({"tipo": o["tipo"], "latitud": o["latitud"], "longitud": o["longitud"], "m2": o["m2"],
-                          "habitaciones": o["habitaciones"], "pf": o["precio"], "uf": o["url"], "ubicacion": o["ubicacion"]})
+
+    def de_otros_tipos(raiz: str) -> pd.DataFrame:
+        if not rutas(raiz).avisos.exists():
+            return pd.DataFrame(columns=cols + ["ubicacion"])
+        o = pd.read_parquet(rutas(raiz).avisos, columns=cols)
+        o = zonas.corregir_ubicacion(o[(o["estado_aviso"] == "activo") & ~o["tipo"].isin(VIVIENDA)],
+                                     solo_imposibles=raiz == "venta")
+        o = o[zonas.en_area(ciudad, o["latitud"], o["longitud"], o["ciudad"])] if ciudad in zonas.AREAS \
+            else o[o["ciudad"].map(zonas.canonica) == ciudad]
+        return o.assign(_k=o["ciudad"].map(zonas.canonica) + "|" + o["tipo"].astype(str) + "|"
+                        + pd.to_numeric(o["precio"], errors="coerce").round().astype(str) + "|"
+                        + pd.to_numeric(o["m2"], errors="coerce").round().astype(str))
+
+    of, om = de_otros_tipos("venta"), de_otros_tipos("m2_venta")
+    unicos = of.drop_duplicates("_k", keep=False).set_index("_k")
+    gemelo = om["_k"].isin(unicos.index) & ~om.duplicated("_k", keep=False)
+    otros = pd.DataFrame({"tipo": of["tipo"], "latitud": of["latitud"], "longitud": of["longitud"], "m2": of["m2"],
+                          "habitaciones": of["habitaciones"], "pf": of["precio"], "uf": of["url"],
+                          "pm": of["_k"].map(om[gemelo].set_index("_k")["precio"]),
+                          "um": of["_k"].map(om[gemelo].set_index("_k")["url"]), "ubicacion": of["ubicacion"]})
+    om = om[~gemelo]
+    otros = pd.concat([otros, pd.DataFrame({"tipo": om["tipo"], "latitud": om["latitud"], "longitud": om["longitud"],
+                                            "m2": om["m2"], "habitaciones": om["habitaciones"], "pm": om["precio"],
+                                            "um": om["url"], "ubicacion": om["ubicacion"]})], ignore_index=True)
     p = pd.concat([viv[["tipo", "latitud", "longitud", "m2", "habitaciones", "pf", "uf", "pm", "um", "ubicacion"]], otros],
                   ignore_index=True)
     for c in ("latitud", "longitud", "m2", "habitaciones", "pf", "pm"):
