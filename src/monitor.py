@@ -36,6 +36,7 @@ from src.config import BASE_DIR
 COBERTURA_MIN = 0.90    # del total que declara el portal
 ERRORES_MAX = 0.01      # páginas con error / páginas leídas
 BAJAS_MAX = 0.05        # bajas del día / activos: más que esto es un barrido roto, no el mercado
+REPUBLICADOS_MAX = 300  # republicados en un día: más que esto es una inmobiliaria republicando su catálogo
 CAMBIOS_MAX = 0.03      # cambios de precio del día / activos
 MODELO_SUBE_MAX = 0.01  # el error mediano en avisos nuevos no debe subir más de 1 punto en una semana
 COBERTURA_RANGO = (0.75, 0.85)   # el rango p10–p90 debe contener ~80% de los precios
@@ -103,15 +104,24 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
                f"{_n(res['activos'])} activos"]
     acu = meta.get("acumulado", {})
     if acu.get("baja"):
-        lineas.append(f"Desde el inicio: {_n(acu['baja'])} bajas, de las que reaparecieron "
+        desde = f"Desde el {meta['acumulado_desde']} (regla de {meta['regla_bajas']['ausencias_para_baja']} ausencias)" \
+            if meta.get("acumulado_desde") else "Desde el inicio"
+        lineas.append(f"{desde}: {_n(acu['baja'])} bajas, de las que reaparecieron "
                       f"{_n(acu.get('reaparece', 0))} ({_pct(acu.get('reaparece', 0) / acu['baja'])})")
     if len(meta["barridos"]) > 1 and not res["ausencias_contadas"]:
         avisos.append(f"{nombre}: barrido incompleto ({_pct(res['cobertura_portal'])} de lo que declara el portal, "
                       f"{_pct(res['vistos'] / activos)} de los activos); hoy no se contaron ausencias"
                       if res.get("cobertura_portal") is not None else
                       f"{nombre}: el barrido trajo menos del 90% de los activos; hoy no se contaron ausencias")
+    anun = res.get("anunciantes", {})
+    for p in anun.get("pausa", []):             # inmobiliarias que dejaron de verse casi enteras (consolidar)
+        lineas.append(f"⏸️ {p['anunciante']}: hoy faltan {_n(p['faltan'])} de sus {_n(p['activos'])} avisos "
+                      f"({_pct(p['parte_catalogo'])}): ¿una pausa o se fue del portal?")
     if res.get("baja", 0) > BAJAS_MAX * activos:
-        avisos.append(f"{nombre}: {_n(res['baja'])} bajas en un día ({_pct(res['baja'] / activos)} de los activos)")
+        avisos.append(f"{nombre}: {_n(res['baja'])} bajas en un día ({_pct(res['baja'] / activos)} de los activos)"
+                      + _quienes(anun.get("baja", [])))
+    if res.get("republicado", 0) > REPUBLICADOS_MAX:
+        avisos.append(f"{nombre}: {_n(res['republicado'])} republicados en un día" + _quienes(anun.get("republicado", [])))
     if res.get("cambio_precio", 0) > CAMBIOS_MAX * activos:
         avisos.append(f"{nombre}: {_n(res['cambio_precio'])} cambios de precio en un día "
                       f"({_pct(res['cambio_precio'] / activos)} de los activos)")
@@ -144,6 +154,16 @@ def unificado(fecha: str, local: bool) -> tuple[list[str], list[str]]:
     if r["avisos_salen"] > SALEN_MAX * max(r["avisos_activos"], 1):
         avisos.append(f"Registro único: salieron {_n(r['avisos_salen'])} avisos en un día")
     return lineas, avisos
+
+
+def _quienes(top: list[dict]) -> str:
+    """'; 6.287 de Alberto Alvarez Arriendos (63% del día; el 85% de sus avisos)…' para un aviso de bajas o
+    republicados: distingue una inmobiliaria que se fue o republicó de un barrido roto (bajas repartidas)."""
+    if not top:
+        return ""
+    partes = [f"{_n(t['n'])} de {t['anunciante']} ({_pct(t['parte_dia'])} del día"
+              + (f"; el {_pct(t['parte_catalogo'])} de sus avisos)" if t.get("parte_catalogo") else ")") for t in top]
+    return "; " + "; ".join(partes)
 
 
 def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | None, local: bool,

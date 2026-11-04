@@ -17,9 +17,17 @@ Reglas:
   - Alta vs. descubierto: cada barrido ve ~93% del país y el ~7% que falta cambia de un día a otro.
     Un aviso que vemos por primera vez es "alta" solo si se publicó desde el barrido anterior; si
     ya estaba publicado, es "descubierto" (el 26-oct fueron 588 altas y 4.212 descubiertos).
-  - Baja: el aviso falta en 3 barridos seguidos (con 2 habría muchas bajas falsas por ese ~7%
-    variable). La fecha de baja es la del primer barrido en que faltó. Las "reaparece" después de
-    una baja miden cuántas bajas fueron falsas.
+  - Baja: el aviso falta en AUSENCIAS_PARA_BAJA (5) barridos seguidos. La fecha de baja es la del primer
+    barrido en que faltó, así que esperar más no la cambia: solo la confirma más tarde. Las "reaparece"
+    después de una baja miden cuántas bajas fueron falsas. Hasta el 4-nov eran 3 ausencias: cada día
+    faltan ~4.500 avisos de venta que vuelven después, y del 25-oct al 4-nov 978 de ellos faltaron 3 días o
+    más (bajas falsas; con 5, 130); en Metrocuadrado, 1.603 (con 5, 34).
+  - Pausa de un anunciante: si hoy falta al menos PAUSA_PARTE de los activos de un anunciante (y al menos
+    PAUSA_MIN_AVISOS avisos), queda en el resumen del día y el monitor lo dice. El 1-nov la inmobiliaria
+    "CASAS CASAS" desapareció 3 días de Metrocuadrado con todo su catálogo y volvió el 4 (con 3 ausencias,
+    1.267 bajas falsas; con 5, ninguna). Sus bajas no esperan más: probado del 25-oct al 4-nov, esperar 10
+    días no evitaba ninguna baja falsa más y dejaba activos 10 días los ~6.000 arriendos que Alberto Álvarez
+    retiró de verdad. Si aparecen pausas de más de 5 días, AUSENCIAS_PAUSA lo activa.
   - Reactivado: un aviso que el rescate del sistema viejo (src/rescatar.py) dejó como retirado, sin
     fecha de baja, y que el barrido vuelve a encontrar. No dice nada de la regla de bajas: va aparte
     para no inflar la tasa de "reaparece" (el 27-oct fueron 395, ninguno con baja del barrido).
@@ -88,7 +96,10 @@ def rutas(raiz: str = "venta") -> Rutas:
 # Las de venta, como constantes (las usan src/rescatar.py y src/fuente_http.py)
 ESTADO, AVISOS, HISTORIAL, META = rutas("venta")[1:5]
 VIGILADOS = {"precio": "cambio_precio", "administracion": "cambio_administracion"}
-AUSENCIAS_PARA_BAJA = 3
+AUSENCIAS_PARA_BAJA = 5
+AUSENCIAS_PAUSA = AUSENCIAS_PARA_BAJA   # ausencias para los avisos de un anunciante en pausa (hoy, las mismas)
+PAUSA_PARTE = 0.5               # parte de los activos de un anunciante que falta hoy para considerarlo en pausa
+PAUSA_MIN_AVISOS = 50           # y cuántos avisos como mínimo (un anunciante chico puede faltar entero por azar)
 MIN_COBERTURA_PORTAL = 0.90     # avisos únicos / total que declara el portal (reporte.json)
 MIN_COBERTURA_RELATIVA = 0.90   # vistos / activos propios, cuando no hay reporte
 PISO_RELATIVO = 0.80            # vistos / activos propios, aunque el portal diga que está completo
@@ -176,6 +187,39 @@ def _primer_dia_sin_ver(ultima_vez: pd.Series, barridos: list[str]) -> np.ndarra
     return np.where(i < len(b), b[np.minimum(i, len(b) - 1)], None)
 
 
+def _anunciante(d: pd.DataFrame) -> pd.Series:
+    """El nombre del anunciante de cada aviso (o su id si no hay nombre)."""
+    nombre = d["anunciante"] if "anunciante" in d else pd.Series(None, index=d.index)
+    ids = d["anunciante_id"] if "anunciante_id" in d else pd.Series(None, index=d.index)
+    return nombre.where(nombre.notna(), ids.astype("string")).astype("string")
+
+
+def _top(ids: pd.Index, datos: pd.DataFrame, catalogo: pd.Series, n: int = 3) -> list[dict]:
+    """Los `n` anunciantes con más avisos en `ids`: cuántos, qué parte del total del día y qué parte de
+    su catálogo (activos del día anterior). Lo muestra el monitor cuando salta un aviso."""
+    if not len(ids):
+        return []
+    c = _anunciante(datos.loc[ids]).value_counts().head(n)
+    return [{"anunciante": str(a), "n": int(k), "parte_dia": round(k / len(ids), 3),
+             "parte_catalogo": round(k / catalogo[a], 3) if a in catalogo.index and catalogo[a] else None}
+            for a, k in c.items()]
+
+
+def _en_pausa(previo: pd.DataFrame, faltan: pd.Index) -> tuple[pd.Index, list[dict]]:
+    """Avisos que faltan hoy de anunciantes que dejaron de verse casi enteros (PAUSA_PARTE y PAUSA_MIN_AVISOS),
+    y esos anunciantes. Cuenta solo lo que falta desde hoy, para que cada pausa se avise una vez."""
+    activos = previo[previo["estado_aviso"].eq("activo")]
+    anun = _anunciante(activos)
+    total = anun.value_counts()
+    desde_hoy = faltan[pd.to_numeric(previo.loc[faltan, "ausencias"], errors="coerce").fillna(0).eq(0).to_numpy()]
+    falta = anun.loc[activos.index.intersection(desde_hoy)].value_counts()
+    parte = falta / total.reindex(falta.index)
+    pausa = parte[(parte >= PAUSA_PARTE) & (falta >= PAUSA_MIN_AVISOS)].index
+    ids = desde_hoy[anun.reindex(desde_hoy).isin(pausa).to_numpy()]
+    return ids, [{"anunciante": str(a), "faltan": int(falta[a]), "activos": int(total[a]),
+                  "parte_catalogo": round(float(parte[a]), 3)} for a in pausa]
+
+
 def cargar_estado(r: Rutas = rutas()) -> tuple[pd.DataFrame, dict]:
     if r.avisos.exists():
         return pd.read_parquet(r.avisos), json.loads(r.meta.read_text())
@@ -200,7 +244,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         estado["primera_vez"] = fecha
         # Primer barrido: no sabemos cuándo apareció cada aviso → todos "descubiertos"
         eventos.append(_evento(fecha, estado.index, "descubierto", despues=estado["precio"].to_numpy()))
-        ausencias_contadas, cobertura = False, None
+        ausencias_contadas, cobertura, anunciantes = False, None, {}
     else:
         previo = previo.set_index("id_inmueble")
         vistos = hoy.index
@@ -271,11 +315,17 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
             estado.loc[activo, "fecha_baja"] = _primer_dia_sin_ver(previo.loc[activo, "ultima_vez"],
                                                                    meta["barridos"] + [fecha])
             estado.loc[activo, "estado_aviso"] = "retirado"
+        catalogo = _anunciante(previo[previo["estado_aviso"].eq("activo")]).value_counts()
+        anunciantes = {"alta": _top(nuevos[es_alta], hoy, catalogo),
+                       "republicado": _top(pd.Index(rep["nuevo"]), hoy, catalogo)}
         if ausencias_contadas and len(f):
             estado.loc[f, "ausencias"] = previo.loc[f, "ausencias"].fillna(0) + 1
             primera = estado.loc[f, "ausencias"].eq(1)
             estado.loc[f[primera.to_numpy()], "primera_ausencia"] = fecha
-            baja = f[estado.loc[f, "ausencias"].ge(AUSENCIAS_PARA_BAJA).to_numpy()]
+            en_pausa, anunciantes["pausa"] = _en_pausa(previo, f)
+            necesarias = np.where(f.isin(en_pausa), AUSENCIAS_PAUSA, AUSENCIAS_PARA_BAJA)
+            baja = f[estado.loc[f, "ausencias"].to_numpy() >= necesarias]
+            anunciantes["baja"] = _top(baja, previo, catalogo)
             estado.loc[baja, "estado_aviso"] = "retirado"
             estado.loc[baja, "fecha_baja"] = estado.loc[baja, "primera_ausencia"]
             eventos.append(_evento(fecha, baja, "baja", antes=pd.to_numeric(estado.loc[baja, "precio"]).to_numpy()))
@@ -302,14 +352,18 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
                "ausencias_contadas": bool(ausencias_contadas), "cobertura_portal": cobertura,
                "precio_baja": int((cp["valor_despues"] < cp["valor_antes"]).sum()),
                "precio_sube": int((cp["valor_despues"] > cp["valor_antes"]).sum()),
-               **hist["evento"].value_counts().to_dict()}
+               **hist["evento"].value_counts().to_dict(), "anunciantes": anunciantes}
     # El monitor (src/monitor.py) lee el resumen del día y el acumulado: la tasa de "reaparece"
-    # sobre las bajas dice si la regla de 3 ausencias está bien calibrada
-    acumulado = meta.get("acumulado", {})
+    # sobre las bajas dice si la regla de ausencias está bien calibrada
+    # El acumulado vuelve a cero cuando cambia la regla de bajas, para medir solo la regla vigente
+    regla = {"ausencias_para_baja": AUSENCIAS_PARA_BAJA}
+    nueva = meta.get("regla_bajas") != regla
+    acumulado = {} if nueva else meta.get("acumulado", {})
     for ev in ("alta", "baja", "reaparece", "republicado"):
         acumulado[ev] = acumulado.get(ev, 0) + int(resumen.get(ev, 0))
     meta = meta | {"ultimo_barrido": fecha, "barridos": meta["barridos"] + [fecha],
-                   "ultimo_resumen": resumen, "acumulado": acumulado}
+                   "ultimo_resumen": resumen, "acumulado": acumulado, "regla_bajas": regla,
+                   "acumulado_desde": fecha if nueva else meta.get("acumulado_desde")}
     r.meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
     print(json.dumps(resumen, ensure_ascii=False))
     return resumen

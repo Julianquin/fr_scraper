@@ -33,6 +33,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from src.consolidar import AUSENCIAS_PARA_BAJA
 from src import oportunidades as op, rentabilidad, unificar, viz_map, zonas
 from src.config import BASE_DIR
 
@@ -59,10 +60,12 @@ ALREDEDORES = "#d9d8d2"                                             # fuera del 
 # ── Datos ─────────────────────────────────────────────────────────────────────
 
 def _retiradas(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> int:
-    """Viviendas de la ciudad con la baja confirmada en la semana (historial de src/consolidar.py)."""
+    """Viviendas de la ciudad con la baja confirmada en la semana (historial de src/consolidar.py), sin las que
+    ya volvieron a publicarse (una baja que reaparece no fue una retirada)."""
     from src.consolidar import rutas
     r = rutas("venta")
-    todos = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud"])
+    todos = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud", "estado_aviso"])
+    todos = todos[todos["estado_aviso"].eq("retirado")]
     aqui = (zonas.en_area(ciudad, todos["latitud"], todos["longitud"], todos["ciudad"]) if ciudad in zonas.AREAS
             else todos["ciudad"].map(zonas.canonica) == ciudad)
     viv = todos.loc[aqui & todos["tipo"].isin(op.TIPOS), "id_inmueble"].astype(str)
@@ -532,7 +535,7 @@ def informe_html(d: dict) -> str:
 <div class="tiles">
   {_tile("Viviendas en venta", _n(d['viviendas']), f"sin repetidos · {_n(d['avisos_fr'] + d['avisos_m2'])} avisos")}
   {_tile("Publicadas esta semana", _n(d['publicadas']), "viviendas nuevas en FincaRaíz")}
-  {_tile("Retiradas esta semana", _n(d['retiradas']), "confirmadas tras 3 días sin verse")}
+  {_tile("Retiradas esta semana", _n(d['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse")}
   {_tile("Bajaron de precio", _n(d['bajadas']), f"rebaja mediana del {_pct(d['bajada_mediana'])}" if d['bajada_mediana'] else "")}
 </div>
 <div class="tiles">
