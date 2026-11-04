@@ -1,0 +1,122 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Informe de precio para captar un inmueble (src/informe_captacion.py), a pedido.
+#
+#   Actions → "Informe de precio para captar" → Run workflow. Dos formas:
+#     - un aviso publicado: su enlace o id (FincaRaíz o Metrocuadrado) en «aviso»;
+#     - un inmueble sin publicar: ciudad, tipo, m², habitaciones, baños, estrato y barrio.
+#   El PDF llega por Telegram al administrador (lo normal: revisarlo y reenviarlo al agente) o a los
+#   agentes (TELEGRAM_CHAT_ID). Lee de R2 el estado del barrido del día y el modelo de precios vigente.
+#
+# ⚠️ El repo es público: el PDF NO se sube como artifact. Solo viaja por Telegram.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Informe de precio para captar
+
+on:
+  workflow_dispatch:
+    inputs:
+      aviso:
+        description: "Enlace o id de un aviso publicado (deja vacío lo demás)"
+        default: ""
+      ciudad:
+        description: "Ciudad (inmueble sin publicar)"
+        default: "Cali"
+      tipo:
+        description: "Tipo"
+        type: choice
+        options: [Apartamento, Casa, Apartaestudio]
+        default: Apartamento
+      m2:
+        description: "Área en m²"
+        default: ""
+      habitaciones:
+        description: "Habitaciones"
+        default: ""
+      banos:
+        description: "Baños"
+        default: ""
+      estrato:
+        description: "Estrato"
+        default: ""
+      barrio:
+        description: "Barrio"
+        default: ""
+      parqueaderos:
+        description: "Parqueaderos"
+        default: ""
+      destino:
+        description: "admin (lo normal) o agentes"
+        type: choice
+        options: [admin, agentes]
+        default: admin
+
+permissions:
+  contents: read
+
+jobs:
+  informe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias (modelo y PDF)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-inter libpango-1.0-0 libpangoft2-1.0-0 \
+            || echo "⚠️  Sin la fuente Inter: el PDF sale con DejaVu Sans"
+          python -m pip install --upgrade pip
+          pip install -r requirements-entrenamiento.txt -r requirements-informe.txt
+      - name: Bajar de R2 el estado del día, su historial, los arriendos, Metrocuadrado y el modelo
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.consolidar --raiz arriendo --bajar
+          python -m src.consolidar --raiz m2_venta --bajar
+          python -m src.almacen traer estado/historial/ --destino data
+          python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp
+          mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/
+      - name: Generar y enviar el informe
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+          AVISO: ${{ inputs.aviso }}
+          CIUDAD: ${{ inputs.ciudad }}
+          TIPO: ${{ inputs.tipo }}
+          M2: ${{ inputs.m2 }}
+          HABITACIONES: ${{ inputs.habitaciones }}
+          BANOS: ${{ inputs.banos }}
+          ESTRATO: ${{ inputs.estrato }}
+          BARRIO: ${{ inputs.barrio }}
+          PARQUEADEROS: ${{ inputs.parqueaderos }}
+          DESTINO: ${{ inputs.destino }}
+        run: |
+          # Los datos del formulario van por variables de entorno, no pegados al comando
+          args=(--enviar "$DESTINO")
+          if [ -n "$AVISO" ]; then
+            args+=(--aviso "$AVISO")
+          else
+            args+=(--ciudad "$CIUDAD" --tipo "$TIPO" --m2 "$M2" --barrio "$BARRIO")
+            [ -n "$HABITACIONES" ] && args+=(--habitaciones "$HABITACIONES")
+            [ -n "$BANOS" ] && args+=(--banos "$BANOS")
+            [ -n "$ESTRATO" ] && args+=(--estrato "$ESTRATO")
+            [ -n "$PARQUEADEROS" ] && args+=(--parqueaderos "$PARQUEADEROS")
+          fi
+          python -m src.informe_captacion "${args[@]}"
+      - name: Avisar al administrador si algo falló
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: >-
+          python -m src.monitor fallo
+          "El informe de precio para captar falló (revisa los datos del formulario)"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

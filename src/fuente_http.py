@@ -23,10 +23,12 @@ from src.consolidar import HISTORIAL, rutas
 ANTIGUEDAD = {1: "menor a 1 año", 2: "1 a 8 años", 3: "9 a 15 años", 4: "16 a 30 años", 5: "más de 30 años"}
 
 
-def dataset_activo(raiz: str = "venta") -> pd.DataFrame:
-    """Avisos activos en el formato de data/app/housing_clean.parquet (+ first_seen y Etiquetas)."""
+def dataset_activo(raiz: str = "venta", retirados: bool = False) -> pd.DataFrame:
+    """Avisos activos en el formato de data/app/housing_clean.parquet (+ first_seen y Etiquetas). Con
+    `retirados`, en cambio, los retirados por el barrido (con `fecha_baja`): cuánto tardó en salir lo
+    parecido (src/informe_captacion.py)."""
     a = pd.read_parquet(rutas(raiz).avisos)
-    a = a[a["estado_aviso"] == "activo"]
+    a = a[a["estado_aviso"].eq("retirado") & a["fecha_baja"].notna()] if retirados else a[a["estado_aviso"] == "activo"]
     n = lambda c: pd.to_numeric(a[c], errors="coerce")
     titulo = a["tipo"].fillna("Inmueble") + f" en {raiz} en " + a["barrio"].fillna(a["ciudad"]).fillna("")
     return pd.DataFrame({
@@ -54,6 +56,7 @@ def dataset_activo(raiz: str = "venta") -> pd.DataFrame:
         "Admin_incluida": a["admin_incluida"] if "admin_incluida" in a else None,
         "Amenidades": a["amenidades"],
         "Descripcion": a["descripcion"],
+        "fecha_baja": pd.to_datetime(a["fecha_baja"], errors="coerce"),
     }).reset_index(drop=True)
 
 
