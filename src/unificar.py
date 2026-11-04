@@ -62,21 +62,42 @@ ESTADO = BASE_DIR / "data" / "estado_unificado"
 R2 = "estado_unificado"
 
 
+def coordenadas_gemelo(d: pd.DataFrame) -> pd.DataFrame:
+    """A los avisos de Metrocuadrado sin ubicación propia (sin coordenadas o llevados a su barrio por
+    zonas.corregir_ubicacion) les pone las de su gemelo de FincaRaíz, con `ubicacion` = 'gemelo': el aviso
+    de FincaRaíz de la misma ciudad, tipo, precio, área (redondeada) y habitaciones, si es el único así. El
+    4-nov, 1.755 de 10.908 avisos así lo tenían. Con su ubicación real ya pueden juntarse con él (candidatos)."""
+    num = lambda c: pd.to_numeric(d[c], errors="coerce")
+    clave = ["_ciudad", "tipo", "_precio", "_m2", "_hab"]
+    x = d.assign(_ciudad=d["ciudad"].map(canonica), _precio=num("precio").where(lambda v: v > 0),
+                 _m2=num("m2").where(lambda v: v > 0).round(), _hab=num("habitaciones")).dropna(subset=clave)
+    fr = x[(x["portal"] == "fincaraiz") & x["ubicacion"].eq("aviso")]
+    fr = fr[~fr.duplicated(clave, keep=False)]
+    sin = x[(x["portal"] == "metrocuadrado") & x["ubicacion"].ne("aviso")]
+    m = sin[clave].reset_index().merge(fr[clave + ["latitud", "longitud"]], on=clave)
+    d = d.copy()
+    d.loc[m["index"], ["latitud", "longitud"]] = m[["latitud", "longitud"]].to_numpy()
+    d.loc[m["index"], "ubicacion"] = "gemelo"
+    return d
+
+
 def cargar(ciudad: str | None = None) -> pd.DataFrame:
     """Avisos de vivienda activos de los dos portales, en una sola tabla con `portal` y `clave`, y la
-    ubicación corregida (zonas.corregir_ubicacion: `ubicacion` 'aviso', 'barrio' o vacía)."""
+    ubicación corregida (zonas.corregir_ubicacion y coordenadas_gemelo: `ubicacion` 'aviso', 'gemelo',
+    'barrio' o vacía). La ubicación se corrige antes de elegir la ciudad o el área."""
     from src.consolidar import rutas
     partes = []
     for portal, raiz in PORTALES.items():
         a = pd.read_parquet(rutas(raiz).avisos, columns=COLUMNAS + ["estado_aviso"])
         a = corregir_ubicacion(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)],
                                solo_imposibles=portal == "fincaraiz")     # FincaRaíz: coordenadas fiables
-        if ciudad in AREAS:             # un área metropolitana: por coordenadas
-            a = a[en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"])]
-        elif ciudad:                    # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
-            a = a[a["ciudad"].map(canonica) == canonica(ciudad)]
         partes.append(a[COLUMNAS + ["ubicacion"]].assign(portal=portal, tipo=a["tipo"].map(TIPOS)))
-    d = pd.concat(partes, ignore_index=True)
+    d = coordenadas_gemelo(pd.concat(partes, ignore_index=True))
+    if ciudad in AREAS:                 # un área metropolitana: por coordenadas
+        d = d[en_area(ciudad, d["latitud"], d["longitud"], d["ciudad"])]
+    elif ciudad:                        # Metrocuadrado escribe "Bogotá D.C." y "Cartagena de Indias"
+        d = d[d["ciudad"].map(canonica) == canonica(ciudad)]
+    d = d.reset_index(drop=True)
     d["id_inmueble"] = d["id_inmueble"].astype(str)
     d["anunciante_id"] = d["anunciante_id"].astype(str).where(d["anunciante_id"].notna())
     d["primera_vez"] = d["primera_vez"].astype(str)
@@ -91,7 +112,7 @@ def candidatos(d: pd.DataFrame, lote: int = 5_000_000) -> tuple[np.ndarray, np.n
     X = _km(d)
     ok = np.isfinite(X).all(axis=1)
     if "ubicacion" in d:                # un punto llevado al centro de su barrio no es la ubicación del inmueble
-        ok &= (d["ubicacion"] == "aviso").to_numpy()
+        ok &= d["ubicacion"].isin(["aviso", "gemelo"]).to_numpy()
     precio = pd.to_numeric(d["precio"], errors="coerce").where(lambda v: v > 0).to_numpy()
     portal, anunciante = d["portal"].to_numpy(), d["anunciante_id"].to_numpy()
     ii, jj = [], []
@@ -161,7 +182,7 @@ def resumir(d: pd.DataFrame) -> pd.DataFrame:
     media de sus avisos con ubicación propia; si todos fueron llevados a su barrio, la de ellos
     (`ubicacion` 'barrio')."""
     num = lambda c: pd.to_numeric(d[c], errors="coerce")
-    propia = (d["ubicacion"] == "aviso") if "ubicacion" in d else pd.Series(True, index=d.index)
+    propia = d["ubicacion"].isin(["aviso", "gemelo"]) if "ubicacion" in d else pd.Series(True, index=d.index)
     inm = d.assign(precio=num("precio"), m2=num("m2"), habitaciones=num("habitaciones"),
                    lat_propia=num("latitud").where(propia), lon_propia=num("longitud").where(propia),
                    latitud=num("latitud"), longitud=num("longitud"), propia=propia).groupby("id_unificado").agg(
