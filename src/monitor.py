@@ -37,6 +37,7 @@ COBERTURA_MIN = 0.90    # del total que declara el portal
 ERRORES_MAX = 0.01      # páginas con error / páginas leídas
 BAJAS_MAX = 0.05        # bajas del día / activos: más que esto es un barrido roto, no el mercado
 REPUBLICADOS_MAX = 300  # republicados en un día: más que esto es una inmobiliaria republicando su catálogo
+DESCUBIERTOS_NOTA = 0.10  # «vistos por primera vez» / activos: más que esto lleva una nota (tipos o zonas nuevas)
 CAMBIOS_MAX = 0.03      # cambios de precio del día / activos
 MODELO_SUBE_MAX = 0.01  # el error mediano en avisos nuevos no debe subir más de 1 punto en una semana
 COBERTURA_RANGO = (0.75, 0.85)   # el rango p10–p90 debe contener ~80% de los precios
@@ -77,48 +78,56 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
     if rep is None:
         return [f"*{nombre}:* no hay barrido del {fecha}"], [f"{nombre}: no hay barrido del {fecha} en R2"]
     avisos = []
-    lineas = [f"*{nombre}* · {_n(rep['avisos_unicos'])} avisos ({_pct(rep['cobertura'])} del portal) · "
-              f"{_n(rep['paginas'])} págs · {rep['errores_pagina']} errores"]
+    lineas = [f"*{nombre}* · leídos {_n(rep['avisos_unicos'])} avisos ({_pct(rep['cobertura'])} de los que muestra el portal) · "
+              f"{_n(rep['paginas'])} páginas, {rep['errores_pagina']} con error"]
     if rep["cobertura"] < COBERTURA_MIN:
-        avisos.append(f"{nombre}: cobertura {_pct(rep['cobertura'])} (mínimo {_pct(COBERTURA_MIN)})")
+        avisos.append(f"{nombre}: el barrido leyó solo el {_pct(rep['cobertura'])} de lo que muestra el portal "
+                      f"(lo normal es más del {_pct(COBERTURA_MIN)})")
     if rep["errores_pagina"] > ERRORES_MAX * max(rep["paginas"], 1):
         avisos.append(f"{nombre}: {rep['errores_pagina']} páginas con error de {_n(rep['paginas'])}")
     if rep.get("segmentos_bajo_90pct"):
         lineas.append(f"Segmentos bajo 90%: {', '.join(rep['segmentos_bajo_90pct'])}")
     if rep.get("escalones_sin_resolver"):                # Metrocuadrado: empates de precio sin partir
-        lineas.append(f"Escalones de precio sin resolver: {rep['escalones_sin_resolver']}")
+        lineas.append(f"{_n(rep['escalones_sin_resolver'])} grupos de avisos con el mismo precio no se leyeron "
+                      f"completos (normal: unos pocos cientos)")
 
     if not meta or meta.get("ultimo_barrido") != fecha:
         ultimo = meta.get("ultimo_barrido") if meta else "ninguno"
-        avisos.append(f"{nombre}: el estado no tiene el barrido del {fecha} (último: {ultimo}); ¿falló consolidar?")
+        avisos.append(f"{nombre}: el barrido de hoy se leyó, pero NO quedó guardado (el estado sigue en el {ultimo}): "
+                      f"falló el paso «Consolidar» del workflow. Hoy faltan sus nuevos, retirados y cambios de precio; "
+                      f"hay que aplicarlo antes del barrido de mañana")
         return lineas, avisos
     res = meta.get("ultimo_resumen")
     if not res:                             # consolidado antes de que existiera el resumen (26-oct)
         return lineas + ["(sin resumen del estado: consolidado con una versión anterior)"], avisos
     activos = max(res["activos"], 1)
-    lineas += [f"🆕 {_n(res.get('alta', 0))} altas · {_n(res.get('descubierto', 0))} descubiertos · "
-               f"❌ {_n(res.get('baja', 0))} bajas · ↩️ {_n(res.get('reaparece', 0))} reaparecen"
-               + (f" · {_n(res['reactivado'])} rescatados vuelven" if res.get("reactivado") else "")
-               + (f" · 🔁 {_n(res['republicado'])} republicados" if res.get("republicado") else ""),
-               f"💲 {_n(res.get('precio_baja', 0))} bajaron y {_n(res.get('precio_sube', 0))} subieron de precio · "
-               f"{_n(res['activos'])} activos"]
+    lineas += [f"🆕 {_n(res.get('alta', 0))} nuevos · 👀 {_n(res.get('descubierto', 0))} vistos por primera vez "
+               f"(ya estaban publicados) · ❌ {_n(res.get('baja', 0))} retirados · ↩️ {_n(res.get('reaparece', 0))} "
+               f"volvieron tras darse por retirados"
+               + (f" · {_n(res['reactivado'])} del sistema viejo vuelven" if res.get("reactivado") else "")
+               + (f" · 🔁 {_n(res['republicado'])} republicados con otro número" if res.get("republicado") else ""),
+               f"💲 {_n(res.get('precio_baja', 0))} bajaron de precio y {_n(res.get('precio_sube', 0))} subieron · "
+               f"{_n(res['activos'])} avisos activos"]
+    if res.get("descubierto", 0) > DESCUBIERTOS_NOTA * activos:
+        lineas.append("(Muchos «vistos por primera vez»: normal el día que el barrido empieza a recorrer algo nuevo, "
+                      "como tipos de inmueble o zonas)")
     acu = meta.get("acumulado", {})
     if acu.get("baja"):
-        desde = f"Desde el {meta['acumulado_desde']} (regla de {meta['regla_bajas']['ausencias_para_baja']} ausencias)" \
+        desde = f"Desde el {meta['acumulado_desde']} (retirado = {meta['regla_bajas']['ausencias_para_baja']} días sin verse)" \
             if meta.get("acumulado_desde") else "Desde el inicio"
-        lineas.append(f"{desde}: {_n(acu['baja'])} bajas, de las que reaparecieron "
+        lineas.append(f"{desde}: {_n(acu['baja'])} retirados, de los que volvieron "
                       f"{_n(acu.get('reaparece', 0))} ({_pct(acu.get('reaparece', 0) / acu['baja'])})")
     if len(meta["barridos"]) > 1 and not res["ausencias_contadas"]:
         avisos.append(f"{nombre}: barrido incompleto ({_pct(res['cobertura_portal'])} de lo que declara el portal, "
-                      f"{_pct(res['vistos'] / activos)} de los activos); hoy no se contaron ausencias"
+                      f"{_pct(res['vistos'] / activos)} de los activos): hoy nadie se dio por retirado"
                       if res.get("cobertura_portal") is not None else
-                      f"{nombre}: el barrido trajo menos del 90% de los activos; hoy no se contaron ausencias")
+                      f"{nombre}: el barrido trajo menos del 90% de los activos: hoy nadie se dio por retirado")
     anun = res.get("anunciantes", {})
     for p in anun.get("pausa", []):             # inmobiliarias que dejaron de verse casi enteras (consolidar)
         lineas.append(f"⏸️ {p['anunciante']}: hoy faltan {_n(p['faltan'])} de sus {_n(p['activos'])} avisos "
                       f"({_pct(p['parte_catalogo'])}): ¿una pausa o se fue del portal?")
     if res.get("baja", 0) > BAJAS_MAX * activos:
-        avisos.append(f"{nombre}: {_n(res['baja'])} bajas en un día ({_pct(res['baja'] / activos)} de los activos)"
+        avisos.append(f"{nombre}: {_n(res['baja'])} retirados en un día ({_pct(res['baja'] / activos)} de los activos)"
                       + _quienes(anun.get("baja", [])))
     if res.get("republicado", 0) > REPUBLICADOS_MAX:
         avisos.append(f"{nombre}: {_n(res['republicado'])} republicados en un día" + _quienes(anun.get("republicado", [])))
@@ -144,11 +153,12 @@ def unificado(fecha: str, local: bool) -> tuple[list[str], list[str]]:
         return ([f"*Registro único:* sin actualizar (último: {meta.get('ultimo_dia', 'ninguno')})"],
                 [f"Registro único: no se actualizó el {fecha}"])
     r, avisos = meta["ultimo_resumen"], []
-    lineas = [f"*Registro único* · {_n(r['inmuebles_activos'])} inmuebles de {_n(r['avisos_activos'])} avisos · "
-              f"{_n(r['en_los_dos_portales'])} en los dos portales",
-              f"🆕 {_n(r['inmuebles_nuevos'])} nuevos · {_n(r['inmuebles_cerrados'])} cerrados · "
-              f"{_n(r['fusionados'])} fusionados · {_n(r['partidos'])} partidos"
-              + (f" · {_pct(r['estabilidad'])} conservan su inmueble" if r["estabilidad"] is not None else "")]
+    lineas = [f"*Registro único* (cada vivienda una vez, aunque esté en los dos portales) · "
+              f"{_n(r['inmuebles_activos'])} viviendas de {_n(r['avisos_activos'])} avisos · "
+              f"{_n(r['en_los_dos_portales'])} están en los dos portales",
+              f"Hoy: {_n(r['inmuebles_nuevos'])} viviendas nuevas · {_n(r['inmuebles_cerrados'])} sin avisos activos · "
+              f"{_n(r['fusionados'])} se unieron con otra · {_n(r['partidos'])} se separaron"
+              + (f" · el {_pct(r['estabilidad'])} de los avisos sigue en la misma vivienda" if r["estabilidad"] is not None else "")]
     if r["estabilidad"] is not None and r["estabilidad"] < ESTABILIDAD_MIN:
         avisos.append(f"Registro único: solo el {_pct(r['estabilidad'])} de los avisos conservó su inmueble")
     if r["avisos_salen"] > SALEN_MAX * max(r["avisos_activos"], 1):
@@ -185,7 +195,7 @@ def resumen(fecha: str, jobs: dict[str, str], scraper: str | None, url: str | No
         lineas, av = unificado(fecha, local)
         bloques.append("\n".join(lineas))
         avisos += av
-    cabeza = (f"*⚠️ {titulo} · {fecha} · {len(avisos)} aviso{'s' if len(avisos) > 1 else ''}*\n"
+    cabeza = (f"*⚠️ {titulo} · {fecha} · {len(avisos)} cosa{'s' if len(avisos) > 1 else ''} para revisar*\n"
               + "\n".join(f"• {a}" for a in avisos)) if avisos else f"*✅ {titulo} · {fecha}*"
     return "\n\n".join([cabeza, *bloques] + ([f"🔗 {url}"] if url else []))
 

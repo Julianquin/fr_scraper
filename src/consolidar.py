@@ -221,6 +221,10 @@ def _en_pausa(previo: pd.DataFrame, faltan: pd.Index) -> tuple[pd.Index, list[di
                   "parte_catalogo": round(float(parte[a]), 3)} for a in pausa]
 
 
+class YaProcesado(ValueError):
+    """El día ya está en el estado (un barrido relanzado): se avisa y no se aplica de nuevo."""
+
+
 def cargar_estado(r: Rutas = rutas()) -> tuple[pd.DataFrame, dict]:
     if r.avisos.exists():
         return pd.read_parquet(r.avisos), json.loads(r.meta.read_text())
@@ -232,7 +236,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
     r = rutas(raiz)
     previo, meta = cargar_estado(r)
     if meta["ultimo_barrido"] and fecha <= meta["ultimo_barrido"]:
-        raise ValueError(f"El {fecha} ya está procesado (último: {meta['ultimo_barrido']}). "
+        raise YaProcesado(f"El {fecha} ya está procesado (último: {meta['ultimo_barrido']}). "
                          "Usa --reconstruir para rehacer desde cero.")
 
     hoy = pd.read_parquet(ruta_barrido(fecha, raiz))
@@ -273,7 +277,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
             es_alta = np.ones(len(nuevos), dtype=bool)
         # Un tipo que el barrido no recorría (Metrocuadrado sumó lotes, locales… el 5-nov): lo de ese tipo ya
         # existía, así que es "descubierto" el primer día y no ~37.000 altas de golpe
-        es_alta &= hoy.loc[nuevos, "tipo"].isin(previo["tipo"].dropna().unique()).to_numpy()
+        es_alta = es_alta & hoy.loc[nuevos, "tipo"].isin(previo["tipo"].dropna().unique()).to_numpy()
         for ids, nombre in ((nuevos[es_alta], "alta"), (nuevos[~es_alta], "descubierto")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
         volvieron = comunes[previo.loc[comunes, "estado_aviso"].eq("retirado").to_numpy()]
@@ -528,7 +532,9 @@ if __name__ == "__main__":
         else:
             try:
                 consolidar(a.fecha, a.raiz)
-            except ValueError as e:                  # p. ej. barrido relanzado el mismo día
+            except YaProcesado as e:                 # p. ej. barrido relanzado el mismo día; cualquier otro error
+                                                      # hace fallar el paso (el 5-nov uno se coló como este y el día
+                                                      # no se aplicó sin que nada fallara)
                 print(f"⚠️  {e} No se aplica de nuevo.")
             else:
                 if a.subir:

@@ -44,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import BASE_DIR
+from src.consolidar import YaProcesado
 from src.deduplicar import _km, _texto, diferencia_area, matriz_texto, puntaje, señales
 from src.zonas import AREAS, canonica, corregir_ubicacion, en_area
 
@@ -252,7 +253,7 @@ def actualizar(fecha: str, d: pd.DataFrame | None = None) -> dict:
     from src.fincaraiz_http import guardar_parquet
     avisos, inmuebles, meta = cargar_estado()
     if meta["ultimo_dia"] and fecha <= meta["ultimo_dia"]:
-        raise ValueError(f"El {fecha} ya está procesado (último: {meta['ultimo_dia']}).")
+        raise YaProcesado(f"El {fecha} ya está procesado (último: {meta['ultimo_dia']}).")
     d = cargar() if d is None else d.reset_index(drop=True)
     g, _ = grupos(d)
     ids, fusiones, partidos, meta["ultimo_id"] = asignar(d, g, avisos, inmuebles, meta["ultimo_id"])
@@ -343,7 +344,7 @@ if __name__ == "__main__":
     if a.fecha:
         try:
             actualizar(a.fecha)
-        except ValueError as e:                      # p. ej. Metrocuadrado relanzado el mismo día
+        except YaProcesado as e:                     # p. ej. Metrocuadrado relanzado el mismo día (solo ese caso)
             print(f"⚠️  {e} No se aplica de nuevo.")
         else:
             if a.subir:
