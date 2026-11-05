@@ -70,7 +70,7 @@ jobs:
           python -m src.almacen traer estado/historial/ --destino data
           python -m src.consolidar --raiz m2_venta --bajar      # el mismo inmueble en los dos portales
           python -m src.almacen traer osm/ --destino data        # informe: el entorno de cada oportunidad
-          # El modelo de precios (lo entrena modelo.yml los lunes); sin él la alerta sale igual, sin esa línea
+          # El modelo de precios (lo entrena modelo.yml los domingos); sin él la alerta sale igual, sin esa línea
           if python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp; then
             mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/ \
               || echo "⚠️  Sin el modelo de precios"
