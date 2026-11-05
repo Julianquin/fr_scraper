@@ -1,7 +1,7 @@
 """
 Modelo de estimación de precios de vivienda (bloque E7): preparación de datos común a los notebooks
 (notebooks/modelo_precio_e7.ipynb, notebooks/comparacion_modelos_e7.ipynb) y entrenamiento semanal en
-el CI (.github/workflows/modelo.yml: los lunes tras el barrido; modelo y ficha a R2, modelos/).
+el CI (.github/workflows/modelo.yml: los domingos tras el barrido; modelo y ficha a R2, modelos/).
 
 Datos: los avisos de venta ACTIVOS de estado/avisos (src/consolidar.py), solo vivienda
 (apartamento, apartaestudio, casa). Son precios pedidos, no de cierre.

@@ -210,7 +210,7 @@ COLS_MODELO = ["modelo_precio", "modelo_p10", "modelo_p90", "modelo_conf", "bajo
 def con_modelo(sel: pd.DataFrame, desde: pd.Timestamp) -> pd.DataFrame:
     """Precio que estima el modelo (src/modelo_precio.py) para cada aviso publicado desde `desde`, su rango del
     80% y cuánto pide por debajo (`bajo_modelo` > 0) o por encima. Solo con un modelo que NO vio esos avisos
-    (entrenado con `publicados_antes` <= `desde`; modelo.yml lo entrena así los lunes): uno que ya conoce su
+    (entrenado con `publicados_antes` <= `desde`; modelo.yml lo entrena así los domingos): uno que ya conoce su
     precio pedido tiende a darle la razón (medido el 5-nov: mediana 6,6% bajo el modelo en vez de 15,7%).
     Si no hay modelo así en disco (data/modelos/), las columnas quedan vacías: la alerta sale igual."""
     sel = sel.assign(**{c: np.nan for c in COLS_MODELO})

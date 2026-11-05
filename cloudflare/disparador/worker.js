@@ -5,7 +5,7 @@
 //
 //   "0 5 * * *"   todos los días 05:00 UTC = 00:00 Colombia → env.WORKFLOW
 //                 (barrido_http.yml desde el cambio de fuente del 30-oct; encadena Metrocuadrado,
-//                 el mapa y, los lunes, el modelo)
+//                 el mapa y, los domingos, el modelo)
 //   "0 12 * * MON" los lunes 12:00 UTC = 07:00 Colombia → oportunidades.yml (la alerta). Ojo: en
 //                 Cloudflare el día 1 es DOMINGO (no lunes como en GitHub): por eso MON y no 1
 //

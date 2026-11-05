@@ -1,8 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Modelo de precios de vivienda (E7): entrenamiento semanal.
 #
-# Corre cuando termina el barrido diario (barrido_http.yml), pero solo sigue los LUNES (hora de
-# Colombia): entrena con los avisos activos recién consolidados, mide su error (la ficha) y sube a
+# Corre cuando termina el barrido diario (barrido_http.yml), pero solo sigue los DOMINGOS (hora de
+# Colombia), un día antes de la alerta de los lunes: si falla, hay un día para volver a lanzarlo.
+# Entrena con los avisos activos recién consolidados, mide su error (la ficha) y sube a
 # R2 el modelo (modelos/precio_vivienda.joblib) y la ficha (+ una copia por fecha en
 # modelos/historial/). Luego manda al administrador el resumen frente a la semana anterior
 # (src/monitor.py modelo). Solo lee R2: no toca los portales ni el estado del mercado.
@@ -35,13 +36,13 @@ jobs:
     outputs:
       seguir: ${{ steps.dia.outputs.seguir }}
     steps:
-      - name: ¿Es lunes en Colombia?
+      - name: ¿Es domingo en Colombia?
         id: dia
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=America/Bogota date +%u)" = "1" ]; then
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(TZ=America/Bogota date +%u)" = "7" ]; then
             echo "seguir=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Hoy no es lunes en Colombia: el modelo se entrena los lunes."
+            echo "Hoy no es domingo en Colombia: el modelo se entrena los domingos."
           fi
 
   entrenar:
@@ -72,8 +73,9 @@ jobs:
           python -m src.consolidar --bajar
           python -m src.almacen traer osm/ --destino data
       - name: Entrenar, medir y subir modelo y ficha a R2
-        # Sin lo publicado en los últimos 7 días (hora de Colombia): la alerta de hoy califica esos avisos con
-        # este modelo, y uno que ya conoce su precio pedido tiende a darle la razón (src/oportunidades.py, con_modelo)
+        # Sin lo publicado en los últimos 7 días (hora de Colombia, hasta el domingo anterior): la alerta del lunes
+        # califica esos avisos con este modelo, y uno que ya conoce su precio pedido tiende a darle la razón
+        # (src/oportunidades.py, con_modelo)
         run: python -m src.modelo_precio entrenar --subir --publicados-antes "$(TZ=America/Bogota date -d '7 days ago' +%F)"
       - name: Resumen al administrador
         run: >-
