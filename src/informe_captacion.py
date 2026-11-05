@@ -11,13 +11,17 @@ le muestre al propietario a qué precio salir al mercado.
   - Un rango de salida: donde se cruzan el rango del modelo y la mitad central de los comparables.
 
 El inmueble puede ser un aviso ya publicado (FincaRaíz o Metrocuadrado: por su enlace o su id; se compara
-además su precio pedido) o uno que todavía no está publicado (su ficha a mano). Los comparables son de
-FincaRaíz, como en la alerta. Es una estimación del precio de mercado pedido, no un avalúo (Ley 1673 de 2013).
+además su precio pedido) o uno que todavía no está publicado (su ficha a mano). Los comparables son de los dos
+portales, sin repetidos: de Metrocuadrado solo los que no están también en FincaRaíz (registro único,
+src/unificar.py), y nunca el propio inmueble en el otro portal. Metrocuadrado no da la fecha de publicación ni
+tenemos sus bajadas de precio: los días publicados y "bajó de precio" son de los de FincaRaíz.
+Es una estimación del precio de mercado pedido, no un avalúo (Ley 1673 de 2013).
 
 Uso:
     python -m src.informe_captacion --aviso https://www.fincaraiz.com.co/.../193004385
     python -m src.informe_captacion --ciudad Cali --tipo Apartamento --m2 85 --habitaciones 3 --banos 2 \\
         --estrato 5 --barrio "El Ingenio" [--parqueaderos 1] [--piso 4] [--antiguedad 3] [--administracion 350000]
+    … --barrio "3.3712, -76.5321"            # o un enlace de Google Maps (también maps.app.goo.gl/…)
     … [--enviar admin]                       # por Telegram al administrador (o a los agentes)
 """
 from __future__ import annotations
@@ -78,7 +82,63 @@ class BarrioNoEncontrado(Exception):
                     f"Vuelve a lanzarlo con uno de estos nombres.")
         return (f"❓ Informe de precio: no encontré el barrio «{self.barrio}» en {self.ciudad}."
                 + (f" ¿Quisiste decir…?\n{lista}\n" if lista else "\n")
-                + "Vuelve a lanzarlo con el nombre exacto, o con las coordenadas (--lat y --lon).")
+                + "Vuelve a lanzarlo con el nombre exacto, sus coordenadas («3.3712, -76.5321») o el enlace de "
+                  "Google Maps del punto.")
+
+
+class UbicacionInvalida(BarrioNoEncontrado):
+    """Coordenadas o enlace de mapa que no se pueden leer, o que caen lejos de la ciudad elegida."""
+
+    def __init__(self, texto: str, ciudad: str, motivo: str):
+        self.texto, self.motivo = texto, motivo
+        super().__init__(texto, ciudad, [])
+
+    def mensaje(self) -> str:
+        return (f"❓ Informe de precio: {self.motivo} («{self.texto[:120]}»).\n"
+                "Escribe el barrio, las coordenadas como «3.3712, -76.5321» o pega el enlace de Google Maps del punto.")
+
+
+# Coordenadas escritas ("3.3712, -76.5321") o en un enlace de Google Maps: el pin (!3d…!4d…), ?q=/ll=/query= o @
+COORDS = [re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)"),
+          re.compile(r"[?&](?:q|ll|query|destination)=(-?\d+\.\d+)(?:,|%2C)\s*(-?\d+\.\d+)"),
+          re.compile(r"@(-?\d+\.\d+),(-?\d+\.\d+)"),
+          re.compile(r"^\s*\(?(-?\d{1,2}\.\d+)\s*[,;\s]\s*(-?\d{1,3}\.\d+)\)?\s*$")]
+
+
+def coordenadas(texto: str | None, ciudad: str) -> tuple[float, float] | None:
+    """(lat, lon) si `texto` son coordenadas o un enlace de Google Maps (también los cortos, maps.app.goo.gl, que
+    se abren para ver a dónde llevan); None si es otra cosa (un nombre de barrio). UbicacionInvalida si son
+    coordenadas pero no se pueden usar: fuera de Colombia o a más de LEJOS_CIUDAD km de la ciudad."""
+    t = (texto or "").strip()
+    if not t:
+        return None
+    es_enlace = re.match(r"https?://", t)
+    if es_enlace and re.search(r"(goo\.gl|g\.co)/", t):
+        import urllib.request
+        try:
+            pedido = urllib.request.Request(t, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(pedido, timeout=20) as r:
+                t = r.geturl() + " " + r.read(200_000).decode("utf-8", "ignore")
+        except OSError as e:
+            raise UbicacionInvalida(texto, ciudad, f"no pude abrir el enlace ({e})") from None
+    for patron in COORDS:
+        if m := patron.search(t):
+            lat, lon = float(m.group(1)), float(m.group(2))
+            break
+    else:
+        if es_enlace:
+            raise UbicacionInvalida(texto, ciudad, "no encontré coordenadas en el enlace")
+        return None
+    la0, la1, lo0, lo1 = zonas.COLOMBIA
+    if not (la0 <= lat <= la1 and lo0 <= lon <= lo1):
+        raise UbicacionInvalida(texto, ciudad, f"las coordenadas {lat:.5f}, {lon:.5f} no están en Colombia "
+                                               "(¿latitud y longitud al revés?)")
+    from shapely.geometry import Point
+    toda, _, _ = zonas._ubicacion(ciudad)
+    km = toda.distance(Point(lon, lat)) * 111
+    if km > zonas.LEJOS_CIUDAD:
+        raise UbicacionInvalida(texto, ciudad, f"el punto {lat:.5f}, {lon:.5f} queda a {km:.0f} km de {ciudad}")
+    return lat, lon
 
 
 SIMILITUD_SEGURA = 0.85     # un error de escritura ("El Ingenip"): se acepta e informa, si no hay otro casi igual
@@ -142,7 +202,10 @@ def ficha_manual(ciudad: str, tipo: str, m2: float, habitaciones: float | None =
                  lon: float | None = None, parqueaderos: float | None = None, piso: float | None = None,
                  antiguedad: int | None = None, administracion: float | None = None,
                  descripcion: str = "") -> pd.Series:
-    """La ficha de un inmueble que no está publicado. Sin coordenadas, se ubica en el barrio que se nombra."""
+    """La ficha de un inmueble que no está publicado. Sin coordenadas, se ubica en el barrio que se nombra;
+    `barrio` también puede traer las coordenadas o un enlace de Google Maps (el formulario tiene un solo campo)."""
+    if (lat is None or lon is None) and (punto := coordenadas(barrio, ciudad)):
+        (lat, lon), barrio = punto, None
     por_barrio = lat is None or lon is None
     if por_barrio:
         if not barrio:
@@ -178,13 +241,8 @@ def _como_aviso(f: pd.Series, ciudad: str) -> pd.Series:
 
 def estimar(f: pd.Series) -> dict:
     """Precio estimado por el modelo: estimado, rango p10–p90 (80%) y confianza."""
-    from src.modelo_precio import ModeloPrecio
-    a = pd.DataFrame([f])
-    etiquetas = a["etiquetas"].fillna("[]").map(lambda s: json.loads(s) if isinstance(s, str) else [])
-    a["es_proyecto"] = etiquetas.map(lambda l: "Proyecto" in l or "Unidad de proyecto" in l)
-    for c in ("amenidades", "descripcion"):
-        a[c] = a[c].where(a[c].notna(), "")
-    r = ModeloPrecio.cargar().predecir(a).iloc[0]
+    from src.modelo_precio import ModeloPrecio, preparar
+    r = ModeloPrecio.cargar().predecir(preparar(pd.DataFrame([f]))).iloc[0]
     return {"estimado": float(r["precio_estimado"]), "p10": float(r["precio_p10"]), "p90": float(r["precio_p90"]),
             "pm2": float(r["pm2_estimado"]), "confianza": r["confianza"]}
 
@@ -192,17 +250,34 @@ def estimar(f: pd.Series) -> dict:
 # ── El mercado alrededor ───────────────────────────────────────────────────────────────────────────────
 
 
-def _parecido(c: pd.Series, comps: pd.DataFrame) -> pd.Series:
-    """Menor es más parecido: diferencia de área, de habitaciones y distancia."""
-    area = np.abs(np.log(comps["Area_m2"] / c["Area_m2"]))
-    hab = (comps["Habitaciones"] - c["Habitaciones"]).abs().fillna(1) if pd.notna(c["Habitaciones"]) else 0
-    if pd.notna(c["Latitud"]):
-        dy = (comps["Latitud"] - c["Latitud"]) * 110.54
-        dx = (comps["Longitud"] - c["Longitud"]) * 111.32 * np.cos(np.radians(c["Latitud"]))
-        km = np.hypot(dx, dy).fillna(1)
-    else:
-        km = 0
-    return area + 0.15 * hab + 0.2 * km
+def en_venta(ciudad: str, f: pd.Series) -> pd.DataFrame:
+    """Viviendas en venta de los dos portales con el formato de la alerta (columna `portal`), sin repetidos:
+    de Metrocuadrado solo las que no están también en FincaRaíz, y sin el propio inmueble `f` en ninguno."""
+    from src import fuente_http, unificar, viz_map
+    fr = op.cargar(ciudad).assign(portal="FincaRaíz")
+    try:
+        avisos = unificar.unificar(ciudad)[0]
+    except FileNotFoundError:               # sin el estado de Metrocuadrado
+        return fr
+    con_fr = avisos.loc[avisos["portal"] == "fincaraiz", "id_unificado"]
+    solo = avisos[(avisos["portal"] == "metrocuadrado") & ~avisos["id_unificado"].isin(con_fr)]
+    solo = solo.drop_duplicates("id_inmueble").set_index("id_inmueble")
+    m2 = fuente_http.dataset_activo("m2_venta")
+    m2 = m2[m2["id_inmueble"].isin(solo.index)].copy()
+    m2["Latitud"] = m2["id_inmueble"].map(solo["latitud"])        # la ubicación corregida (src/unificar.py)
+    m2["Longitud"] = m2["id_inmueble"].map(solo["longitud"])
+    m2["Ciudad"] = m2["Ciudad"].map(zonas.canonica)                # "Bogotá D.C." → "Bogotá"
+    try:
+        m2 = op.cargar(ciudad, viz_map.limpiar_ciudad(m2, ciudad)).assign(portal="Metrocuadrado")
+    except ValueError:                      # ninguno válido en la ciudad
+        m2 = fr.iloc[:0]
+    todo = pd.concat([fr, m2], ignore_index=True)
+    if f.get("portal"):                     # el propio inmueble, en los dos portales
+        clave = ("fincaraiz:" if f["portal"] == "FincaRaíz" else "metrocuadrado:") + str(f["id_inmueble"])
+        grupo = avisos.loc[avisos["clave"] == clave, "id_unificado"]
+        mismo = avisos.loc[avisos["id_unificado"].isin(grupo), "id_inmueble"]
+        todo = todo[~todo["id_inmueble"].isin(mismo)]
+    return todo.reset_index(drop=True)
 
 
 def datos(f: pd.Series) -> dict:
@@ -210,14 +285,15 @@ def datos(f: pd.Series) -> dict:
     ciudad = zonas.canonica(f["ciudad"])
     hasta = _hasta()
     c = _como_aviso(f, ciudad)
-    pool = op.cargar(ciudad)
+    pool = en_venta(ciudad, f)
     comps, nivel = op._comparables(c, pool)
     if nivel is None:                   # pocos: se usan los del barrio que haya, con confianza baja
         comps, nivel = op._comparables(c, pool, minimo=3)
     comps = comps.assign(pm2=comps["Precio"] / comps["Area_m2"],
-                         dias=(hasta - comps["first_seen"]).dt.days, parecido=_parecido(c, comps))
+                         dias=(hasta - comps["first_seen"]).dt.days, parecido=op.parecido(c, comps))
     hist = op.historial(hasta)
     comps["bajo"] = comps["id_inmueble"].map(hist["n_bajadas"]).fillna(0) > 0 if len(hist) else False
+    comps["bajo"] = comps["bajo"].where(comps["portal"] == "FincaRaíz")      # de Metrocuadrado no lo sabemos
 
     # Los parecidos que ya se retiraron: cuánto tardaron
     from src import fuente_http, viz_map
@@ -323,7 +399,9 @@ def informe_html(d: dict) -> str:
     titulo = f"{f['tipo']} de {pd.to_numeric(f['m2']):.0f} m² en {lugar}"
     bajo, alto = (_redondear(x) for x in d["rango"])
     donde = {"barrio": "en el barrio", "1 km": "a menos de 1 km", "comuna": d["zona"] or "en la zona"}.get(d["nivel"], "cerca")
-    n_bajo = int(comps["bajo"].sum()) if len(comps) else 0
+    n_bajo = int((comps["bajo"] == True).sum()) if len(comps) else 0   # noqa: E712 (vacío = no se sabe)
+    n_fr = int((comps["portal"] == "FincaRaíz").sum()) if len(comps) else 0
+    n_m2 = len(comps) - n_fr
 
     tiles = [_tile("Precio estimado", _mill(_redondear(m["estimado"]), 0), f"confianza {m['confianza'].lower()}"),
              _tile("Rango de salida sugerido", f"{_mill(bajo, 0)} – {_mill(alto, 0)}".replace(" M –", " –"),
@@ -335,16 +413,20 @@ def informe_html(d: dict) -> str:
         tiles.append(_tile("Rentabilidad bruta", _pct(r["rentab_bruta"], 1),
                            f"arriendo estimado {_mill(r['canon_est'], 1)}/mes"))
     else:
-        tiles.append(_tile("Días publicados", f"{comps['dias'].median():.0f}" if len(comps) else "—",
+        tiles.append(_tile("Días publicados", f"{comps['dias'].median():.0f}" if comps["dias"].notna().any() else "—",
                            "mediana de los similares en venta"))
 
     puntos = [f"Con su ficha, el modelo estima <b>{_mill(_redondear(m['estimado']), 0)}</b> "
               f"({_mill(m['pm2'], 1)}/m²); 8 de cada 10 inmuebles así se piden entre "
               f"{_mill(_redondear(m['p10']), 0)} y {_mill(_redondear(m['p90']), 0)}."]
     if len(comps):
-        puntos.append(f"Los <b>{len(comps)} similares</b> {donde} piden entre {_mill(q[.25] * m2, 0)} y "
-                      f"{_mill(q[.75] * m2, 0)} la mitad central (a su área); llevan publicados {comps['dias'].median():.0f} "
-                      f"días (mediana) y " + (f"{n_bajo} de ellos ya bajaron de precio." if n_bajo else "ninguno ha bajado de precio."))
+        portales = f" ({n_fr} de FincaRaíz y {n_m2} solo en Metrocuadrado)" if n_m2 else ""
+        de_fr = f"; los de FincaRaíz llevan" if n_m2 else "; llevan"
+        bajaron = (f"{n_bajo} de ellos ya bajaron de precio." if n_bajo else "ninguno ha bajado de precio.")
+        dias = (f"{de_fr} publicados {comps['dias'].median():.0f} días (mediana) y {bajaron}"
+                if comps["dias"].notna().any() else ".")
+        puntos.append(f"Los <b>{len(comps)} similares</b> {donde}{portales} piden entre {_mill(q[.25] * m2, 0)} y "
+                      f"{_mill(q[.75] * m2, 0)} la mitad central (a su área){dias}")
     if len(ret) >= MIN_RETIRADOS:
         puntos.append(f"De los parecidos que ya se retiraron del portal desde el {_fecha(pd.Timestamp(INICIO_BAJAS), año=False)}, "
                       f"la mitad lo hizo antes de <b>{ret['dias'].median():.0f} días</b> de publicado.")
@@ -359,8 +441,9 @@ def informe_html(d: dict) -> str:
         f"<td>{r['Area_m2']:.0f} m²" + (f" · {r['Habitaciones']:.0f} hab" if pd.notna(r['Habitaciones']) else "")
         + (f" · {r['Baños']:.0f} baños" if pd.notna(r.get('Baños')) else "") + "</td>"
         f"<td class='num'>{_mill(r['Precio'], 0)}</td><td class='num'>{_mill(r['pm2'], 1)}</td>"
-        f"<td class='num'>{'' if pd.isna(r['dias']) else f'{r.dias:.0f}'}</td><td class='num'>{'sí' if r['bajo'] else '—'}</td>"
-        f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
+        f"<td class='num'>{'' if pd.isna(r['dias']) else f'{r.dias:.0f}'}</td>"
+        f"<td class='num'>{'' if pd.isna(r['bajo']) else 'sí' if r['bajo'] else '—'}</td>"
+        f"<td><a href='{html.escape(str(r['URL detalle']))}'>{r['portal']} ↗</a></td></tr>"
         for _, r in comps.head(MAX_COMPARABLES).iterrows())
     tabla = (f"""<table><thead><tr><th>Barrio</th><th>Ficha</th><th class="num">Precio</th><th class="num">Por m²</th>
       <th class="num">Días publicado</th><th class="num">Bajó de precio</th><th></th></tr></thead><tbody>{filas}</tbody></table>"""
@@ -433,7 +516,7 @@ def informe_html(d: dict) -> str:
 <p class="ley"><i style="background:{GRIS};border-radius:50%"></i>similar en venta<i style="background:{AZUL_CLARO}"></i>rango del modelo (80%)<i style="background:{AZUL};width:2pt"></i>estimado{'<i style="background:#0b0b0b;transform:rotate(45deg);width:6pt;height:6pt"></i>precio pedido hoy' if d['pedido'] else ''}</p>
 
 <h2>Los similares en venta</h2>
-{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}).</p>""" if len(comps) else ""}
+{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}).{' Metrocuadrado no publica la fecha de publicación ni sabemos si bajaron de precio: en los suyos esas celdas van vacías.' if n_m2 else ''}</p>""" if len(comps) else ""}
 {tabla}
 
 <h2>Cuánto tardan en salir</h2>
@@ -442,8 +525,8 @@ def informe_html(d: dict) -> str:
 <h2>Si se compra para arrendar</h2>
 {rent_txt}
 
-<p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de FincaRaíz y Metrocuadrado (modelo) y de
-FincaRaíz (similares), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
+<p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de FincaRaíz y Metrocuadrado
+(modelo y similares, sin repetir los que están en los dos), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
 en el RAA. Los precios de cierre suelen ser algo menores que los pedidos. El modelo tiene un error mediano de ~10% en
 apartamentos y ~15% en casas; el rango del 80% lo refleja. {ubic}</p>
 </body></html>"""
@@ -487,7 +570,7 @@ if __name__ == "__main__":
     p.add_argument("--habitaciones", type=float)
     p.add_argument("--banos", type=float)
     p.add_argument("--estrato", type=float)
-    p.add_argument("--barrio")
+    p.add_argument("--barrio", help="nombre del barrio, o sus coordenadas («3.3712, -76.5321»), o un enlace de Google Maps")
     p.add_argument("--lat", type=float)
     p.add_argument("--lon", type=float)
     p.add_argument("--parqueaderos", type=float)

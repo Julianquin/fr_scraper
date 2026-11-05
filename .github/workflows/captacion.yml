@@ -42,7 +42,7 @@ on:
         description: "Estrato"
         default: ""
       barrio:
-        description: "Barrio (si no aparece o puede ser varios, llega por Telegram la lista para elegir)"
+        description: "Barrio, coordenadas (3.3712, -76.5321) o enlace de Google Maps (si el barrio no aparece o puede ser varios, llega por Telegram la lista para elegir)"
         default: ""
       parqueaderos:
         description: "Parqueaderos"

@@ -72,7 +72,9 @@ jobs:
           python -m src.consolidar --bajar
           python -m src.almacen traer osm/ --destino data
       - name: Entrenar, medir y subir modelo y ficha a R2
-        run: python -m src.modelo_precio entrenar --subir
+        # Sin lo publicado en los últimos 7 días (hora de Colombia): la alerta de hoy califica esos avisos con
+        # este modelo, y uno que ya conoce su precio pedido tiende a darle la razón (src/oportunidades.py, con_modelo)
+        run: python -m src.modelo_precio entrenar --subir --publicados-antes "$(TZ=America/Bogota date -d '7 days ago' +%F)"
       - name: Resumen al administrador
         run: >-
           python -m src.monitor modelo

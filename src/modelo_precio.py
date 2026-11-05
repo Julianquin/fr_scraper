@@ -43,9 +43,17 @@ N_AMENIDADES = 40
 def cargar(ruta: Path = AVISOS) -> pd.DataFrame:
     """Avisos de vivienda activos, con `es_proyecto`."""
     a = pd.read_parquet(ruta)
-    a = a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)].copy()
-    etiquetas = a["etiquetas"].fillna("[]").map(json.loads)
+    return preparar(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)])
+
+
+def preparar(a: pd.DataFrame) -> pd.DataFrame:
+    """Filas del estado del barrido (o una ficha con sus columnas) listas para el modelo: `es_proyecto` y
+    sin vacíos en el texto. La usan el entrenamiento, la alerta y el informe de captación."""
+    a = a.copy()
+    etiquetas = a["etiquetas"].fillna("[]").map(lambda s: json.loads(s) if isinstance(s, str) else [])
     a["es_proyecto"] = etiquetas.map(lambda l: "Proyecto" in l or "Unidad de proyecto" in l)
+    for c in ("amenidades", "descripcion"):
+        a[c] = a[c].where(a[c].notna(), "")
     return a
 
 

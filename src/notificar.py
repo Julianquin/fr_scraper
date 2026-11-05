@@ -6,8 +6,10 @@ Usa los canales que tengan credenciales en variables de entorno (secrets en GitH
                un canal privado con el bot como admin también es un chat id, -100…)
   - WhatsApp:  CALLMEBOT_PHONE + CALLMEBOT_APIKEY   (CallMeBot, solo uso personal)
 
-El texto viene con formato de WhatsApp (*negrita*, _cursiva_); para Telegram se convierte
-a HTML. Los mensajes largos se parten por bloques (una oportunidad por bloque).
+El texto viene con formato de WhatsApp (*negrita*, _cursiva_) y enlaces como [texto](url); para
+Telegram se convierte a HTML (el enlace queda dentro del texto, sin ocupar espacio) y para WhatsApp
+el enlace va escrito después del texto. Los mensajes largos se parten por bloques (una oportunidad
+por bloque).
 
 Uso:
     python -m src.notificar reports/oportunidades/cali_2026-10-23_whatsapp.txt
@@ -26,11 +28,19 @@ import urllib.request
 LIMITE = {"telegram": 3500, "whatsapp": 1500}   # caracteres por mensaje (con margen)
 
 
+ENLACE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+
+def _visible(texto: str) -> int:
+    """Largo del texto como lo cuenta Telegram: de un [texto](url) solo cuenta el texto."""
+    return len(ENLACE.sub(r"\1", texto))
+
+
 def partir(texto: str, limite: int) -> list[str]:
-    """Agrupa los bloques (separados por línea en blanco) en mensajes de hasta `limite`."""
+    """Agrupa los bloques (separados por línea en blanco) en mensajes de hasta `limite` (visibles)."""
     partes, actual = [], ""
     for bloque in texto.strip().split("\n\n"):
-        if actual and len(actual) + len(bloque) + 2 > limite:
+        if actual and _visible(actual) + _visible(bloque) + 2 > limite:
             partes.append(actual)
             actual = bloque
         else:
@@ -40,6 +50,7 @@ def partir(texto: str, limite: int) -> list[str]:
 
 def _a_html(texto: str) -> str:
     t = html.escape(texto)
+    t = ENLACE.sub(r'<a href="\2">\1</a>', t)
     t = re.sub(r"\*(.+?)\*", r"<b>\1</b>", t)
     return re.sub(r"(?m)^_(.+)_$", r"<i>\1</i>", t)
 
@@ -87,7 +98,7 @@ def documento(ruta: str, token: str, chat_id: str, texto: str = "") -> None:
 
 
 def whatsapp(texto: str, phone: str, apikey: str) -> None:
-    for parte in partir(texto, LIMITE["whatsapp"]):
+    for parte in partir(ENLACE.sub(r"\1: \2", texto), LIMITE["whatsapp"]):
         q = urllib.parse.urlencode({"phone": phone, "text": parte, "apikey": apikey})
         respuesta = _get(f"https://api.callmebot.com/whatsapp.php?{q}")
         if "error" in respuesta.lower():
