@@ -98,15 +98,6 @@ def _por_comuna(inm: pd.DataFrame, arr: pd.DataFrame, venta: pd.DataFrame) -> pd
     return t[t["viviendas"] >= MIN_VIVIENDAS].sort_values("precio_m2", ascending=False)   # la tabla: MAX_FILAS
 
 
-def _en_metrocuadrado(sel: pd.DataFrame, avisos: pd.DataFrame) -> pd.DataFrame:
-    """Para cada oportunidad de FincaRaíz, el mismo inmueble en Metrocuadrado (registro único), si está."""
-    grupo = avisos.set_index("clave")["id_unificado"]
-    m2 = avisos[avisos["portal"] == "metrocuadrado"].drop_duplicates("id_unificado").set_index("id_unificado")
-    g = ("fincaraiz:" + sel["id_inmueble"].astype(str)).map(grupo)
-    return pd.DataFrame({"m2_precio": g.map(m2["precio"]).to_numpy(), "m2_url": g.map(m2["url"]).to_numpy()},
-                        index=sel.index)
-
-
 def _entorno(sel: pd.DataFrame) -> pd.DataFrame:
     """Distancias y conteos de OpenStreetMap (src/osm_pois.py); vacío si no hay el parquet de servicios."""
     from src import osm_pois
@@ -139,10 +130,10 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     sel = op.seleccionar(ev, UMBRAL, TOP) if len(ev) else ev
     sel_bj = op.seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) if len(bj) else bj
     avisos, inm, _ = unificar.unificar(ciudad)
+    sel = op.enriquecer(sel, venta, hasta, avisos, desde)   # modelo, 3 similares, Metrocuadrado, republicación
+    sel_bj = op.enriquecer(sel_bj, venta, hasta, avisos)
     if len(sel):
-        sel = sel.join(_en_metrocuadrado(sel, avisos)).join(_entorno(sel))
-        sel["comps"] = [op._comparables(r, venta)[0].assign(_d=lambda c: (c["Area_m2"] - r["Area_m2"]).abs())
-                        .nsmallest(3, "_d") for _, r in sel.iterrows()]
+        sel = sel.join(_entorno(sel))
 
     # Para captar: llevan tiempo y piden bastante más que sus comparables
     viejas = venta[venta["dias_pub"].between(*CAPTAR_DIAS)]
@@ -379,6 +370,11 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
     dias = (hasta - r["first_seen"]).days
     lineas = [f"<b>{r['n_comps']} similares</b> {'en el barrio' if r['nivel_comps'] == 'barrio' else 'en la zona'}, "
               f"mediana {_mill(r['med_comps'])}/m² · confianza {r['confianza'].lower()}"]
+    millones = lambda x: _mill(x, 0)
+    if modelo := op._modelo_txt(r, millones):
+        lineas.append(f"<b>Modelo de precios:</b> {html.escape(modelo.removeprefix('modelo: '))}")
+    if rep := op._republicado_txt(r, hasta, millones):
+        lineas.append(html.escape(op._mayus(rep)))
     if pd.notna(r.get("m2_precio")):
         dif = r["m2_precio"] / r["Precio"] - 1
         cuanto = "mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'} que en FincaRaíz"
@@ -395,7 +391,8 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
                       f"{r['n_comercio_500m']:.0f} comercios a 500 m")
     comps = "".join(f"<tr><td>{html.escape(PREFIJO.sub('', str(c['barrio_oficial'] or c['Barrio'])))}</td>"
                     f"<td class='num'>{c['Area_m2']:.0f} m²</td><td class='num'>{_mill(c['Precio'], 0)}</td>"
-                    f"<td class='num'>{_mill(c['precio_m2'])}/m²</td></tr>" for _, c in r["comps"].iterrows())
+                    f"<td class='num'>{_mill(c['precio_m2'])}/m²</td>"
+                    f"<td><a href='{html.escape(str(c['URL detalle']))}'>ver ↗</a></td></tr>" for _, c in r["comps"].iterrows())
     return f"""
   <article class="opo">
     <div class="opo-top"><a class="ver" href="{html.escape(str(r['URL detalle']))}">Ver aviso ↗</a>
@@ -408,7 +405,7 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
         <p class="precio"><b>{_mill(r['Precio'], 0)}</b> · {_mill(r['precio_m2'])}/m² · publicado hace {dias} día{'s' if dias != 1 else ''}</p>
         {''.join(f'<p class="hecho">{l}</p>' for l in lineas)}
       </div>
-      <div><p class="mini-tit">3 de sus similares, los de área más parecida</p>
+      <div><p class="mini-tit">3 de sus similares típicos, los más parecidos</p>
         <table class="mini">{comps}</table></div>
     </div>
   </article>"""
@@ -461,7 +458,7 @@ def informe_html(d: dict) -> str:
     bajadas = "".join(
         f"<tr><td>{html.escape(op._ficha(r))}</td><td>{html.escape(_barrio(r, nombres))}</td>"
         f"<td class='num'>{_mill(r['precio_antes'], 0)}</td><td class='num'><b>{_mill(r['Precio'], 0)}</b></td>"
-        f"<td class='num'>−{_pct(r['baja'])}</td>"
+        f"<td class='num'>−{_pct(r['baja'])}{'<br><span class=nota-c>al republicar</span>' if r.get('al_republicar') else ''}</td>"
         f"<td class='num'>{html.escape((op._frente_comps(r) or '—').replace('ahora ', '').replace('sus comparables', 'similares'))}</td>"
         f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>" for _, r in d["sel_bj"].iterrows())
     captar = "".join(
@@ -524,6 +521,7 @@ def informe_html(d: dict) -> str:
   .opo .precio {{ font-size: 9.2pt; margin: 0 0 3pt; }}
   .opo .hecho {{ margin: 0 0 2pt; color: var(--ink-2); font-size: 7.7pt; }} .opo .hecho b {{ color: var(--ink); font-weight: 600; }}
   a {{ color: var(--blue); font-weight: 600; text-decoration: none; }}
+  .nota-c {{ color: var(--muted); font-size: 6.8pt; }}
   .mini-tit {{ color: var(--ink-2); font-size: 7.4pt; margin: 0 0 2pt; }}
   table.mini td, table.mini th {{ font-size: 7.6pt; padding: 2.2pt 3pt; }}
   .vacio {{ color: var(--ink-2); }}

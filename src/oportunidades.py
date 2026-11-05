@@ -8,7 +8,15 @@ Alerta semanal de oportunidades, con dos secciones:
        2. Descuento = 1 − (precio/m² del aviso ÷ mediana de los comparables).
        3. Descarta probables errores (área incoherente, descuento extremo, proyectos sobre planos).
   B) Avisos que BAJARON DE PRECIO en la semana (bitácora de src/eventos.py), con su
-     historial (días publicado, bajadas acumuladas) y dónde quedan frente a sus comparables.
+     historial (días publicado, bajadas acumuladas) y dónde quedan frente a sus comparables. Cuenta
+     también los que se republicaron con otro número y un precio más bajo ("bajó al republicar").
+
+Cada aviso de la alerta trae además (enriquecer()):
+  - el precio que estima el modelo (src/modelo_precio.py) y cuánto pide por debajo o por encima (solo los
+    nuevos, y solo con un modelo entrenado sin los avisos de la semana: ver con_modelo);
+  - 3 de sus comparables, los de área más parecida, con su enlace;
+  - si el mismo inmueble está también en Metrocuadrado y a qué precio (registro único, src/unificar.py);
+  - si es un aviso republicado: desde cuándo estaba publicado con su número anterior y a qué precio.
 
 Si hay estado de arriendos en disco (E3), cada aviso trae además su arriendo estimado y su
 rentabilidad bruta (src/rentabilidad.py).
@@ -66,10 +74,12 @@ def _eventos() -> pd.DataFrame:
     return eventos.cargar()
 
 
-def cargar(ciudad: str) -> pd.DataFrame:
+def cargar(ciudad: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Avisos de vivienda de la ciudad, con zona oficial y first_seen/etiquetas.
-    Con la fuente http, first_seen es la fecha real de publicación y ya viene en el dataset."""
-    df = cargar_ciudad(ciudad)
+    Con la fuente http, first_seen es la fecha real de publicación y ya viene en el dataset.
+    `df`: otros avisos ya limpios con viz_map.limpiar_ciudad (p. ej. los de Metrocuadrado); por defecto,
+    los de FincaRaíz."""
+    df = cargar_ciudad(ciudad) if df is None else df
     df = df[df["Tipo_propiedad"].isin(TIPOS)].copy()
     if FUENTE != "http":
         m = master.cargar()[["id_inmueble", "first_seen", "Etiquetas"]]
@@ -177,11 +187,11 @@ def bajadas(df: pd.DataFrame, hist: pd.DataFrame, desde: pd.Timestamp,
             hasta: pd.Timestamp) -> pd.DataFrame:
     """Avisos de la ciudad que bajaron de precio en la semana (última bajada de cada uno)."""
     ev = _eventos()
-    b = ev[(ev["evento"] == "cambio_precio") & (ev["precio_despues"] < ev["precio_antes"])
+    b = ev[ev["evento"].isin(["cambio_precio", "republicado"]) & (ev["precio_despues"] < ev["precio_antes"])
            & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
     b = b.sort_values("fecha").drop_duplicates("id_inmueble", keep="last")
-    b = b.assign(baja=1 - b["precio_despues"] / b["precio_antes"])
-    b = b[b["baja"] >= BAJA_MIN][["id_inmueble", "fecha", "precio_antes", "baja"]]
+    b = b.assign(baja=1 - b["precio_despues"] / b["precio_antes"], al_republicar=b["evento"] == "republicado")
+    b = b[b["baja"].between(BAJA_MIN, 0.5)][["id_inmueble", "fecha", "precio_antes", "baja", "al_republicar"]]
     candidatos = df.merge(b.rename(columns={"fecha": "fecha_baja"}), on="id_inmueble")
     return calificar(df, candidatos, hist)
 
@@ -193,7 +203,130 @@ def seleccionar_bajadas(bj: pd.DataFrame, excluir: pd.Index, top: int) -> pd.Dat
              .sort_values(["_bajo", "baja"], ascending=False).head(top).drop(columns="_bajo")
 
 
+# ── Lo que acompaña a cada aviso de la alerta ─────────────────────────────────
+COLS_MODELO = ["modelo_precio", "modelo_p10", "modelo_p90", "modelo_conf", "bajo_modelo"]
+
+
+def con_modelo(sel: pd.DataFrame, desde: pd.Timestamp) -> pd.DataFrame:
+    """Precio que estima el modelo (src/modelo_precio.py) para cada aviso publicado desde `desde`, su rango del
+    80% y cuánto pide por debajo (`bajo_modelo` > 0) o por encima. Solo con un modelo que NO vio esos avisos
+    (entrenado con `publicados_antes` <= `desde`; modelo.yml lo entrena así los lunes): uno que ya conoce su
+    precio pedido tiende a darle la razón (medido el 5-nov: mediana 6,6% bajo el modelo en vez de 15,7%).
+    Si no hay modelo así en disco (data/modelos/), las columnas quedan vacías: la alerta sale igual."""
+    sel = sel.assign(**{c: np.nan for c in COLS_MODELO})
+    if sel.empty or FUENTE != "http":
+        return sel
+    try:
+        from src.modelo_precio import ARCHIVO, ModeloPrecio, preparar
+    except ImportError as e:                    # sin lightgbm instalado
+        print(f"⚠️  Sin el precio del modelo ({e})")
+        return sel
+    if not ARCHIVO.exists():
+        print(f"⚠️  Sin el precio del modelo: no está {ARCHIVO}")
+        return sel
+    modelo = ModeloPrecio.cargar()
+    corte = getattr(modelo, "publicados_antes", None)
+    if not corte or pd.Timestamp(corte) > desde:
+        print(f"⚠️  Sin el precio del modelo: el modelo en disco vio los avisos de la semana "
+              f"(entrenado con lo publicado antes de {corte or 'hoy'}; hace falta antes del {desde:%Y-%m-%d})")
+        return sel
+    from src.consolidar import rutas
+    a = pd.read_parquet(rutas("venta").avisos)
+    a = a[a["id_inmueble"].astype(str).isin(sel["id_inmueble"])]
+    a = zonas.corregir_ubicacion(a, solo_imposibles=True)
+    p = modelo.predecir(preparar(a))
+    p.index = a["id_inmueble"].astype(str).to_numpy()
+    p = p[~p.index.duplicated()]
+    ids = sel["id_inmueble"]
+    sel["modelo_precio"] = ids.map(p["precio_estimado"])
+    sel["modelo_p10"] = ids.map(p["precio_p10"])
+    sel["modelo_p90"] = ids.map(p["precio_p90"])
+    sel["modelo_conf"] = ids.map(p["confianza"])
+    sel["bajo_modelo"] = 1 - sel["Precio"] / sel["modelo_precio"]
+    return sel
+
+
+def parecido(c: pd.Series, comps: pd.DataFrame) -> pd.Series:
+    """Menor es más parecido a `c`: diferencia de área, de habitaciones y distancia."""
+    area = np.abs(np.log(comps["Area_m2"] / c["Area_m2"]))
+    hab = (comps["Habitaciones"] - c["Habitaciones"]).abs().fillna(1) if pd.notna(c["Habitaciones"]) else 0
+    if pd.notna(c["Latitud"]):
+        dy = (comps["Latitud"] - c["Latitud"]) * 110.54
+        dx = (comps["Longitud"] - c["Longitud"]) * 111.32 * np.cos(np.radians(c["Latitud"]))
+        km = np.hypot(dx, dy).fillna(1)
+    else:
+        km = 0
+    return area + 0.15 * hab + 0.2 * km
+
+
+def tres_comparables(r: pd.Series, pool: pd.DataFrame, n: int = 3) -> pd.DataFrame:
+    """`n` de los comparables que dan la mediana, para mostrar: los más parecidos entre los típicos (la mitad
+    central de precio/m²), sin copias del mismo inmueble (mismo precio y área que el aviso, o entre ellos)."""
+    comps, _ = _comparables(r, pool)
+    copia = (comps["Precio"] == r["Precio"]) & (comps["Area_m2"].round() == round(r["Area_m2"]))
+    comps = comps[~copia].drop_duplicates(["Precio", "Area_m2"])
+    lo, hi = comps["precio_m2"].quantile([.25, .75])
+    tipicos = comps[comps["precio_m2"].between(lo, hi)]
+    comps = tipicos if len(tipicos) >= n else comps
+    return comps.assign(_d=parecido(r, comps)).nsmallest(n, "_d")
+
+
+def en_metrocuadrado(sel: pd.DataFrame, avisos: pd.DataFrame) -> pd.DataFrame:
+    """Para cada aviso de FincaRaíz, el mismo inmueble en Metrocuadrado (registro único), si está:
+    `m2_precio` y `m2_url`. `avisos` es el primero de lo que devuelve src/unificar.unificar(ciudad)."""
+    grupo = avisos.set_index("clave")["id_unificado"]
+    m2 = avisos[avisos["portal"] == "metrocuadrado"].drop_duplicates("id_unificado").set_index("id_unificado")
+    g = ("fincaraiz:" + sel["id_inmueble"].astype(str)).map(grupo)
+    return pd.DataFrame({"m2_precio": g.map(m2["precio"]).to_numpy(), "m2_url": g.map(m2["url"]).to_numpy()},
+                        index=sel.index)
+
+
+def republicados(hasta: pd.Timestamp) -> pd.DataFrame:
+    """Por aviso republicado con otro número (src/consolidar.py): el precio que tenía antes (`rep_precio_antes`)
+    y desde cuándo estaba publicado con sus números anteriores (`rep_desde`; sigue la cadena si se republicó
+    varias veces)."""
+    vacio = pd.DataFrame(columns=["rep_precio_antes", "rep_desde"])
+    if FUENTE != "http":
+        return vacio
+    ev = _eventos()
+    r = ev[(ev["evento"] == "republicado") & (ev["fecha"] <= f"{hasta:%Y-%m-%d}")]
+    if r.empty:
+        return vacio
+    r = r.sort_values("fecha").drop_duplicates("id_inmueble", keep="last").set_index("id_inmueble")
+    viejo = r["id_viejo"].astype(str)
+    primero = viejo.copy()
+    for _ in range(10):                                   # el más antiguo de la cadena
+        siguiente = primero.map(viejo)
+        if siguiente.isna().all():
+            break
+        primero = siguiente.fillna(primero)
+    from src.consolidar import rutas
+    a = pd.read_parquet(rutas("venta").avisos, columns=["id_inmueble", "fecha_publicacion"])
+    pub = pd.to_datetime(a.set_index(a["id_inmueble"].astype(str))["fecha_publicacion"], errors="coerce")
+    pub = pub[~pub.index.duplicated()]
+    return pd.DataFrame({"rep_precio_antes": r["precio_antes"],
+                         "rep_desde": primero.map(pub).fillna(viejo.map(pub))})
+
+
+def enriquecer(sel: pd.DataFrame, pool: pd.DataFrame, hasta: pd.Timestamp,
+               avisos: pd.DataFrame | None = None, desde: pd.Timestamp | None = None) -> pd.DataFrame:
+    """3 comparables, el otro portal (si se pasan los `avisos` del registro único), republicación y, para los
+    avisos nuevos (con `desde`, el primer día de la semana), el modelo. Las bajadas van sin modelo: el
+    entrenamiento ya vio su precio rebajado."""
+    if sel.empty:
+        return sel
+    sel = con_modelo(sel, desde) if desde is not None else sel.assign(**{c: np.nan for c in COLS_MODELO})
+    sel["comps"] = [tres_comparables(r, pool) for _, r in sel.iterrows()]
+    if avisos is not None:
+        sel = sel.join(en_metrocuadrado(sel, avisos))
+    return sel.join(republicados(hasta), on="id_inmueble")
+
+
 # ── Presentación ──────────────────────────────────────────────────────────────
+def _mayus(t: str) -> str:
+    return t[:1].upper() + t[1:]
+
+
 def _millones(x: float) -> str:
     return f"${x / 1e6:,.0f} M".replace(",", ".")
 
@@ -238,16 +371,63 @@ def _frente_comps(r: pd.Series) -> str | None:
     return f"ahora {abs(r['descuento']):.0%} {lado} sus comparables"
 
 
+def _modelo_txt(r: pd.Series, fmt=None) -> str | None:
+    """'modelo: $540 M (entre $480 M y $600 M) → 22% bajo el modelo'; None sin modelo. `fmt` da formato a
+    los precios (por defecto, _millones)."""
+    if pd.isna(r.get("modelo_precio")):
+        return None
+    fmt = fmt or _millones
+    b = r["bajo_modelo"]
+    lado = "en línea con el modelo" if abs(b) < 0.03 else f"{abs(b):.0%} {'bajo' if b > 0 else 'sobre'} el modelo"
+    return f"modelo: {fmt(r['modelo_precio'])} (entre {fmt(r['modelo_p10'])} y {fmt(r['modelo_p90'])}) → {lado}"
+
+
+def _comp_txt(c: pd.Series) -> str:
+    """'El Ingenio · 82 m² · $520 M · 6,3 M/m²'"""
+    barrio = c["barrio_oficial"] if pd.notna(c["barrio_oficial"]) else c["Barrio"]
+    return f"{str(barrio).title()} · {c['Area_m2']:.0f} m² · {_millones(c['Precio'])} · {_m2(c['precio_m2'])} M/m²"
+
+
+def _otro_portal_txt(r: pd.Series) -> str | None:
+    """'también en Metrocuadrado a $430 M (2% más)'; None si no está en Metrocuadrado."""
+    if pd.isna(r.get("m2_precio")):
+        return None
+    dif = r["m2_precio"] / r["Precio"] - 1
+    cuanto = "el mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'}"
+    return f"también en Metrocuadrado a {_millones(r['m2_precio'])} ({cuanto})"
+
+
+def _republicado_txt(r: pd.Series, hasta: pd.Timestamp, fmt=None) -> str | None:
+    """'republicado con otro número: estaba publicado desde hace 80 días, a $450 M (al republicar bajó 7%)';
+    None si no lo es."""
+    if pd.isna(r.get("rep_precio_antes")):
+        return None
+    t = "republicado con otro número"
+    if pd.notna(r.get("rep_desde")):
+        t += f": estaba publicado desde hace {(hasta - r['rep_desde']).days} días"
+    cambio = r["Precio"] / r["rep_precio_antes"] - 1
+    if not r.get("al_republicar", False) and abs(cambio) >= .01:   # si bajó al republicar ya lo dice el título
+        t += (f", a {(fmt or _millones)(r['rep_precio_antes'])} (al republicar {'bajó' if cambio < 0 else 'subió'} "
+              f"{abs(cambio):.0%})")
+    return t
+
+
 def _historia_txt(r: pd.Series, hasta: pd.Timestamp) -> str | None:
-    """'publicado hace 45 días · bajó 2 veces (−8% en total)'; None si no hay nada que contar."""
-    partes = []
-    if pd.notna(r["first_seen"]) and (hasta - r["first_seen"]).days >= 7:
+    """'publicado hace 45 días · bajó 2 veces (−8% en total)'; None si no hay nada que contar.
+    Si es un aviso republicado, cuenta desde cuándo estaba publicado con su número anterior."""
+    partes = [rep] if (rep := _republicado_txt(r, hasta)) else []
+    if not partes and pd.notna(r["first_seen"]) and (hasta - r["first_seen"]).days >= 7:
         partes.append("publicado desde antes de agosto" if r["first_seen"] < INICIO_DATOS
                       else f"publicado hace {(hasta - r['first_seen']).days} días")
     if r["n_bajadas"] > 0:
         veces = "1 vez" if r["n_bajadas"] == 1 else f"{r['n_bajadas']} veces"
         partes.append(f"bajó {veces} ({r['var_total']:+.0%} en total)".replace("-", "−"))
     return " · ".join(partes) or None
+
+
+def _bajo_txt(r: pd.Series) -> str:
+    """'Bajó 8%' o 'Bajó 8% al republicar'."""
+    return f"Bajó {r['baja']:.0%}" + (" al republicar" if r.get("al_republicar", False) else "")
 
 
 def _señales(r: pd.Series) -> list[str]:
@@ -274,16 +454,18 @@ def _tarjeta(r: pd.Series, i: int, insignia: str, clase: str, precio: str, linea
 
 def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
     from src.rentabilidad import texto as renta_txt
+    comps = lambda r: [f"· {_comp_txt(c)}" for _, c in r["comps"].iterrows()] if "comps" in r else []
     nuevas = [_tarjeta(r, i, f"{r['descuento']:.0%} bajo comparables", "ok",
                        f"<b>{_millones(r['Precio'])}</b> · {_m2(r['precio_m2'])} M/m²",
-                       [f"{_comps_txt(r)} · confianza {r['confianza'].lower()}", renta_txt(r),
-                        _historia_txt(r, hasta)],
+                       [f"{_comps_txt(r)} · confianza {r['confianza'].lower()}", *comps(r), _modelo_txt(r),
+                        _otro_portal_txt(r), renta_txt(r), _historia_txt(r, hasta)],
                        _señales(r))
               for i, (_, r) in enumerate(sel.iterrows(), 1)]
-    bajaron = [_tarjeta(r, i, f"Bajó {r['baja']:.0%}", "baja",
+    bajaron = [_tarjeta(r, i, _bajo_txt(r), "baja",
                         f"{_millones(r['precio_antes'])} → <b>{_millones(r['Precio'])}</b> · "
                         f"{_m2(r['precio_m2'])} M/m²",
-                        [_frente_comps(r), renta_txt(r), _historia_txt(r, hasta)], [])
+                        [_frente_comps(r), _otro_portal_txt(r), renta_txt(r),
+                         _historia_txt(r, hasta)], [])
                for i, (_, r) in enumerate(bj.iterrows(), 1)]
     nota_renta = (" Arriendo estimado: mediana del canon/m² de arriendos similares publicados (sin amoblados "
                   "ni por días); la rentabilidad bruta es ese canon × 12 ÷ precio, antes de administración, "
@@ -330,6 +512,14 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
 </div></body></html>"""
 
 
+def _enlaces(r: pd.Series) -> list[str]:
+    """El aviso en FincaRaíz y, si está, el mismo inmueble en Metrocuadrado con su precio."""
+    lineas = [f"🔗 [Ver aviso en FincaRaíz]({r['URL detalle']})"]
+    if otro := _otro_portal_txt(r):
+        lineas.append(f"🔁 {_mayus(otro)} · [ver]({r['m2_url']})")
+    return lineas
+
+
 def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
     from src.rentabilidad import texto as renta_txt
     lineas = [f"*Oportunidades de la semana — {resumen['ciudad']}*", resumen["periodo"], "",
@@ -339,16 +529,20 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                    f"📍 {_zona(r)}",
                    f"💰 {_millones(r['Precio'])} ({_m2(r['precio_m2'])} M/m²)",
                    f"📊 {_comps_txt(r)} · confianza {r['confianza'].lower()}"]
+        if "comps" in r:          # [texto](enlace): en Telegram el enlace va dentro de "ver"
+            lineas += [f"   ↳ {_comp_txt(c)} · [ver]({c['URL detalle']})" for _, c in r["comps"].iterrows()]
+        if modelo := _modelo_txt(r):
+            lineas.append(f"🤖 {_mayus(modelo)}")
         if renta := renta_txt(r):
             lineas.append(f"💵 {renta}")
         if historia := _historia_txt(r, hasta):
             lineas.append(f"🕒 {historia}")
         lineas += [f"🏷️ {s}" for s in _señales(r)]
-        lineas += [f"🔗 {r['URL detalle']}", ""]
+        lineas += _enlaces(r) + [""]
     if not bj.empty:
         lineas += [f"*📉 Bajaron de precio esta semana* ({resumen['bajadas']} en total, las mayores)", ""]
         for i, (_, r) in enumerate(bj.iterrows(), 1):
-            lineas += [f"*{i}. Bajó {r['baja']:.0%}* — {_ficha(r)}",
+            lineas += [f"*{i}. {_bajo_txt(r)}* — {_ficha(r)}",
                        f"📍 {_zona(r)}",
                        f"💰 {_millones(r['precio_antes'])} → {_millones(r['Precio'])} ({_m2(r['precio_m2'])} M/m²)"]
             if frente := _frente_comps(r):
@@ -357,7 +551,7 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                 lineas.append(f"💵 {renta}")
             if historia := _historia_txt(r, hasta):
                 lineas.append(f"🕒 {historia}")
-            lineas += [f"🔗 {r['URL detalle']}", ""]
+            lineas += _enlaces(r) + [""]
     lineas.append("_Herramienta para priorizar, no un avalúo: verifica siempre el inmueble._")
     return "\n".join(lineas)
 
@@ -398,6 +592,15 @@ def main() -> None:
     sel = seleccionar(ev, args.umbral, args.top) if not ev.empty else ev
     sel_bj = seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) \
         if not bj.empty else bj
+    avisos = None
+    if FUENTE == "http" and (len(sel) or len(sel_bj)):
+        from src import unificar
+        try:
+            avisos = unificar.unificar(args.ciudad)[0]
+        except FileNotFoundError as e:           # sin el estado de Metrocuadrado: la alerta sale sin él
+            print(f"⚠️  Sin Metrocuadrado ({e})")
+    sel = enriquecer(sel, df, hasta, avisos, desde)
+    sel_bj = enriquecer(sel_bj, df, hasta, avisos)
 
     bajo = ev[ev["descuento"] >= args.umbral] if not ev.empty else ev
     meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
@@ -417,6 +620,7 @@ def main() -> None:
     cols = ["id_inmueble", "first_seen", "Tipo_propiedad", "barrio_oficial", "Barrio", "Estrato",
             "Area_m2", "Habitaciones", "Precio", "precio_m2", "nivel_comps", "n_comps", "med_comps",
             "descuento", "confianza", "verificar", "motivo_descarte", "n_bajadas", "var_total",
+            "al_republicar",
             "nivel_arr", "n_arr", "confianza_arr", "canon_est", "rentab_bruta", "Etiquetas", "URL detalle"]
     ev[[c for c in cols if c in ev]].to_csv(f"{base}.csv", index=False)
     cols_bj = ["fecha_baja", "precio_antes", "baja"] + cols

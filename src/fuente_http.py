@@ -61,13 +61,16 @@ def dataset_activo(raiz: str = "venta", retirados: bool = False) -> pd.DataFrame
 
 
 def eventos() -> pd.DataFrame:
-    """Cambios de precio del historial con el formato de la bitácora (src/eventos.py)."""
+    """Cambios de precio del historial con el formato de la bitácora (src/eventos.py), y las republicaciones
+    (`republicado`: el aviso nuevo, con el precio del viejo en `precio_antes` y su número en `id_viejo`)."""
     partes = [pd.read_parquet(p) for p in sorted(HISTORIAL.glob("fecha=*.parquet"))]
     h = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(
-        columns=["fecha", "id_inmueble", "evento", "valor_antes", "valor_despues"])
-    c = h[h["evento"] == "cambio_precio"].rename(columns={"valor_antes": "precio_antes",
-                                                          "valor_despues": "precio_despues"})
+        columns=["fecha", "id_inmueble", "evento", "valor_antes", "valor_despues", "texto_antes"])
+    c = h[h["evento"].isin(["cambio_precio", "republicado"])].rename(
+        columns={"valor_antes": "precio_antes", "valor_despues": "precio_despues", "texto_antes": "id_viejo"})
     ratio = c["precio_despues"] / c["precio_antes"]
-    c = c.assign(evento=ratio.between(0.5, 2, inclusive="neither").map(
-        {True: "cambio_precio", False: "correccion_precio"}))
-    return c[["fecha", "id_inmueble", "evento", "precio_antes", "precio_despues"]].reset_index(drop=True)
+    corregido = (c["evento"] == "cambio_precio") & ~ratio.between(0.5, 2, inclusive="neither")
+    c = c.assign(evento=c["evento"].mask(corregido, "correccion_precio"),
+                 id_inmueble=c["id_inmueble"].astype(str),
+                 id_viejo=c["id_viejo"].where(c["evento"] == "republicado"))
+    return c[["fecha", "id_inmueble", "evento", "precio_antes", "precio_despues", "id_viejo"]].reset_index(drop=True)
