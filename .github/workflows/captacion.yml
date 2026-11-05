@@ -3,7 +3,9 @@
 #
 #   Actions → "Informe de precio para captar" → Run workflow. Dos formas:
 #     - un aviso publicado: su enlace o id (FincaRaíz o Metrocuadrado) en «aviso»;
-#     - un inmueble sin publicar: ciudad, tipo, m², habitaciones, baños, estrato y barrio.
+#     - un inmueble sin publicar: ciudad (de la lista), tipo, m², habitaciones, baños, estrato y barrio. Se
+#       aceptan errores de escritura ("El Ingenip"); si el barrio no aparece o puede ser varios ("Pance",
+#       "Santa Barbara" en Bogotá), llega por Telegram la lista de opciones para volver a lanzarlo con una.
 #   El PDF llega por Telegram al administrador (lo normal: revisarlo y reenviarlo al agente) o a los
 #   agentes (TELEGRAM_CHAT_ID). Lee de R2 el estado del barrido del día y el modelo de precios vigente.
 #
@@ -19,7 +21,9 @@ on:
         default: ""
       ciudad:
         description: "Ciudad (inmueble sin publicar)"
-        default: "Cali"
+        type: choice
+        options: [Cali, Bogotá, Medellín, Barranquilla, Cartagena, Bucaramanga, Manizales, Armenia, Pereira]
+        default: Cali
       tipo:
         description: "Tipo"
         type: choice
@@ -38,7 +42,7 @@ on:
         description: "Estrato"
         default: ""
       barrio:
-        description: "Barrio"
+        description: "Barrio (si no aparece o puede ser varios, llega por Telegram la lista para elegir)"
         default: ""
       parqueaderos:
         description: "Parqueaderos"

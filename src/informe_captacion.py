@@ -64,20 +64,94 @@ def ficha_de_aviso(ref: str) -> pd.Series:
     raise SystemExit(f"❌ No encontré el aviso {ident} en FincaRaíz ni en Metrocuadrado (¿se retiró?)")
 
 
+class BarrioNoEncontrado(Exception):
+    """El barrio escrito no existe en la ciudad, o puede ser varios: trae las sugerencias."""
+
+    def __init__(self, barrio: str, ciudad: str, sugerencias: list[str], ambiguo: bool = False):
+        self.barrio, self.ciudad, self.sugerencias, self.ambiguo = barrio, ciudad, sugerencias, ambiguo
+        super().__init__(self.mensaje())
+
+    def mensaje(self) -> str:
+        lista = "\n".join(f"• {s}" for s in self.sugerencias)
+        if self.ambiguo:
+            return (f"❓ Informe de precio: «{self.barrio}» puede ser varios barrios de {self.ciudad}:\n{lista}\n"
+                    f"Vuelve a lanzarlo con uno de estos nombres.")
+        return (f"❓ Informe de precio: no encontré el barrio «{self.barrio}» en {self.ciudad}."
+                + (f" ¿Quisiste decir…?\n{lista}\n" if lista else "\n")
+                + "Vuelve a lanzarlo con el nombre exacto, o con las coordenadas (--lat y --lon).")
+
+
+SIMILITUD_SEGURA = 0.85     # un error de escritura ("El Ingenip"): se acepta e informa, si no hay otro casi igual
+SIMILITUD_SUGERIR = 0.6     # menos parecido: solo como sugerencia
+
+
+def resolver_barrio(barrio: str, ciudad: str) -> tuple[object, str, bool]:
+    """(punto, nombre oficial, interpretado) del barrio escrito. En orden: el nombre (sin tildes, artículos ni
+    paréntesis; cada parte de un nombre compuesto), uno que lo contenga o esté contenido en él, uno casi igual
+    (errores de escritura) y, al final, una zona o un lugar de OSM con ese nombre. Si puede ser varios barrios
+    distintos, o ninguno, lanza BarrioNoEncontrado con sugerencias (mejor preguntar que adivinar)."""
+    import difflib
+    from shapely.geometry import shape
+    nombres_zona = zonas.nombres(ciudad)
+    entradas, completos = [], []                    # (clave, nombre, zona, polígono)
+    completo = lambda n: " ".join(t for t in re.sub(r"[^a-z0-9 ]", " ", zonas.normalizar(n)).split() if t not in zonas.VACIAS)
+    for f in zonas.cargar("barrios", ciudad)["features"]:
+        n, g = f["properties"]["nombre"], shape(f["geometry"])
+        z = nombres_zona.get(f["properties"].get("comuna"), "")
+        entradas += [(k, n, z, g) for k in zonas._alias(n)]
+        completos.append((completo(n), n, z, g))    # el nombre entero, con lo que va entre paréntesis
+    etiqueta = lambda e: f"{e[1]} ({e[2]})" if e[2] else e[1]
+    # Una sugerencia copiada tal cual trae la zona entre paréntesis al final: "Santa Barbara (Santa Fe)"
+    nombre, zona = barrio, None
+    m = re.match(r"^(.*)\(([^()]*)\)\s*$", barrio)
+    if m and any(zonas.normalizar(m.group(2)) == zonas.normalizar(z) for z in nombres_zona.values() if z):
+        nombre, zona = m.group(1).strip(), zonas.normalizar(m.group(2))
+        entradas = [e for e in entradas if zonas.normalizar(e[2]) == zona]
+        completos = [e for e in completos if zonas.normalizar(e[2]) == zona]
+    k = zonas.clave(nombre)
+
+    def elegir(cand: list, interpretado: bool):
+        distintos = {(n, z) for _, n, z, _ in cand}
+        if len(distintos) == 1:
+            _, n, _, g = max(cand, key=lambda e: e[3].area)
+            return g.representative_point(), n, interpretado
+        raise BarrioNoEncontrado(barrio, ciudad, sorted({etiqueta(e) for e in cand})[:8], ambiguo=True)
+
+    exactos = [e for e in completos if e[0] == completo(nombre)]    # el nombre entero: "El Ingenio", "Pance (cabecera)"
+    if exactos:
+        return elegir(exactos, False)
+    # Una parte del nombre ("Pance" de "Pance (cabecera)", "Cristales" de "Tejares - Cristales") o uno que lo
+    # contenga: si son varios barrios, se pregunta ("Pance" también es "Parcelaciones Pance")
+    contiene = [e for e in entradas if e[0] == k or zonas._coinciden(k, e[0])]
+    if contiene:
+        return elegir(contiene, True)
+    claves = sorted({e[0] for e in entradas})
+    parecidas = difflib.get_close_matches(k, claves, n=5, cutoff=SIMILITUD_SUGERIR)
+    ratio = [difflib.SequenceMatcher(None, k, c).ratio() for c in parecidas]
+    if parecidas and ratio[0] >= SIMILITUD_SEGURA and (len(ratio) == 1 or ratio[0] - ratio[1] >= 0.05):
+        return elegir([e for e in entradas if e[0] == parecidas[0]], True)
+    _, _, tablas = zonas._ubicacion(ciudad)         # zonas (corregimientos…) y lugares de OSM, con su nombre
+    for t in tablas:
+        if k in t:
+            return t[k], barrio, True
+    raise BarrioNoEncontrado(barrio, ciudad, [etiqueta(e) for c in parecidas for e in entradas if e[0] == c][:6])
+
+
 def ficha_manual(ciudad: str, tipo: str, m2: float, habitaciones: float | None = None, banos: float | None = None,
                  estrato: float | None = None, barrio: str | None = None, lat: float | None = None,
                  lon: float | None = None, parqueaderos: float | None = None, piso: float | None = None,
                  antiguedad: int | None = None, administracion: float | None = None,
                  descripcion: str = "") -> pd.Series:
     """La ficha de un inmueble que no está publicado. Sin coordenadas, se ubica en el barrio que se nombra."""
-    if lat is None or lon is None:
+    por_barrio = lat is None or lon is None
+    if por_barrio:
         if not barrio:
             raise SystemExit("❌ Hace falta el barrio o las coordenadas (--lat y --lon)")
-        _, oficiales, tablas = zonas._ubicacion(ciudad)
-        punto = zonas._buscar(zonas.clave(barrio), oficiales, tablas)
-        if punto is None:
-            raise SystemExit(f"❌ No encontré el barrio «{barrio}» en {ciudad}; prueba con --lat y --lon")
+        punto, oficial, interpretado = resolver_barrio(barrio, ciudad)
         lat, lon = punto.y, punto.x
+        escrito, barrio = (barrio if interpretado else None), oficial
+    else:
+        escrito = None
     venta = pd.read_parquet(rutas("venta").avisos, columns=["ciudad", "departamento"])
     deptos = venta.loc[venta["ciudad"].map(zonas.canonica) == ciudad, "departamento"].mode()
     return pd.Series({
@@ -87,7 +161,7 @@ def ficha_manual(ciudad: str, tipo: str, m2: float, habitaciones: float | None =
         "administracion": administracion, "latitud": lat, "longitud": lon, "ciudad": ciudad,
         "departamento": deptos.iloc[0] if len(deptos) else None, "barrio": barrio, "zona": None, "comuna": None,
         "estado": None, "amenidades": "", "descripcion": descripcion, "n_imagenes": np.nan, "etiquetas": "[]",
-        "fecha_publicacion": None, "ubicacion": "barrio" if barrio else "aviso"})
+        "fecha_publicacion": None, "ubicacion": "barrio" if por_barrio else "aviso", "barrio_escrito": escrito})
 
 
 def _como_aviso(f: pd.Series, ciudad: str) -> pd.Series:
@@ -312,6 +386,8 @@ def informe_html(d: dict) -> str:
     ubic = ("Ubicado en el centro del barrio que se indicó: con la dirección exacta, el estimado puede cambiar."
             if f.get("ubicacion") == "barrio" else "")
     enlace = f' · <a href="{html.escape(str(f["url"]))}">ver el aviso ↗</a>' if f.get("url") else ""
+    if f.get("barrio_escrito"):
+        enlace += f' · barrio «{html.escape(str(f["barrio"]))}» (se escribió «{html.escape(str(f["barrio_escrito"]))}»)'
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><title>Precio para captar · {html.escape(titulo)}</title>
 <style>
@@ -424,8 +500,19 @@ if __name__ == "__main__":
     if a.aviso:
         ficha = ficha_de_aviso(a.aviso)
     elif a.tipo and a.m2:
-        ficha = ficha_manual(a.ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
-                             a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion, a.descripcion)
+        try:
+            ficha = ficha_manual(a.ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
+                                 a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion, a.descripcion)
+        except BarrioNoEncontrado as e:            # mejor preguntar que adivinar: las sugerencias, por Telegram
+            print(e.mensaje())
+            if a.enviar:
+                import os
+                from src.notificar import telegram
+                token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_ADMIN_CHAT_ID")
+                if token and chat:
+                    telegram(e.mensaje(), token, chat)
+                    raise SystemExit(0)            # respondido: no hace falta el aviso genérico de fallo
+            raise SystemExit(1)
     else:
         raise SystemExit("❌ Usa --aviso, o --tipo y --m2 (con --barrio o --lat/--lon) para un inmueble sin publicar")
     pdf, d = generar(ficha)
