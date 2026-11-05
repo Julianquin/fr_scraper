@@ -265,6 +265,13 @@ CLAVES = {
     "vis": r"\bvis\b|interes social|subsidio",
     "conjunto": r"conjunto cerrado|unidad cerrada|unidad residencial",
     "lote_amplio": r"lote (?:amplio|grande|de \d)|amplio lote",
+    # 5-nov: casas que son varias viviendas, negocio o campestres (se piden a otro precio/m²). Medido con el 20% de
+    # los inmuebles fuera: casas 15,1% → 14,6% de error mediano, las grandes 19,8% → 18,7%, apartamentos sin cambio.
+    # Los vecinos de tamaño parecido (precio/m² de casas cercanas de área ±50%) no aportaron (15,0%): descartados.
+    "varias_viviendas": r"apartamentos? independientes|aparta ?estudios? independientes|bifamiliar|trifamiliar|"
+                        r"multifamiliar|(?:dos|2|tres|3|cuatro|4) (?:apartamentos|aptos)\b|varias unidades",
+    "uso_comercial": r"casa comercial|uso comercial|uso mixto|local comercial|con local|locales comerciales",
+    "campestre": r"campestre|parcelacion|condominio campestre",
 }
 
 
