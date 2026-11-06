@@ -233,8 +233,8 @@ def _buscar(k: str, oficiales: list, tablas: list[dict]):
 def _ubicacion(ciudad: str) -> tuple:
     """(toda la ciudad, barrios oficiales [(clave, polígono, punto interior)], otras tablas clave → punto), una vez
     por ciudad. Las otras tablas, por orden de preferencia: las zonas (comunas, corregimientos…), los lugares de
-    OSM dentro de la ciudad y los de alrededor (<ciudad>_lugares.json). Un aviso que dice "Cali" prefiere un
-    lugar de Cali."""
+    OSM dentro de la ciudad y los de alrededor (<ciudad>_lugares.json; los de un área, los de su núcleo). Un aviso
+    que dice "Cali" prefiere un lugar de Cali."""
     if ciudad not in _UBICACION:
         comunas = cargar("comunas", ciudad)["features"]
         toda = shapely.union_all([shape(f["geometry"]) for f in comunas])
@@ -247,7 +247,7 @@ def _ubicacion(ciudad: str) -> tuple:
         for f in comunas:
             for k in _alias(f["properties"]["nombre"]):
                 zonas_.setdefault(k, shape(f["geometry"]).representative_point())
-        p = GEO_DIR / f"{slug(ciudad)}_lugares.json"
+        p = GEO_DIR / f"{slug(nucleo(ciudad))}_lugares.json"
         for nombre, la, lo in (json.loads(p.read_text(encoding="utf-8"))["lugares"] if p.exists() else []):
             pt = shapely.Point(lo, la)
             for k in _alias(nombre):
