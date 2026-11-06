@@ -17,15 +17,24 @@ src/unificar.py), y nunca el propio inmueble en el otro portal. Metrocuadrado no
 tenemos sus bajadas de precio: los días publicados y "bajó de precio" son de los de FincaRaíz.
 Es una estimación del precio de mercado pedido, no un avalúo (Ley 1673 de 2013).
 
+Dónde: las 9 ciudades con barrios oficiales, sus áreas metropolitanas ("Cali y alrededores": Jamundí, Yumbo,
+Palmira y Candelaria; "Valle de Aburrá", "Bogotá y la Sabana"…) y cualquier otro municipio con avisos ("Otra":
+con las coordenadas o un enlace de Google Maps). La ficha guarda el municipio real (lo que usa el modelo); los
+similares se buscan en su área si es de una (ambito). Un barrio que no está en los mapas oficiales (Alfaguara, en
+Jamundí) se ubica donde lo ponen los avisos que lo nombran (barrio_por_avisos).
+
 Uso:
     python -m src.informe_captacion --aviso https://www.fincaraiz.com.co/.../193004385
     python -m src.informe_captacion --ciudad Cali --tipo Apartamento --m2 85 --habitaciones 3 --banos 2 \\
         --estrato 5 --barrio "El Ingenio" [--parqueaderos 1] [--piso 4] [--antiguedad 3] [--administracion 350000]
     … --barrio "3.3712, -76.5321"            # o un enlace de Google Maps (también maps.app.goo.gl/…)
+    python -m src.informe_captacion --ciudad "Cali y alrededores" --tipo Casa --m2 200 --barrio Alfaguara
+    python -m src.informe_captacion --ciudad Otra --tipo Casa --m2 200 --barrio "https://maps.app.goo.gl/…"
     … [--enviar admin]                       # por Telegram al administrador (o a los agentes)
 """
 from __future__ import annotations
 import argparse
+import functools
 import html
 import json
 import re
@@ -71,8 +80,8 @@ def ficha_de_aviso(ref: str) -> pd.Series:
 class BarrioNoEncontrado(Exception):
     """El barrio escrito no existe en la ciudad, o puede ser varios: trae las sugerencias."""
 
-    def __init__(self, barrio: str, ciudad: str, sugerencias: list[str], ambiguo: bool = False):
-        self.barrio, self.ciudad, self.sugerencias, self.ambiguo = barrio, ciudad, sugerencias, ambiguo
+    def __init__(self, barrio: str, ciudad: str, sugerencias: list[str], ambiguo: bool = False, pista: str = ""):
+        self.barrio, self.ciudad, self.sugerencias, self.ambiguo, self.pista = barrio, ciudad, sugerencias, ambiguo, pista
         super().__init__(self.mensaje())
 
     def mensaje(self) -> str:
@@ -81,7 +90,7 @@ class BarrioNoEncontrado(Exception):
             return (f"❓ Informe de precio: «{self.barrio}» puede ser varios barrios de {self.ciudad}:\n{lista}\n"
                     f"Vuelve a lanzarlo con uno de estos nombres.")
         return (f"❓ Informe de precio: no encontré el barrio «{self.barrio}» en {self.ciudad}."
-                + (f" ¿Quisiste decir…?\n{lista}\n" if lista else "\n")
+                + (f"\n{self.pista}\n" if self.pista else f" ¿Quisiste decir…?\n{lista}\n" if lista else "\n")
                 + "Vuelve a lanzarlo con el nombre exacto, sus coordenadas («3.3712, -76.5321») o el enlace de "
                   "Google Maps del punto.")
 
@@ -94,8 +103,9 @@ class UbicacionInvalida(BarrioNoEncontrado):
         super().__init__(texto, ciudad, [])
 
     def mensaje(self) -> str:
-        return (f"❓ Informe de precio: {self.motivo} («{self.texto[:120]}»).\n"
-                "Escribe el barrio, las coordenadas como «3.3712, -76.5321» o pega el enlace de Google Maps del punto.")
+        consejo = ("Pega el enlace de Google Maps del punto o sus coordenadas («3.3712, -76.5321»)." if self.ciudad == OTRA
+                   else "Escribe el barrio, las coordenadas como «3.3712, -76.5321» o pega el enlace de Google Maps del punto.")
+        return f"❓ Informe de precio: {self.motivo} («{self.texto[:120]}»).\n{consejo}"
 
 
 # Coordenadas escritas ("3.3712, -76.5321") o en un enlace de Google Maps: el pin (!3d…!4d…), ?q=/ll=/query= o @
@@ -133,12 +143,92 @@ def coordenadas(texto: str | None, ciudad: str) -> tuple[float, float] | None:
     if not (la0 <= lat <= la1 and lo0 <= lon <= lo1):
         raise UbicacionInvalida(texto, ciudad, f"las coordenadas {lat:.5f}, {lon:.5f} no están en Colombia "
                                                "(¿latitud y longitud al revés?)")
+    if not ciudad or not zonas.tiene_zonas(ciudad):    # «Otra»: el municipio sale del punto (municipio_de)
+        return lat, lon
     from shapely.geometry import Point
     toda, _, _ = zonas._ubicacion(ciudad)
     km = toda.distance(Point(lon, lat)) * 111
     if km > zonas.LEJOS_CIUDAD:
         raise UbicacionInvalida(texto, ciudad, f"el punto {lat:.5f}, {lon:.5f} queda a {km:.0f} km de {ciudad}")
     return lat, lon
+
+
+# ── Dónde: municipios, áreas y barrios que no están en los mapas oficiales ────────────────────────────────
+MIN_AVISOS_LUGAR = 5        # un barrio nombrado por menos avisos que esto no se ubica (podría ser un error)
+DISPERSION_MAX_KM = 2.0     # ni uno cuyos avisos estén muy repartidos (la mitad a más de esto del centro)
+RADIO_MUNICIPIO_KM = 3      # el municipio de un punto: el de los avisos a menos de esto
+OTRA = "Otra"               # --ciudad Otra: el municipio sale de las coordenadas
+
+
+@functools.lru_cache(maxsize=1)
+def _avisos_ubicados() -> pd.DataFrame:
+    """Avisos de FincaRaíz (activos y retirados; sus coordenadas son fiables) con ciudad, barrio y punto: el mapa
+    de nombres donde no hay polígonos oficiales."""
+    a = pd.read_parquet(rutas("venta").avisos, columns=["ciudad", "departamento", "barrio", "latitud", "longitud"])
+    la0, la1, lo0, lo1 = zonas.COLOMBIA
+    a = a.dropna(subset=["latitud", "longitud", "ciudad"])
+    a = a[a["latitud"].between(la0, la1) & a["longitud"].between(lo0, lo1)].copy()
+    a["ciudad"] = a["ciudad"].map(zonas.canonica)
+    partes = a.assign(parte=a["barrio"].fillna("").str.split(",")).explode("parte")
+    partes["parte"] = partes["parte"].str.strip()
+    partes = partes[partes["parte"] != ""]
+    claves = {n: zonas.clave(n) for n in partes["parte"].unique()}
+    return partes.assign(k=partes["parte"].map(claves)).reset_index(drop=True)
+
+
+def ambito(municipio: str) -> str:
+    """Dónde se buscan los similares de un inmueble de `municipio`: su área metropolitana si es uno de los
+    municipios de alrededor (Jamundí → "Cali y alrededores"); si no, el mismo municipio."""
+    for area, (_, _, otros) in zonas.AREAS.items():
+        if zonas.normalizar(municipio) in {zonas.normalizar(o) for o in otros}:
+            return area
+    return municipio
+
+
+def barrio_por_avisos(barrio: str, ciudad: str) -> tuple[object, str] | None:
+    """(punto, nombre) de un barrio que no está en los mapas oficiales, donde lo ponen los avisos de `ciudad` (o
+    de su área) que lo nombran: el punto mediano, si son al menos MIN_AVISOS_LUGAR y no están muy repartidos."""
+    from shapely.geometry import Point
+    a = _avisos_ubicados()
+    a = a[a["k"] == zonas.clave(barrio)]
+    a = a[zonas.en_area(ciudad, a["latitud"], a["longitud"])] if ciudad in zonas.AREAS else a[a["ciudad"] == ciudad]
+    if len(a) < MIN_AVISOS_LUGAR:
+        return None
+    la, lo = a["latitud"].median(), a["longitud"].median()
+    km = np.hypot((a["latitud"] - la) * 110.54, (a["longitud"] - lo) * 111.32 * np.cos(np.radians(la)))
+    if km.median() > DISPERSION_MAX_KM:
+        return None
+    return Point(lo, la), a["parte"].mode().iloc[0]
+
+
+def donde_aparece(barrio: str) -> pd.Series:
+    """En qué municipios nombran los avisos este barrio (cuántos avisos), los que pasan MIN_AVISOS_LUGAR."""
+    n = _avisos_ubicados().loc[lambda a: a["k"] == zonas.clave(barrio), "ciudad"].value_counts()
+    return n[n >= MIN_AVISOS_LUGAR]
+
+
+def _pista(barrio: str, ciudad: str) -> str:
+    """'«Alfaguara» aparece en avisos de Jamundí (420): elige «Cali y alrededores» en la ciudad.'; '' si no."""
+    otros = donde_aparece(barrio).drop(ciudad, errors="ignore")
+    otros = otros[[ambito(m) != ciudad and m != zonas.nucleo(ciudad) for m in otros.index]]
+    if otros.empty:
+        return ""
+    m, lista = otros.index[0], ", ".join(f"{c} ({n})" for c, n in otros.head(3).items())
+    elige = (f"elige «{ambito(m)}» en la ciudad" if ambito(m) != m or m in zonas.CIUDADES
+             else f"elige «{OTRA}» en la ciudad y pon el punto (coordenadas o enlace de Google Maps)")
+    return f"«{barrio}» aparece en avisos de {lista}: {elige}."
+
+
+def municipio_de(lat: float, lon: float) -> tuple[str, str] | None:
+    """(municipio, departamento) de un punto: el de los avisos más cercanos, a menos de RADIO_MUNICIPIO_KM; None
+    si no hay avisos cerca (no habría con qué compararlo)."""
+    a = _avisos_ubicados().drop_duplicates(["latitud", "longitud", "ciudad"])
+    km = np.hypot((a["latitud"] - lat) * 110.54, (a["longitud"] - lon) * 111.32 * np.cos(np.radians(lat)))
+    cerca = a.assign(km=km)[km <= RADIO_MUNICIPIO_KM].nsmallest(30, "km")
+    if len(cerca) < MIN_AVISOS_LUGAR:
+        return None
+    m = cerca["ciudad"].mode().iloc[0]
+    return m, cerca.loc[cerca["ciudad"] == m, "departamento"].mode().iloc[0]
 
 
 SIMILITUD_SEGURA = 0.85     # un error de escritura ("El Ingenip"): se acepta e informa, si no hay otro casi igual
@@ -152,6 +242,10 @@ def resolver_barrio(barrio: str, ciudad: str) -> tuple[object, str, bool]:
     distintos, o ninguno, lanza BarrioNoEncontrado con sugerencias (mejor preguntar que adivinar)."""
     import difflib
     from shapely.geometry import shape
+    if not zonas.tiene_zonas(ciudad):           # sin mapas oficiales: donde lo ponen los avisos
+        if hallado := barrio_por_avisos(barrio, ciudad):
+            return hallado[0], hallado[1], True
+        raise BarrioNoEncontrado(barrio, ciudad, [], pista=_pista(barrio, ciudad))
     nombres_zona = zonas.nombres(ciudad)
     entradas, completos = [], []                    # (clave, nombre, zona, polígono)
     completo = lambda n: " ".join(t for t in re.sub(r"[^a-z0-9 ]", " ", zonas.normalizar(n)).split() if t not in zonas.VACIAS)
@@ -194,7 +288,10 @@ def resolver_barrio(barrio: str, ciudad: str) -> tuple[object, str, bool]:
     for t in tablas:
         if k in t:
             return t[k], barrio, True
-    raise BarrioNoEncontrado(barrio, ciudad, [etiqueta(e) for c in parecidas for e in entradas if e[0] == c][:6])
+    if hallado := barrio_por_avisos(barrio, ciudad):   # no está en los mapas, pero los avisos lo ubican
+        return hallado[0], hallado[1], True
+    raise BarrioNoEncontrado(barrio, ciudad, [etiqueta(e) for c in parecidas for e in entradas if e[0] == c][:6],
+                             pista=_pista(barrio, ciudad))
 
 
 def ficha_manual(ciudad: str, tipo: str, m2: float, habitaciones: float | None = None, banos: float | None = None,
@@ -210,19 +307,31 @@ def ficha_manual(ciudad: str, tipo: str, m2: float, habitaciones: float | None =
     if por_barrio:
         if not barrio:
             raise SystemExit("❌ Hace falta el barrio o las coordenadas (--lat y --lon)")
+        if not ciudad:
+            raise UbicacionInvalida(barrio, OTRA, "con «Otra» ciudad hace falta el punto, no el nombre del barrio")
         punto, oficial, interpretado = resolver_barrio(barrio, ciudad)
         lat, lon = punto.y, punto.x
         escrito, barrio = (barrio if interpretado else None), oficial
     else:
         escrito = None
-    venta = pd.read_parquet(rutas("venta").avisos, columns=["ciudad", "departamento"])
-    deptos = venta.loc[venta["ciudad"].map(zonas.canonica) == ciudad, "departamento"].mode()
+    # El municipio real (el modelo lo usa): el de la ciudad elegida, o el del punto si se eligió un área u «Otra»
+    if ciudad and ciudad not in zonas.AREAS:
+        venta = pd.read_parquet(rutas("venta").avisos, columns=["ciudad", "departamento"])
+        deptos = venta.loc[venta["ciudad"].map(zonas.canonica) == ciudad, "departamento"].mode()
+        municipio, depto = ciudad, deptos.iloc[0] if len(deptos) else None
+    elif hallado := municipio_de(lat, lon):
+        municipio, depto = hallado
+    elif ciudad:                                # un área, sin avisos cerca del punto: el núcleo
+        municipio, depto = zonas.nucleo(ciudad), zonas.AREAS[ciudad][1]
+    else:
+        raise UbicacionInvalida(f"{lat:.5f}, {lon:.5f}", OTRA, f"no hay avisos a menos de {RADIO_MUNICIPIO_KM} km "
+                                "del punto: no tengo con qué compararlo")
     return pd.Series({
         "id_inmueble": "", "portal": None, "url": None, "precio": np.nan, "tipo": tipo, "m2": m2,
         "m2_construido": np.nan, "m2_terreno": np.nan, "habitaciones": habitaciones, "banos": banos,
         "parqueaderos": parqueaderos, "piso": piso, "estrato": estrato, "antiguedad": antiguedad,
-        "administracion": administracion, "latitud": lat, "longitud": lon, "ciudad": ciudad,
-        "departamento": deptos.iloc[0] if len(deptos) else None, "barrio": barrio, "zona": None, "comuna": None,
+        "administracion": administracion, "latitud": lat, "longitud": lon, "ciudad": municipio,
+        "departamento": depto, "barrio": barrio, "zona": None, "comuna": None,
         "estado": None, "amenidades": "", "descripcion": descripcion, "n_imagenes": np.nan, "etiquetas": "[]",
         "fecha_publicacion": None, "ubicacion": "barrio" if por_barrio else "aviso", "barrio_escrito": escrito})
 
@@ -281,8 +390,8 @@ def en_venta(ciudad: str, f: pd.Series) -> pd.DataFrame:
 
 
 def datos(f: pd.Series) -> dict:
-    """Todo lo que lleva el informe."""
-    ciudad = zonas.canonica(f["ciudad"])
+    """Todo lo que lleva el informe. `ciudad` es dónde se buscan los similares (el área si el municipio es de una)."""
+    ciudad = ambito(zonas.canonica(f["ciudad"]))
     hasta = _hasta()
     c = _como_aviso(f, ciudad)
     pool = en_venta(ciudad, f)
@@ -392,6 +501,12 @@ def _redondear(x: float) -> float:
     return round(x / paso) * paso
 
 
+def _donde(d: dict) -> str:
+    """'Jamundí (Cali y alrededores)' o 'Cali'."""
+    municipio = zonas.canonica(d["f"]["ciudad"])
+    return municipio if municipio == d["ciudad"] else f"{municipio} ({d['ciudad']})"
+
+
 def informe_html(d: dict) -> str:
     f, c, m, comps, q, ret = d["f"], d["c"], d["modelo"], d["comps"], d["q"], d["retirados"]
     m2 = c["Area_m2"]
@@ -475,7 +590,7 @@ def informe_html(d: dict) -> str:
 <html lang="es"><head><meta charset="utf-8"><title>Precio para captar · {html.escape(titulo)}</title>
 <style>
   @page {{ size: A4; margin: 13mm 15mm 14mm;
-    @bottom-left {{ content: "Informe de precio · {html.escape(d['ciudad'])} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
+    @bottom-left {{ content: "Informe de precio · {html.escape(_donde(d))} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
     @bottom-right {{ content: "Página " counter(page) " de " counter(pages); font: 7pt Inter, sans-serif; color: #898781; }} }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: Inter, "DejaVu Sans", sans-serif; font-size: 8.8pt; line-height: 1.45; color: #0b0b0b; margin: 0; }}
@@ -504,7 +619,7 @@ def informe_html(d: dict) -> str:
   .nota {{ color: #898781; font-size: 7pt; line-height: 1.4; margin-top: 10pt; }}
   .vacio {{ color: #52514e; }}
 </style></head><body>
-<p class="kicker">Informe de precio para captar · {html.escape(d['ciudad'])} · {_fecha(d['hasta'])}</p>
+<p class="kicker">Informe de precio para captar · {html.escape(_donde(d))} · {_fecha(d['hasta'])}</p>
 <h1>{html.escape(titulo)}</h1>
 <p class="ficha">{html.escape(_ficha_txt(f))}{enlace}</p>
 <div class="tiles">{''.join(tiles)}</div>
@@ -537,8 +652,8 @@ def generar(f: pd.Series) -> tuple[str, dict]:
     from weasyprint import HTML
     d = datos(f)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    nombre = re.sub(r"[^a-z0-9]+", "_", zonas.normalizar(f"{d['ciudad']} {f['tipo']} {pd.to_numeric(f['m2']):.0f}m2 "
-                                                            f"{d['c']['barrio_oficial'] or f.get('barrio') or ''}")).strip("_")
+    nombre = re.sub(r"[^a-z0-9]+", "_", zonas.normalizar(f"{zonas.canonica(f['ciudad'])} {f['tipo']} {pd.to_numeric(f['m2']):.0f}m2 "
+                                                            f"{str(d['c']['barrio_oficial'] or f.get('barrio') or '')[:40]}")).strip("_")
     base = OUT_DIR / f"{nombre}_{d['hasta']:%Y-%m-%d}"
     texto = informe_html(d)
     base.with_suffix(".html").write_text(texto, encoding="utf-8")
@@ -555,7 +670,7 @@ def enviar(pdf: str, d: dict, a_quien: str) -> None:
     chats = os.environ.get("TELEGRAM_ADMIN_CHAT_ID" if a_quien == "admin" else "TELEGRAM_CHAT_ID", "")
     if not (token and chats):
         raise SystemExit("❌ Falta TELEGRAM_BOT_TOKEN o el chat de destino")
-    pie = f"Informe de precio · {d['f']['tipo']} de {pd.to_numeric(d['f']['m2']):.0f} m² · {d['ciudad']}"
+    pie = f"Informe de precio · {d['f']['tipo']} de {pd.to_numeric(d['f']['m2']):.0f} m² · {_donde(d)}"
     for chat in filter(None, map(str.strip, chats.split(","))):
         documento(pdf, token, chat, pie)
     print(f"✅ Enviado ({a_quien})")
@@ -564,7 +679,8 @@ def enviar(pdf: str, d: dict, a_quien: str) -> None:
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Informe de precio para captar un inmueble (PDF)")
     p.add_argument("--aviso", help="enlace o id de un aviso publicado (FincaRaíz o Metrocuadrado)")
-    p.add_argument("--ciudad", default="Cali")
+    p.add_argument("--ciudad", default="Cali", help="ciudad, área («Cali y alrededores») u «Otra» (el municipio sale "
+                                                     "de las coordenadas o del enlace de Google Maps)")
     p.add_argument("--tipo", choices=["Apartamento", "Apartaestudio", "Casa"])
     p.add_argument("--m2", type=float)
     p.add_argument("--habitaciones", type=float)
@@ -584,7 +700,8 @@ if __name__ == "__main__":
         ficha = ficha_de_aviso(a.aviso)
     elif a.tipo and a.m2:
         try:
-            ficha = ficha_manual(a.ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
+            ciudad = None if a.ciudad.startswith(OTRA) else zonas.canonica(a.ciudad)
+            ficha = ficha_manual(ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
                                  a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion, a.descripcion)
         except BarrioNoEncontrado as e:            # mejor preguntar que adivinar: las sugerencias, por Telegram
             print(e.mensaje())

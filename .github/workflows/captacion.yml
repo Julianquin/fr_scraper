@@ -6,6 +6,9 @@
 #     - un inmueble sin publicar: ciudad (de la lista), tipo, m², habitaciones, baños, estrato y barrio. Se
 #       aceptan errores de escritura ("El Ingenip"); si el barrio no aparece o puede ser varios ("Pance",
 #       "Santa Barbara" en Bogotá), llega por Telegram la lista de opciones para volver a lanzarlo con una.
+#       La ciudad puede ser un área («Cali y alrededores»: Jamundí, Yumbo, Palmira, Candelaria) y el barrio, uno
+#       que no esté en los mapas oficiales si los avisos lo nombran (Alfaguara). Para cualquier otro municipio:
+#       «Otra» y en «barrio» las coordenadas o el enlace de Google Maps del punto.
 #   El PDF llega por Telegram al administrador (lo normal: revisarlo y reenviarlo al agente) o a los
 #   agentes (TELEGRAM_CHAT_ID). Lee de R2 el estado del barrido del día y el modelo de precios vigente.
 #
@@ -20,9 +23,25 @@ on:
         description: "Enlace o id de un aviso publicado (deja vacío lo demás)"
         default: ""
       ciudad:
-        description: "Ciudad (inmueble sin publicar)"
+        description: "Ciudad o área (inmueble sin publicar). Otro municipio: «Otra» y en Barrio el punto de Google Maps"
         type: choice
-        options: [Cali, Bogotá, Medellín, Barranquilla, Cartagena, Bucaramanga, Manizales, Armenia, Pereira]
+        options:
+          - Cali
+          - Cali y alrededores
+          - Bogotá
+          - Bogotá y la Sabana
+          - Medellín
+          - Valle de Aburrá
+          - Barranquilla
+          - Área metropolitana de Barranquilla
+          - Bucaramanga
+          - Área metropolitana de Bucaramanga
+          - Pereira
+          - Área metropolitana de Pereira
+          - Cartagena
+          - Manizales
+          - Armenia
+          - Otra (con coordenadas o enlace de Google Maps)
         default: Cali
       tipo:
         description: "Tipo"
