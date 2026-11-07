@@ -15,6 +15,15 @@ Arriendos que no sirven de comparable (otro mercado, con canon más alto):
 Son cánones PEDIDOS, no pagados, y la rentabilidad es bruta: no descuenta administración,
 impuestos, vacancia ni comisiones.
 
+Rentabilidad típica (con_tipica, para el informe de captación): cuando no hay arriendos similares, el canon
+sale de la rentabilidad bruta típica de las viviendas en venta del mismo tipo cerca (a menos de 2 km; si no,
+del mismo estrato; si no, de la ciudad) × el precio de venta que estima el modelo (src/modelo_precio.py).
+Con arriendos similares, se promedian los dos cánones. Medido el 7-nov con arriendos reales a los que se les
+estimó el canon sin mirarlo (Cali y alrededores, 1.951; Bogotá y la Sabana, 10.769), error mediano:
+  - con similares:  similares 15% · 14%  →  promedio con la típica 13% · 12%
+  - sin similares (el 32% y el 10% de los arriendos): típica 23% · 21% (antes no había canon)
+Rangos (la mitad central del canon real ÷ el estimado en esa prueba): típica 0,79–1,17; promedio 0,86–1,10.
+
 Uso:
     python -m src.rentabilidad --ciudad Cali    # → reports/rentabilidad/cali_<fecha>.csv + resumen
 """
@@ -85,6 +94,69 @@ def estimar(ventas: pd.DataFrame, arr: pd.DataFrame, minimo: int = MIN_COMPS) ->
         [(est["nivel_arr"] == "barrio") & (est["n_arr"] >= 10), est["nivel_arr"] == "comuna",
          est["nivel_arr"].notna()], ["Alta", "Baja", "Media"], default=None)
     return ventas.drop(columns=cols, errors="ignore").join(est)
+
+
+MIN_TIPICA = 10             # ventas con rentabilidad estimada para dar una típica
+RADIO_TIPICA_KM = 2
+MAX_VENTAS_TIPICA = 300     # las más cercanas (o una muestra): basta para la mediana y es rápido
+RANGO_TIPICA = (0.79, 1.17)  # mitad central del canon real ÷ estimado sin similares (prueba del 7-nov)
+RANGO_MEZCLA = (0.86, 1.10)  # ídem, con similares, promediando los dos
+
+
+def tipica(c: pd.Series, ventas: pd.DataFrame, arr: pd.DataFrame) -> tuple[float, str, int, str] | None:
+    """(rentabilidad bruta típica, dónde, cuántas ventas, nota) de las viviendas en venta como `c` (mismo tipo): la
+    mediana de la rentabilidad por arriendos similares de las ventas a menos de RADIO_TIPICA_KM; si no llegan a
+    MIN_TIPICA, las de su estrato; si no, las de la zona. Donde hay tan pocos arriendos que ninguna venta tiene
+    similares (Girardot: 21), el canon/m² mediano de los arriendos del tipo ÷ el precio/m² mediano de las ventas
+    (prueba del 7-nov: 23–26% de error, frente a 21–23%). None si ni eso."""
+    V = ventas[(ventas["Tipo_propiedad"] == c["Tipo_propiedad"]) & (ventas["id_inmueble"] != c.get("id_inmueble"))]
+    V = V[V["Precio"] > 0]
+    niveles = []
+    if pd.notna(c.get("Latitud")):
+        km = np.hypot((V["Latitud"] - c["Latitud"]) * 110.54,
+                      (V["Longitud"] - c["Longitud"]) * 111.32 * np.cos(np.radians(c["Latitud"])))
+        niveles.append((V.assign(_km=km)[km <= RADIO_TIPICA_KM].nsmallest(MAX_VENTAS_TIPICA, "_km"),
+                        f"a menos de {RADIO_TIPICA_KM} km"))
+    if pd.notna(c.get("Estrato")):
+        e = V[V["Estrato"] == c["Estrato"]]
+        niveles.append((e.sample(min(len(e), MAX_VENTAS_TIPICA), random_state=0), f"de estrato {c['Estrato']:.0f}"))
+    niveles.append((V.sample(min(len(V), MAX_VENTAS_TIPICA), random_state=0), "de la zona"))
+    for grupo, donde in niveles:
+        if len(grupo) < MIN_TIPICA:
+            continue
+        r = estimar(grupo, arr)["rentab_bruta"]
+        r = r[r.between(0.01, 0.3)]
+        if len(r) >= MIN_TIPICA:
+            return float(r.median()), donde, len(r), ""
+    R = arr[arr["motivo_exclusion"].isna() & (arr["Tipo_propiedad"] == c["Tipo_propiedad"])]
+    if len(R) >= MIN_COMPS and len(V) >= MIN_TIPICA:
+        rentab = float(R["precio_m2"].median() * 12 / V["precio_m2"].median())
+        if 0.01 <= rentab <= 0.3:
+            return rentab, "de la zona", len(V), f"; hay solo {len(R)} arriendos parecidos en la zona"
+    return None
+
+
+def con_tipica(r: pd.Series, venta_modelo: float, ventas: pd.DataFrame, arr: pd.DataFrame) -> pd.Series:
+    """Completa el arriendo de `r` (una fila de estimar(), con su `Precio`) con la rentabilidad típica × el precio
+    de venta que estima el modelo (`venta_modelo`): sin arriendos similares el canon sale de ahí (`metodo_arr`
+    'tipica', confianza baja); con ellos se promedian los dos cánones ('mezcla'). Rango calibrado (RANGO_*).
+    Sin típica, queda como estaba ('similares' o vacío)."""
+    r = r.copy()
+    r["metodo_arr"] = "similares" if pd.notna(r.get("nivel_arr")) else None
+    t = tipica(r, ventas, arr) if pd.notna(venta_modelo) else None
+    if t is None:
+        return r
+    r["rentab_tipica"], r["donde_tipica"], r["n_tipica"], r["nota_tipica"] = t
+    canon_t = venta_modelo * t[0] / 12
+    if pd.notna(r.get("canon_est")):
+        canon, rango, r["metodo_arr"] = np.sqrt(r["canon_est"] * canon_t), RANGO_MEZCLA, "mezcla"
+    else:
+        canon, rango, r["metodo_arr"], r["confianza_arr"] = canon_t, RANGO_TIPICA, "tipica", "Baja"
+    r["canon_est"] = canon
+    r["rentab_bruta"] = canon * 12 / r["Precio"]
+    r["rentab_p25"], r["rentab_p75"] = (canon * f * 12 / r["Precio"] for f in rango)
+    r["canon_p25"], r["canon_p75"] = (canon * f for f in rango)
+    return r
 
 
 def texto(r: pd.Series) -> str | None:
