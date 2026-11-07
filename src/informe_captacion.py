@@ -7,6 +7,8 @@ le muestre al propietario a qué precio salir al mercado.
     mismo tipo y estrato, área ±30%, ±1 habitación; en el barrio, a 1 km o en la zona), cuánto piden, cuántos
     días llevan publicadas y cuántas ya bajaron de precio.
   - Cuánto tardaron en retirarse las parecidas que ya salieron (bajas del barrido, src/consolidar.py).
+  - Rentabilidad neta aproximada: sin un mes al año de vacancia y sin la administración (la del inmueble o la
+    típica de sus similares), como si la pagara el propietario (conservador: 2 de cada 3 arriendos no la incluyen).
   - Arriendo estimado y rentabilidad bruta al precio estimado (src/rentabilidad.py): por arriendos similares
     promediados con la rentabilidad típica de las ventas parecidas cerca × el precio del modelo; sin arriendos
     similares, solo con la típica (aproximado, confianza baja).
@@ -50,7 +52,10 @@ from src.consolidar import rutas
 from src.informe_semanal import _fecha, _mill, _n, _pct, _tile
 
 OUT_DIR = BASE_DIR / "reports" / "captacion"
-MAX_COMPARABLES = 8         # los más parecidos, en la tabla
+MAX_COMPARABLES = 6         # los más parecidos, en la tabla (6: el informe cabe en una hoja)
+VACANCIA_MESES = 1          # rentabilidad neta: un mes al año sin arrendatario (supuesto, se dice en el informe)
+ANTIG_CORTA = {"menor a 1 año": "< 1", "1 a 8 años": "1–8", "9 a 15 años": "9–15", "16 a 30 años": "16–30",
+               "más de 30 años": "> 30"}
 MIN_RETIRADOS = 5           # menos que esto no dice nada de cuánto tardan en salir
 INICIO_BAJAS = "2026-10-28"  # primeras bajas del barrido (las anteriores son del rescate, sin fecha real)
 ANTIGUEDAD = {"menos de 1 año": 1, "1 a 8 años": 2, "9 a 15 años": 3, "16 a 30 años": 4, "más de 30 años": 5}
@@ -429,6 +434,11 @@ def datos(f: pd.Series) -> dict:
         r = rentabilidad.estimar(venta, arr).iloc[0]
         r = rentabilidad.con_tipica(r, m["estimado"], pool, arr)
         rent = r if pd.notna(r.get("canon_est")) else None
+    if rent is not None:
+        rent = rent.copy()
+        rent["admin"], rent["admin_de"] = _administracion(f, c, comps)
+        neta = lambda canon: (canon * (12 - VACANCIA_MESES) - rent["admin"] * 12) / m["estimado"]
+        rent["rentab_neta"] = neta(rent["canon_est"])
 
     pedido = pd.to_numeric(f.get("precio"), errors="coerce")
     return {"f": f, "c": c, "ciudad": ciudad, "hasta": hasta, "modelo": m, "rango": rango, "nivel": nivel,
@@ -443,7 +453,7 @@ def datos(f: pd.Series) -> dict:
 # ── El gráfico: dónde queda el precio frente a los parecidos ──────────────────────────────────────────
 
 
-def grafico(d: dict, w: float = 500, h: float = 118) -> str:
+def grafico(d: dict, w: float = 500, h: float = 100) -> str:
     """Una fila de puntos: el precio por m² de cada parecido; la franja es el rango del modelo; la línea, el
     estimado; el rombo, el precio pedido (si el inmueble ya está publicado). SVG con atributos en línea
     (WeasyPrint no aplica el CSS de la página dentro del SVG)."""
@@ -505,6 +515,38 @@ def _redondear(x: float) -> float:
     return round(x / paso) * paso
 
 
+def _administracion(f: pd.Series, c: pd.Series, comps: pd.DataFrame) -> tuple[float, str]:
+    """(administración mensual, de dónde sale): la del inmueble; si no, la típica por m² de sus similares (si la
+    mayoría la publica); si no, 0 (casas sin conjunto, sobre todo)."""
+    propia = pd.to_numeric(f.get("administracion"), errors="coerce")
+    if pd.notna(propia) and propia > 0:
+        return float(propia), "la del inmueble"
+    adm = pd.to_numeric(comps.get("Administracion"), errors="coerce") if len(comps) else pd.Series(dtype=float)
+    con = comps[adm > 0] if len(comps) else comps
+    if len(con) >= 3 and len(con) >= len(comps) / 2:
+        return float((adm[adm > 0] / con["Area_m2"]).median() * c["Area_m2"]), "la típica de sus similares"
+    return 0.0, "nada de administración (la mayoría de sus similares no la publica)"
+
+
+def _nota_barrio(f: pd.Series) -> str:
+    """'Barrio: se escribió «El Ingenip» y se tomó «El Ingenio» (revísalo).' si se interpretó; '' si no."""
+    escrito, barrio = f.get("barrio_escrito"), f.get("barrio")
+    if escrito and barrio and zonas.clave(escrito) != zonas.clave(barrio):
+        return f"Barrio: se escribió «{escrito}» y se tomó «{barrio}» (revísalo antes de reenviarlo)."
+    return ""
+
+
+def _entero(x, minimo: int) -> str:
+    """'2' si es un número >= minimo; '' si no (vacío o sin dato)."""
+    x = pd.to_numeric(x, errors="coerce")
+    return f"{x:.0f}" if pd.notna(x) and x >= minimo else ""
+
+
+def _miles(x: float) -> str:
+    """450 mil · 1,2 M"""
+    return f"{x / 1e3:.0f} mil" if x < 1e6 else _mill(x, 1)
+
+
 def _barrio_corto(r: pd.Series) -> str:
     """El barrio oficial o, sin él, el primero que escribe el aviso ("Alfaguara, Parque Natura, …" → "Alfaguara")."""
     if pd.notna(r.get("barrio_oficial")):
@@ -526,13 +568,17 @@ def _rent_txt(r: pd.Series | None, tipo: str) -> str:
     rent = f"rentabilidad bruta de {_pct(r['rentab_bruta'], 1)} (rango {_pct(r['rentab_p25'], 1)}–{_pct(r['rentab_p75'], 1)})"
     tipica = (f"la rentabilidad típica de {plural} en venta {r.get('donde_tipica')} ({_pct(r.get('rentab_tipica'), 1)}, "
               f"de {r.get('n_tipica', 0):.0f} viviendas{r.get('nota_tipica') or ''})")
+    admin = (f"la administración ({r['admin_de']}, ~{_miles(r['admin'])}/mes) como si la pagara el propietario"
+             if r.get("admin", 0) > 0 else r.get("admin_de", "sin administración"))
+    neta = (f" <b>Neta aproximada: {_pct(r['rentab_neta'], 1)}</b>, descontando {VACANCIA_MESES} mes al año sin "
+            f"arrendatario y {admin}; antes de predial, impuestos y comisiones." if pd.notna(r.get("rentab_neta")) else "")
     if r.get("metodo_arr") == "tipica":
         return (f"<p>No hay suficientes arriendos parecidos cerca: es una <b>aproximación</b> con {tipica}. "
-                f"{canon}: {rent}; confianza baja.</p>")
+                f"{canon}: {rent}; confianza baja.{neta}</p>")
     if r.get("metodo_arr") == "mezcla":
         return (f"<p>{canon}: {rent}. Promedia {r['n_arr']:.0f} arriendos similares y {tipica}; "
-                f"confianza {r['confianza_arr'].lower()}.</p>")
-    return (f"<p>{canon}: {rent}, con {r['n_arr']:.0f} arriendos similares; confianza {r['confianza_arr'].lower()}.</p>")
+                f"confianza {r['confianza_arr'].lower()}.{neta}</p>")
+    return (f"<p>{canon}: {rent}, con {r['n_arr']:.0f} arriendos similares; confianza {r['confianza_arr'].lower()}.{neta}</p>")
 
 
 def _donde(d: dict) -> str:
@@ -560,8 +606,8 @@ def informe_html(d: dict) -> str:
     if d["rent"] is not None:
         r = d["rent"]
         tiles.append(_tile("Rentabilidad bruta", _pct(r["rentab_bruta"], 1),
-                           f"arriendo estimado {_mill(r['canon_est'], 1)}/mes"
-                           + (" (aproximado)" if r.get("metodo_arr") == "tipica" else "")))
+                           f"neta ≈ {_pct(r['rentab_neta'], 1)} · arriendo {_mill(r['canon_est'], 1)}/mes"
+                           + (" (aprox.)" if r.get("metodo_arr") == "tipica" else "")))
     else:
         tiles.append(_tile("Días publicados", f"{comps['dias'].median():.0f}" if comps["dias"].notna().any() else "—",
                            "mediana de los similares en venta"))
@@ -586,17 +632,22 @@ def informe_html(d: dict) -> str:
                       f"{'sobre' if dif > 0 else 'bajo'} el estimado"
                       + (f", y lleva {d['dias_pedido']} días publicado." if d["dias_pedido"] is not None else "."))
 
+    num = lambda r, col: pd.to_numeric(r.get(col), errors="coerce")
     filas = "".join(
         f"<tr><td>{html.escape(_barrio_corto(r))}</td>"
         f"<td>{r['Area_m2']:.0f} m²" + (f" · {r['Habitaciones']:.0f} hab" if pd.notna(r['Habitaciones']) else "")
-        + (f" · {r['Baños']:.0f} baños" if pd.notna(r.get('Baños')) else "") + "</td>"
-        f"<td class='num'>{_mill(r['Precio'], 0)}</td><td class='num'>{_mill(r['pm2'], 1)}</td>"
+        + (f" · {r['Baños']:.0f} b" if pd.notna(r.get('Baños')) else "") + "</td>"
+        f"<td class='num'>{_entero(r.get('Parqueaderos'), 0)}</td><td class='num'>{_entero(r.get('Piso'), 1)}</td>"
+        f"<td class='num'>{ANTIG_CORTA.get(r.get('Antiguedad'), '')}</td>"
+        f"<td class='num'>{_miles(num(r, 'Administracion')) if num(r, 'Administracion') > 0 else ''}</td>"
+        f"<td class='num'>{_mill(r['Precio'], 0)}{' <span class=baj>↓</span>' if r['bajo'] is True else ''}</td>"
+        f"<td class='num'>{_mill(r['pm2'], 1)}</td>"
         f"<td class='num'>{'' if pd.isna(r['dias']) else f'{r.dias:.0f}'}</td>"
-        f"<td class='num'>{'' if pd.isna(r['bajo']) else 'sí' if r['bajo'] else '—'}</td>"
         f"<td><a href='{html.escape(str(r['URL detalle']))}'>{r['portal']} ↗</a></td></tr>"
         for _, r in comps.head(MAX_COMPARABLES).iterrows())
-    tabla = (f"""<table><thead><tr><th>Barrio</th><th>Ficha</th><th class="num">Precio</th><th class="num">Por m²</th>
-      <th class="num">Días publicado</th><th class="num">Bajó de precio</th><th></th></tr></thead><tbody>{filas}</tbody></table>"""
+    tabla = (f"""<table class="comps"><thead><tr><th>Barrio</th><th>Ficha</th><th class="num">Parq.</th>
+      <th class="num">Piso</th><th class="num">Años</th><th class="num">Admin.</th><th class="num">Precio</th>
+      <th class="num">Por m²</th><th class="num">Días</th><th></th></tr></thead><tbody>{filas}</tbody></table>"""
              if len(comps) else '<p class="vacio">No hay similares en venta cerca: el estimado se apoya solo en el modelo.</p>')
 
     if len(ret) >= MIN_RETIRADOS:
@@ -613,20 +664,18 @@ def informe_html(d: dict) -> str:
     ubic = ("Ubicado en el centro del barrio que se indicó: con la dirección exacta, el estimado puede cambiar."
             if f.get("ubicacion") == "barrio" else "")
     enlace = f' · <a href="{html.escape(str(f["url"]))}">ver el aviso ↗</a>' if f.get("url") else ""
-    if f.get("barrio_escrito") and zonas.clave(f["barrio_escrito"]) != zonas.clave(f["barrio"]):
-        enlace += f' · barrio «{html.escape(str(f["barrio"]))}» (se escribió «{html.escape(str(f["barrio_escrito"]))}»)'
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><title>Precio para captar · {html.escape(titulo)}</title>
 <style>
-  @page {{ size: A4; margin: 13mm 15mm 14mm;
+  @page {{ size: A4; margin: 11mm 14mm 12mm;
     @bottom-left {{ content: "Informe de precio · {html.escape(_donde(d))} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
     @bottom-right {{ content: "Página " counter(page) " de " counter(pages); font: 7pt Inter, sans-serif; color: #898781; }} }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: Inter, "DejaVu Sans", sans-serif; font-size: 8.8pt; line-height: 1.45; color: #0b0b0b; margin: 0; }}
+  body {{ font-family: Inter, "DejaVu Sans", sans-serif; font-size: 8.5pt; line-height: 1.4; color: #0b0b0b; margin: 0; }}
   .kicker {{ font-size: 7.2pt; letter-spacing: .08em; text-transform: uppercase; color: #898781; margin: 0 0 2pt; }}
   h1 {{ font-size: 20pt; font-weight: 600; margin: 0; letter-spacing: -.01em; }}
   .ficha {{ color: #52514e; margin: 2pt 0 10pt; }}
-  h2 {{ font-size: 11.5pt; font-weight: 600; margin: 14pt 0 3pt; }}
+  h2 {{ font-size: 11pt; font-weight: 600; margin: 10pt 0 2pt; }}
   .sub {{ color: #52514e; margin: 0 0 6pt; }}
   .tiles {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 6pt; margin-bottom: 8pt; }}
   .tile {{ background: #f9f9f7; border-radius: 6pt; padding: 6pt 9pt 7pt; }}
@@ -640,12 +689,14 @@ def informe_html(d: dict) -> str:
   table {{ width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }}
   th {{ text-align: left; font-weight: 500; color: #52514e; font-size: 7.4pt; padding: 0 4pt 4pt; border-bottom: 1px solid #e1e0d9; vertical-align: bottom; }}
   th.num, td.num {{ text-align: right; }}
-  td {{ padding: 3.2pt 4pt; border-bottom: 1px solid #e1e0d9; }}
+  td {{ padding: 2.6pt 4pt; border-bottom: 1px solid #e1e0d9; }}
+  table.comps td {{ font-size: 7.9pt; }}
+  .baj {{ color: #b3261e; font-weight: 600; }}
   td.num, td:last-child {{ white-space: nowrap; }}
   td:last-child {{ padding-left: 12pt; }}
   h2 {{ break-after: avoid; }} tr {{ break-inside: avoid; }}
   a {{ color: #2a78d6; font-weight: 600; text-decoration: none; }}
-  .nota {{ color: #898781; font-size: 7pt; line-height: 1.4; margin-top: 10pt; }}
+  .nota {{ color: #898781; font-size: 6.8pt; line-height: 1.35; margin-top: 8pt; }}
   .vacio {{ color: #52514e; }}
 </style></head><body>
 <p class="kicker">Informe de precio para captar · {html.escape(_donde(d))} · {_fecha(d['hasta'])}</p>
@@ -660,7 +711,7 @@ def informe_html(d: dict) -> str:
 <p class="ley"><i style="background:{GRIS};border-radius:50%"></i>similar en venta<i style="background:{AZUL_CLARO}"></i>rango del modelo (80%)<i style="background:{AZUL};width:2pt"></i>estimado{'<i style="background:#0b0b0b;transform:rotate(45deg);width:6pt;height:6pt"></i>precio pedido hoy' if d['pedido'] else ''}</p>
 
 <h2>Los similares en venta</h2>
-{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}).{' Metrocuadrado no publica la fecha de publicación ni sabemos si bajaron de precio: en los suyos esas celdas van vacías.' if n_m2 else ''}</p>""" if len(comps) else ""}
+{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}). ↓ = ya bajó de precio. Admin.: cuota mensual.{' Metrocuadrado no publica la fecha ni sabemos si bajó de precio.' if n_m2 else ''}</p>""" if len(comps) else ""}
 {tabla}
 
 <h2>Cuánto tardan en salir</h2>
@@ -700,6 +751,8 @@ def enviar(pdf: str, d: dict, a_quien: str) -> None:
     if not (token and chats):
         raise SystemExit("❌ Falta TELEGRAM_BOT_TOKEN o el chat de destino")
     pie = f"Informe de precio · {d['f']['tipo']} de {pd.to_numeric(d['f']['m2']):.0f} m² · {_donde(d)}"
+    if nota := _nota_barrio(d["f"]):          # para el agente, no para el propietario: va en el mensaje, no en el PDF
+        pie += f"\n{nota}"
     for chat in filter(None, map(str.strip, chats.split(","))):
         documento(pdf, token, chat, pie)
     print(f"✅ Enviado ({a_quien})")
