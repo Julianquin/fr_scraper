@@ -12,11 +12,13 @@ historia (tendencias, días hasta venderse, acierto de la alerta) se irá sumand
     avisos activos), canon mediano por m² y rentabilidad bruta típica (canon por m² × 12 ÷ precio por m²)
   Página 3 · Oportunidades: las de la alerta (src/oportunidades.py, mismos criterios), cada una con 3 de sus
     comparables, si el mismo inmueble está también en Metrocuadrado y a qué precio, el arriendo estimado y el
-    entorno (OpenStreetMap, src/osm_pois.py: MIO, parques, centros comerciales y comercio a 500 m)
+    entorno (OpenStreetMap, src/osm_pois.py: distancia al MIO, a un parque y a un centro comercial; sin conteos
+    de comercios o colegios, que salen en 0 donde el mapa está incompleto). Cuatro tarjetas por página.
   Página 4 · Bajaron de precio y Para captar: viviendas con 4 a 12 meses publicadas que piden entre un 10% y un
-    60% más que sus comparables (más que eso suele ser un error del aviso), las que más tiempo llevan
+    60% más que sus comparables (más que eso suele ser un error del aviso), las que más tiempo llevan, y quién las
+    publica (quien_publica: «Particular», «1 inmobiliaria» o «N anunciantes», sin nombres)
 
-Es una estimación del precio de mercado, no un avalúo (Ley 1673 de 2013). Sin fotos ni datos de los
+Es una estimación del precio de mercado, no un avalúo (Ley 1673 de 2013). Sin fotos ni nombres de los
 anunciantes: solo cifras y enlaces a los avisos públicos.
 
 Uso:
@@ -98,6 +100,56 @@ def _por_comuna(inm: pd.DataFrame, arr: pd.DataFrame, venta: pd.DataFrame) -> pd
     return t[t["viviendas"] >= MIN_VIVIENDAS].sort_values("precio_m2", ascending=False)   # la tabla: MAX_FILAS
 
 
+EMPRESA = re.compile(r"inmobiliari|inmuebles|bienes|ra[ií]z|\bs\.?\s?a\.?\s?s\b|\bltda|grupo|asesor|broker|propiedad|"
+                     r"constructor|realty|home|capital|gesti[oó]n|negocios|servicios|inversiones|consultor|proyectos", re.I)
+
+
+GENERICAS_ANUNCIANTE = {"inmobiliaria", "inmobiliario", "inmobiliarios", "inmuebles", "sas", "s", "a", "sa", "ltda", "y",
+                        "de", "del", "la", "el", "los", "las", "grupo", "group", "union", "propiedades", "bienes", "raiz",
+                        "finca", "asesores", "asesorias", "broker", "brokers", "realty", "consultores", "gestion", "nc",
+                        "bogota", "cali", "medellin", "barranquilla", "colombia", "cia", "co"}
+
+
+def _clave_anunciante(nombre: str) -> str:
+    """La primera palabra distintiva del nombre, para reconocer a la misma inmobiliaria escrita distinto en cada
+    portal ("Unisa Inmobiliaria" y "UNISA UNION INMOBILIARIA" → "unisa"; "VELOZA INMOBILIARIA SAS" → "veloza")."""
+    palabras = re.sub(r"[^a-z0-9 ]", " ", zonas.normalizar(nombre or "")).split()
+    utiles = [w for w in palabras if w not in GENERICAS_ANUNCIANTE and len(w) >= 3]
+    return utiles[0] if utiles else " ".join(palabras)
+
+
+def quien_publica(sel: pd.DataFrame, avisos: pd.DataFrame) -> pd.Series:
+    """Para cada aviso de FincaRaíz: 'Particular', '1 inmobiliaria' o 'N anunciantes' (contando los dos portales:
+    el mismo inmueble en el registro único). Particular: Metrocuadrado lo marca «Persona natural», o en FincaRaíz el
+    anunciante tiene 1 o 2 avisos en todo el país y su nombre no es de empresa (FincaRaíz no lo marca: es una pista)."""
+    from src.consolidar import rutas
+    nombres, particular = {}, set()
+    for portal, raiz in unificar.PORTALES.items():
+        cols = ["id_inmueble", "anunciante", "anunciante_id", "estado_aviso"] + (["tipo_anunciante"] if portal == "metrocuadrado" else [])
+        a = pd.read_parquet(rutas(raiz).avisos, columns=cols)
+        a = a[a["estado_aviso"] == "activo"]
+        clave = portal + ":" + a["id_inmueble"].astype(str)
+        nombre = a["anunciante"].fillna("").map(_clave_anunciante)
+        nombres.update(zip(clave, nombre.where(nombre != "", a["anunciante_id"].astype(str))))
+        if portal == "metrocuadrado":
+            particular.update(clave[a["tipo_anunciante"].eq("Persona natural")])
+        else:
+            n = a.groupby("anunciante_id")["id_inmueble"].transform("size")
+            particular.update(clave[(n <= 2) & ~a["anunciante"].fillna("").str.contains(EMPRESA)])
+    grupo = avisos.set_index("clave")["id_unificado"]
+    claves_de = avisos.groupby("id_unificado")["clave"].agg(list)
+
+    def texto(id_fr: str) -> str:
+        clave = f"fincaraiz:{id_fr}"
+        claves = claves_de.get(grupo.get(clave), [clave])
+        quienes = {nombres.get(k, k) for k in claves}
+        hay_particular = any(k in particular for k in claves)
+        if len(quienes) == 1:
+            return "Particular" if hay_particular else "1 inmobiliaria"
+        return f"{len(quienes)} anunciantes" + (" (uno particular)" if hay_particular else "")
+    return sel["id_inmueble"].astype(str).map(texto)
+
+
 def _entorno(sel: pd.DataFrame) -> pd.DataFrame:
     """Distancias y conteos de OpenStreetMap (src/osm_pois.py); vacío si no hay el parquet de servicios."""
     from src import osm_pois
@@ -141,6 +193,8 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     if len(cap):
         cap = cap[cap["descuento"].between(-CAPTAR_SOBRE[1], -CAPTAR_SOBRE[0]) & cap["motivo_descarte"].isna()
                   & (cap["confianza"] != "Baja")]
+        cap = cap.sort_values("dias_pub", ascending=False).head(CAPTAR_FILAS).assign(n_total=len(cap))
+        cap["quien"] = quien_publica(cap, avisos)
 
     # Oferta sin repetidos (los dos portales), con su comuna y un precio por m² saneado como el de venta
     con_zonas = zonas.tiene_zonas(ciudad)
@@ -174,7 +228,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "evaluadas": len(ev), "con_comparables": int(ev["nivel_comps"].notna().sum()) if len(ev) else 0,
         "bajo_umbral": int((ev["descuento"] >= UMBRAL).sum()) if len(ev) else 0,
         "sel": sel, "sel_bj": sel_bj,
-        "captar_n": len(cap), "captar": cap.sort_values("dias_pub", ascending=False).head(CAPTAR_FILAS) if len(cap) else cap,
+        "captar_n": int(cap["n_total"].iloc[0]) if len(cap) else 0, "captar": cap,
     }
 
 
@@ -380,15 +434,14 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
         cuanto = "mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'} que en FincaRaíz"
         lineas.append(f'<b>También en Metrocuadrado:</b> {_mill(r["m2_precio"], 0)} ({cuanto}) · '
                       f'<a href="{html.escape(str(r["m2_url"]))}">ver ↗</a>')
-    else:
-        lineas.append("No aparece en Metrocuadrado")
     if pd.notna(r.get("canon_est")):
         lineas.append(f"Arriendo estimado {_mill(r['canon_est'])}/mes · rentabilidad bruta {_pct(r['rentab_bruta'], 1)} "
                       f"({r['n_arr']:.0f} similares)")
     if pd.notna(r.get("dist_transporte_masivo_km")):
+        # Solo distancias: los conteos de OSM (comercios, colegios a 500 m) salen en 0 donde el mapa está incompleto
+        # (28% y 69% de los avisos de Cali, 7-nov), y un «0 comercios» engaña
         lineas.append(f"<b>Entorno:</b> {d['transporte']} {_dist(r['dist_transporte_masivo_km'])} · parque "
-                      f"{_dist(r['dist_parque_km'])} · c. comercial {_dist(r['dist_centro_comercial_km'])} · "
-                      f"{r['n_comercio_500m']:.0f} comercios a 500 m")
+                      f"{_dist(r['dist_parque_km'])} · c. comercial {_dist(r['dist_centro_comercial_km'])}")
     comps = "".join(f"<tr><td>{html.escape(PREFIJO.sub('', str(c['barrio_oficial'] or c['Barrio'])))}</td>"
                     f"<td class='num'>{c['Area_m2']:.0f} m²</td><td class='num'>{_mill(c['Precio'], 0)}</td>"
                     f"<td class='num'>{_mill(c['precio_m2'])}/m²</td>"
@@ -462,9 +515,10 @@ def informe_html(d: dict) -> str:
         f"<td class='num'>{html.escape((op._frente_comps(r) or '—').replace('ahora ', '').replace('sus comparables', 'similares'))}</td>"
         f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>" for _, r in d["sel_bj"].iterrows())
     captar = "".join(
-        f"<tr><td>{html.escape(_barrio(r, nombres))}</td><td>{html.escape(r['Tipo_propiedad'])} · {r['Area_m2']:.0f} m²</td>"
+        f"<tr><td>{html.escape(_barrio(r, nombres))}</td><td class='nw'>{html.escape(r['Tipo_propiedad'])} · {r['Area_m2']:.0f} m²</td>"
         f"<td class='num'>{_mill(r['Precio'], 0)}</td><td class='num'>{_pct(-r['descuento'])} más</td>"
-        f"<td class='num'>{r['dias_pub']:.0f}</td><td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
+        f"<td class='num'>{r['dias_pub']:.0f}</td><td class='nw'>{html.escape(r.get('quien') or '')}</td>"
+        f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
         for _, r in d["captar"].iterrows())
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
@@ -511,17 +565,18 @@ def informe_html(d: dict) -> str:
   .b-precio {{ background: var(--blue); }} .b-rentab {{ background: var(--orange); }}
   .nota {{ color: var(--muted); font-size: 7pt; line-height: 1.4; margin-top: 8pt; }}
   .salto {{ break-before: page; }}
-  .opo {{ border: 1px solid var(--line); border-radius: 6pt; padding: 7pt 10pt 8pt; margin-bottom: 7pt; break-inside: avoid; }}
-  .opo-top {{ overflow: hidden; margin-bottom: 4pt; }}   /* sin flex: WeasyPrint pierde los enlaces dentro de flex o grid */
+  .opo {{ border: 1px solid var(--line); border-radius: 6pt; padding: 5pt 9pt 6pt; margin-bottom: 5pt; break-inside: avoid; }}
+  .opo-top {{ overflow: hidden; margin-bottom: 2pt; }}   /* sin flex: WeasyPrint pierde los enlaces dentro de flex o grid */
   .opo-top .ver {{ float: right; }}
-  .opo-cuerpo {{ display: grid; grid-template-columns: 1.35fr 1fr; gap: 12pt; }}
+  .opo-cuerpo {{ display: grid; grid-template-columns: 1.45fr 1fr; gap: 10pt; }}
   .badge {{ font-weight: 600; font-size: 7.6pt; border-radius: 99pt; padding: 1.5pt 7pt; background: var(--good-bg); color: var(--good); }}
   .badge.ojo {{ background: #fdf1dc; color: #7a4a00; }}
   .opo .zona {{ color: var(--ink-2); margin: 1pt 0 3pt; }}
   .opo .precio {{ font-size: 9.2pt; margin: 0 0 3pt; }}
-  .opo .hecho {{ margin: 0 0 2pt; color: var(--ink-2); font-size: 7.7pt; }} .opo .hecho b {{ color: var(--ink); font-weight: 600; }}
+  .opo .hecho {{ margin: 0 0 1pt; color: var(--ink-2); font-size: 7.4pt; line-height: 1.32; }} .opo .hecho b {{ color: var(--ink); font-weight: 600; }}
   a {{ color: var(--blue); font-weight: 600; text-decoration: none; }}
   .nota-c {{ color: var(--muted); font-size: 6.8pt; }}
+  td.nw {{ white-space: nowrap; }}
   .mini-tit {{ color: var(--ink-2); font-size: 7.4pt; margin: 0 0 2pt; }}
   table.mini td, table.mini th {{ font-size: 7.6pt; padding: 2.2pt 3pt; }}
   .vacio {{ color: var(--ink-2); }}
@@ -568,7 +623,9 @@ def informe_html(d: dict) -> str:
   {_pct(CAPTAR_SOBRE[1])} más que inmuebles similares: propietarios que pueden estar abiertos a un precio realista. Las que
   más tiempo llevan:</p>
 {f'''<table class="mini"><thead><tr><th>Zona</th><th>Inmueble</th><th class="num">Precio</th>
-  <th class="num">Frente a similares</th><th class="num">Días publicada</th><th></th></tr></thead><tbody>{captar}</tbody></table>'''
+  <th class="num">Frente a similares</th><th class="num">Días publicada</th><th>Lo publica</th><th></th></tr></thead><tbody>{captar}</tbody></table>
+<p class="nota-c">Lo publica: «Particular» si Metrocuadrado lo marca así o si en FincaRaíz el anunciante tiene 1 o 2 avisos
+  y no es una empresa (una pista, no un dato del portal); «N anunciantes» si el mismo inmueble está con varios.</p>'''
   if captar else '<p class="vacio">Esta semana no hay candidatas.</p>'}
 <p class="nota">Viviendas: apartamentos, apartaestudios y casas. Sin repetidos: un inmueble publicado en los dos
   portales o por varias inmobiliarias cuenta una vez. Los movimientos de la semana (publicadas, retiradas, bajadas)
