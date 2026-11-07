@@ -7,7 +7,9 @@ le muestre al propietario a qué precio salir al mercado.
     mismo tipo y estrato, área ±30%, ±1 habitación; en el barrio, a 1 km o en la zona), cuánto piden, cuántos
     días llevan publicadas y cuántas ya bajaron de precio.
   - Cuánto tardaron en retirarse las parecidas que ya salieron (bajas del barrido, src/consolidar.py).
-  - Arriendo estimado y rentabilidad bruta al precio sugerido (src/rentabilidad.py).
+  - Arriendo estimado y rentabilidad bruta al precio estimado (src/rentabilidad.py): por arriendos similares
+    promediados con la rentabilidad típica de las ventas parecidas cerca × el precio del modelo; sin arriendos
+    similares, solo con la típica (aproximado, confianza baja).
   - Un rango de salida: donde se cruzan el rango del modelo y la mitad central de los comparables.
 
 El inmueble puede ser un aviso ya publicado (FincaRaíz o Metrocuadrado: por su enlace o su id; se compara
@@ -419,12 +421,14 @@ def datos(f: pd.Series) -> dict:
     bajo, alto = max(m["p10"], q[.25] * m2), min(m["p90"], q[.75] * m2)
     rango = (bajo, alto) if bajo < alto else (m["p10"], m["p90"])   # si no se cruzan, el del modelo
 
-    # Rentabilidad al precio estimado
+    # Rentabilidad al precio estimado: arriendos similares y la rentabilidad típica de las ventas parecidas cerca
     rent = None
     if rentabilidad.disponible():
+        arr = rentabilidad.arriendos(ciudad)
         venta = pd.DataFrame([c.to_dict() | {"Precio": m["estimado"]}])
-        r = rentabilidad.estimar(venta, rentabilidad.arriendos(ciudad)).iloc[0]
-        rent = r if pd.notna(r.get("nivel_arr")) else None
+        r = rentabilidad.estimar(venta, arr).iloc[0]
+        r = rentabilidad.con_tipica(r, m["estimado"], pool, arr)
+        rent = r if pd.notna(r.get("canon_est")) else None
 
     pedido = pd.to_numeric(f.get("precio"), errors="coerce")
     return {"f": f, "c": c, "ciudad": ciudad, "hasta": hasta, "modelo": m, "rango": rango, "nivel": nivel,
@@ -501,6 +505,36 @@ def _redondear(x: float) -> float:
     return round(x / paso) * paso
 
 
+def _barrio_corto(r: pd.Series) -> str:
+    """El barrio oficial o, sin él, el primero que escribe el aviso ("Alfaguara, Parque Natura, …" → "Alfaguara")."""
+    if pd.notna(r.get("barrio_oficial")):
+        return str(r["barrio_oficial"])
+    b = str(r.get("Barrio") or "").split(",")[0].strip()
+    return b if len(b) <= 32 else b[:31] + "…"
+
+
+def _rent_txt(r: pd.Series | None, tipo: str) -> str:
+    """El párrafo de «Si se compra para arrendar», según de dónde salió el canon (rentabilidad.con_tipica)."""
+    if r is None:
+        return "<p>No hay suficientes arriendos ni ventas parecidas cerca para estimar el canon.</p>"
+    plural = {"Casa": "las casas", "Apartamento": "los apartamentos", "Apartaestudio": "los apartaestudios"}.get(
+        tipo, "las viviendas")
+    canon = (f"Al precio estimado, el arriendo de un inmueble así rondaría <b>{_mill(r['canon_est'], 1)} al mes</b> "
+             f"(la mitad de las veces, entre {_mill(r.get('canon_p25', np.nan), 1)} y {_mill(r.get('canon_p75', np.nan), 1)})"
+             if pd.notna(r.get("canon_p25")) else
+             f"Al precio estimado, el arriendo de un inmueble así rondaría <b>{_mill(r['canon_est'], 1)} al mes</b>")
+    rent = f"rentabilidad bruta de {_pct(r['rentab_bruta'], 1)} (rango {_pct(r['rentab_p25'], 1)}–{_pct(r['rentab_p75'], 1)})"
+    tipica = (f"la rentabilidad típica de {plural} en venta {r.get('donde_tipica')} ({_pct(r.get('rentab_tipica'), 1)}, "
+              f"de {r.get('n_tipica', 0):.0f} viviendas{r.get('nota_tipica') or ''})")
+    if r.get("metodo_arr") == "tipica":
+        return (f"<p>No hay suficientes arriendos parecidos cerca: es una <b>aproximación</b> con {tipica}. "
+                f"{canon}: {rent}; confianza baja.</p>")
+    if r.get("metodo_arr") == "mezcla":
+        return (f"<p>{canon}: {rent}. Promedia {r['n_arr']:.0f} arriendos similares y {tipica}; "
+                f"confianza {r['confianza_arr'].lower()}.</p>")
+    return (f"<p>{canon}: {rent}, con {r['n_arr']:.0f} arriendos similares; confianza {r['confianza_arr'].lower()}.</p>")
+
+
 def _donde(d: dict) -> str:
     """'Jamundí (Cali y alrededores)' o 'Cali'."""
     municipio = zonas.canonica(d["f"]["ciudad"])
@@ -526,7 +560,8 @@ def informe_html(d: dict) -> str:
     if d["rent"] is not None:
         r = d["rent"]
         tiles.append(_tile("Rentabilidad bruta", _pct(r["rentab_bruta"], 1),
-                           f"arriendo estimado {_mill(r['canon_est'], 1)}/mes"))
+                           f"arriendo estimado {_mill(r['canon_est'], 1)}/mes"
+                           + (" (aproximado)" if r.get("metodo_arr") == "tipica" else "")))
     else:
         tiles.append(_tile("Días publicados", f"{comps['dias'].median():.0f}" if comps["dias"].notna().any() else "—",
                            "mediana de los similares en venta"))
@@ -552,7 +587,7 @@ def informe_html(d: dict) -> str:
                       + (f", y lleva {d['dias_pedido']} días publicado." if d["dias_pedido"] is not None else "."))
 
     filas = "".join(
-        f"<tr><td>{html.escape(str(r['barrio_oficial'] if pd.notna(r['barrio_oficial']) else r['Barrio']))}</td>"
+        f"<tr><td>{html.escape(_barrio_corto(r))}</td>"
         f"<td>{r['Area_m2']:.0f} m²" + (f" · {r['Habitaciones']:.0f} hab" if pd.notna(r['Habitaciones']) else "")
         + (f" · {r['Baños']:.0f} baños" if pd.notna(r.get('Baños')) else "") + "</td>"
         f"<td class='num'>{_mill(r['Precio'], 0)}</td><td class='num'>{_mill(r['pm2'], 1)}</td>"
@@ -573,18 +608,12 @@ def informe_html(d: dict) -> str:
         r_txt = ("<p>Todavía hay pocas bajas de parecidos (el barrido las registra desde el 28 de octubre): esta sección "
                  "se llenará en las próximas semanas. Mientras tanto, los días que llevan publicados los similares dicen cuánto "
                  "tarda lo que no se vende.</p>")
-    if d["rent"] is not None:
-        r = d["rent"]
-        rent_txt = (f"<p>Al precio estimado, el arriendo de un inmueble así rondaría <b>{_mill(r['canon_est'], 1)} al mes</b>: "
-                    f"rentabilidad bruta de {_pct(r['rentab_bruta'], 1)} (rango {_pct(r['rentab_p25'], 1)}–{_pct(r['rentab_p75'], 1)}), "
-                    f"con {r['n_arr']:.0f} arriendos similares; confianza {r['confianza_arr'].lower()}.</p>")
-    else:
-        rent_txt = "<p>No hay suficientes arriendos parecidos cerca para estimar el canon.</p>"
+    rent_txt = _rent_txt(d["rent"], f["tipo"])
 
     ubic = ("Ubicado en el centro del barrio que se indicó: con la dirección exacta, el estimado puede cambiar."
             if f.get("ubicacion") == "barrio" else "")
     enlace = f' · <a href="{html.escape(str(f["url"]))}">ver el aviso ↗</a>' if f.get("url") else ""
-    if f.get("barrio_escrito"):
+    if f.get("barrio_escrito") and zonas.clave(f["barrio_escrito"]) != zonas.clave(f["barrio"]):
         enlace += f' · barrio «{html.escape(str(f["barrio"]))}» (se escribió «{html.escape(str(f["barrio_escrito"]))}»)'
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><title>Precio para captar · {html.escape(titulo)}</title>
