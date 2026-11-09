@@ -12,8 +12,8 @@ Alerta semanal de oportunidades, con dos secciones:
      también los que se republicaron con otro número y un precio más bajo ("bajó al republicar").
 
 Cada aviso de la alerta trae además (enriquecer()):
-  - el precio que estima el modelo (src/modelo_precio.py) y cuánto pide por debajo o por encima (solo los
-    nuevos, y solo con un modelo entrenado sin los avisos de la semana: ver con_modelo);
+  - el precio que estima el modelo (src/modelo_precio.py) y cuánto pide por debajo o por encima, siempre de un
+    modelo que no vio el aviso (con_modelo);
   - 3 de sus comparables, los de área más parecida, con su enlace;
   - si el mismo inmueble está también en Metrocuadrado y a qué precio (registro único, src/unificar.py);
   - si es un aviso republicado: desde cuándo estaba publicado con su número anterior y a qué precio.
@@ -207,36 +207,33 @@ def seleccionar_bajadas(bj: pd.DataFrame, excluir: pd.Index, top: int) -> pd.Dat
 COLS_MODELO = ["modelo_precio", "modelo_p10", "modelo_p90", "modelo_conf", "bajo_modelo"]
 
 
-def con_modelo(sel: pd.DataFrame, desde: pd.Timestamp) -> pd.DataFrame:
-    """Precio que estima el modelo (src/modelo_precio.py) para cada aviso publicado desde `desde`, su rango del
-    80% y cuánto pide por debajo (`bajo_modelo` > 0) o por encima. Solo con un modelo que NO vio esos avisos
-    (entrenado con `publicados_antes` <= `desde`; modelo.yml lo entrena así los domingos): uno que ya conoce su
-    precio pedido tiende a darle la razón (medido el 5-nov: mediana 6,6% bajo el modelo en vez de 15,7%).
-    Si no hay modelo así en disco (data/modelos/), las columnas quedan vacías: la alerta sale igual."""
+def con_modelo(sel: pd.DataFrame) -> pd.DataFrame:
+    """Precio que estima el modelo (src/modelo_precio.py) para cada aviso, su rango del 80% y cuánto pide por debajo
+    (`bajo_modelo` > 0) o por encima. Solo estimados de un modelo que NO vio el aviso (estimar_sin_trampa: la tabla de
+    estimados sin ver para los avisos con que se entrenó, el modelo vigente para el resto): uno que ya conoce su
+    precio pedido tiende a darle la razón (medido el 8-nov: de los que piden ≥15% más de lo que valen, reconoce el
+    27%). Sin modelo en disco (data/modelos/), o si no se puede saber si lo vio, la línea no sale: la alerta sí."""
     sel = sel.assign(**{c: np.nan for c in COLS_MODELO})
     if sel.empty or FUENTE != "http":
         return sel
     try:
-        from src.modelo_precio import ARCHIVO, ModeloPrecio, preparar
+        from src.modelo_precio import ARCHIVO, estimar_sin_trampa, preparar
     except ImportError as e:                    # sin lightgbm instalado
         print(f"⚠️  Sin el precio del modelo ({e})")
         return sel
     if not ARCHIVO.exists():
         print(f"⚠️  Sin el precio del modelo: no está {ARCHIVO}")
         return sel
-    modelo = ModeloPrecio.cargar()
-    corte = getattr(modelo, "publicados_antes", None)
-    if not corte or pd.Timestamp(corte) > desde:
-        print(f"⚠️  Sin el precio del modelo: el modelo en disco vio los avisos de la semana "
-              f"(entrenado con lo publicado antes de {corte or 'hoy'}; hace falta antes del {desde:%Y-%m-%d})")
-        return sel
     from src.consolidar import rutas
     a = pd.read_parquet(rutas("venta").avisos)
-    a = a[a["id_inmueble"].astype(str).isin(sel["id_inmueble"])]
+    a = a[a["id_inmueble"].astype(str).isin(sel["id_inmueble"])].drop_duplicates("id_inmueble")
     a = zonas.corregir_ubicacion(a, solo_imposibles=True)
-    p = modelo.predecir(preparar(a))
+    p = estimar_sin_trampa(preparar(a))
     p.index = a["id_inmueble"].astype(str).to_numpy()
-    p = p[~p.index.duplicated()]
+    if (~p["sin_ver"]).any():
+        print(f"⚠️  {(~p['sin_ver']).sum()} avisos sin el precio del modelo: el modelo los vio y no hay tabla de "
+              f"estimados sin ver ({SIN_VER_NOTA})")
+    p = p[p["sin_ver"]]
     ids = sel["id_inmueble"]
     sel["modelo_precio"] = ids.map(p["precio_estimado"])
     sel["modelo_p10"] = ids.map(p["precio_p10"])
@@ -244,6 +241,9 @@ def con_modelo(sel: pd.DataFrame, desde: pd.Timestamp) -> pd.DataFrame:
     sel["modelo_conf"] = ids.map(p["confianza"])
     sel["bajo_modelo"] = 1 - sel["Precio"] / sel["modelo_precio"]
     return sel
+
+
+SIN_VER_NOTA = "modelo.yml la calcula los domingos: data/modelos/estimados_sin_ver.parquet"
 
 
 def parecido(c: pd.Series, comps: pd.DataFrame) -> pd.Series:
@@ -309,13 +309,12 @@ def republicados(hasta: pd.Timestamp) -> pd.DataFrame:
 
 
 def enriquecer(sel: pd.DataFrame, pool: pd.DataFrame, hasta: pd.Timestamp,
-               avisos: pd.DataFrame | None = None, desde: pd.Timestamp | None = None) -> pd.DataFrame:
-    """3 comparables, el otro portal (si se pasan los `avisos` del registro único), republicación y, para los
-    avisos nuevos (con `desde`, el primer día de la semana), el modelo. Las bajadas van sin modelo: el
-    entrenamiento ya vio su precio rebajado."""
+               avisos: pd.DataFrame | None = None) -> pd.DataFrame:
+    """El modelo (sin trampa), 3 comparables, el otro portal (si se pasan los `avisos` del registro único) y la
+    republicación."""
     if sel.empty:
         return sel
-    sel = con_modelo(sel, desde) if desde is not None else sel.assign(**{c: np.nan for c in COLS_MODELO})
+    sel = con_modelo(sel)
     sel["comps"] = [tres_comparables(r, pool) for _, r in sel.iterrows()]
     if avisos is not None:
         sel = sel.join(en_metrocuadrado(sel, avisos))
@@ -464,7 +463,7 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
     bajaron = [_tarjeta(r, i, _bajo_txt(r), "baja",
                         f"{_millones(r['precio_antes'])} → <b>{_millones(r['Precio'])}</b> · "
                         f"{_m2(r['precio_m2'])} M/m²",
-                        [_frente_comps(r), _otro_portal_txt(r), renta_txt(r),
+                        [_frente_comps(r), _modelo_txt(r), _otro_portal_txt(r), renta_txt(r),
                          _historia_txt(r, hasta)], [])
                for i, (_, r) in enumerate(bj.iterrows(), 1)]
     nota_renta = (" Arriendo estimado: mediana del canon/m² de arriendos similares publicados (sin amoblados "
@@ -547,6 +546,8 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                        f"💰 {_millones(r['precio_antes'])} → {_millones(r['Precio'])} ({_m2(r['precio_m2'])} M/m²)"]
             if frente := _frente_comps(r):
                 lineas.append(f"📊 {frente}")
+            if modelo := _modelo_txt(r):
+                lineas.append(f"🤖 {_mayus(modelo)}")
             if renta := renta_txt(r):
                 lineas.append(f"💵 {renta}")
             if historia := _historia_txt(r, hasta):
@@ -599,7 +600,7 @@ def main() -> None:
             avisos = unificar.unificar(args.ciudad)[0]
         except FileNotFoundError as e:           # sin el estado de Metrocuadrado: la alerta sale sin él
             print(f"⚠️  Sin Metrocuadrado ({e})")
-    sel = enriquecer(sel, df, hasta, avisos, desde)
+    sel = enriquecer(sel, df, hasta, avisos)
     sel_bj = enriquecer(sel_bj, df, hasta, avisos)
 
     bajo = ev[ev["descuento"] >= args.umbral] if not ev.empty else ev

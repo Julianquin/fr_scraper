@@ -106,6 +106,10 @@ jobs:
           python -m src.almacen traer estado/historial/ --destino data
           python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp
           mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/
+          # Los estimados sin ver: para un aviso publicado, el estimado de un modelo que no lo vio (sin ellos, el
+          # informe lo advierte)
+          { python -m src.almacen traer modelos/estimados_sin_ver.parquet --destino data/_r2tmp \
+            && mv data/_r2tmp/modelos/estimados_sin_ver.parquet data/modelos/; } || echo "⚠️  Sin los estimados sin ver"
       - name: Generar y enviar el informe
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

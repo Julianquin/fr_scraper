@@ -70,13 +70,13 @@ jobs:
           python -m src.almacen traer estado/historial/ --destino data
           python -m src.consolidar --raiz m2_venta --bajar      # el mismo inmueble en los dos portales
           python -m src.almacen traer osm/ --destino data        # informe: el entorno de cada oportunidad
-          # El modelo de precios (lo entrena modelo.yml los domingos); sin él la alerta sale igual, sin esa línea
-          if python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp; then
-            mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/ \
-              || echo "⚠️  Sin el modelo de precios"
-          else
-            echo "⚠️  Sin el modelo de precios"
-          fi
+          # El modelo de precios y sus estimados sin ver (los calcula modelo.yml los domingos); sin ellos la alerta
+          # sale igual, sin la línea del modelo en los avisos que el modelo ya vio
+          mkdir -p data/modelos
+          for f in precio_vivienda.joblib estimados_sin_ver.parquet; do
+            { python -m src.almacen traer "modelos/$f" --destino data/_r2tmp && mv "data/_r2tmp/modelos/$f" data/modelos/; } \
+              || echo "⚠️  Sin modelos/$f"
+          done
       - name: Generar alerta
         run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}" --fuente http
       - name: Enviar alerta

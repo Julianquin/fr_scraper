@@ -3,9 +3,9 @@
 #
 # Corre cuando termina el barrido diario (barrido_http.yml), pero solo sigue los DOMINGOS (hora de
 # Colombia), un día antes de la alerta de los lunes: si falla, hay un día para volver a lanzarlo.
-# Entrena con los avisos activos recién consolidados, mide su error (la ficha) y sube a
-# R2 el modelo (modelos/precio_vivienda.joblib) y la ficha (+ una copia por fecha en
-# modelos/historial/). Luego manda al administrador el resumen frente a la semana anterior
+# Entrena con los avisos activos recién consolidados, mide su error (la ficha) y sube a R2 el modelo
+# (modelos/precio_vivienda.joblib), sus estimados sin ver (modelos/estimados_sin_ver.parquet) y la ficha
+# (+ una copia por fecha en modelos/historial/). Luego manda al administrador el resumen frente a la semana anterior
 # (src/monitor.py modelo). Solo lee R2: no toca los portales ni el estado del mercado.
 #
 # Datos: estado/avisos (consolidar --bajar) y los servicios de OpenStreetMap (osm/, que se suben a
@@ -49,7 +49,7 @@ jobs:
     needs: dia
     if: needs.dia.outputs.seguir == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60             # ~7 min con 4 núcleos y ~2 GB de memoria (medido el 29-oct)
+    timeout-minutes: 90             # ~7 min el modelo (29-oct) + ~5 modelos más para los estimados sin ver
     env:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -72,11 +72,14 @@ jobs:
         run: |
           python -m src.consolidar --bajar
           python -m src.almacen traer osm/ --destino data
-      - name: Entrenar, medir y subir modelo y ficha a R2
+      - name: Entrenar, medir y subir modelo, ficha y estimados sin ver a R2
         # Sin lo publicado en los últimos 7 días (hora de Colombia, hasta el domingo anterior): la alerta del lunes
         # califica esos avisos con este modelo, y uno que ya conoce su precio pedido tiende a darle la razón
-        # (src/oportunidades.py, con_modelo)
-        run: python -m src.modelo_precio entrenar --subir --publicados-antes "$(TZ=America/Bogota date -d '7 days ago' +%F)"
+        # (src/oportunidades.py, con_modelo). --sin-ver: 5 modelos más, cada uno sin una parte de los avisos, para
+        # dar el estimado honesto de los que sí entraron (bajadas, Para captar, captación de un aviso publicado)
+        run: >-
+          python -m src.modelo_precio entrenar --subir --sin-ver
+          --publicados-antes "$(TZ=America/Bogota date -d '7 days ago' +%F)"
       - name: Resumen al administrador
         run: >-
           python -m src.monitor modelo
