@@ -670,13 +670,13 @@ def generar(ciudad: str = "Cali", fecha: str | None = None) -> tuple[str, dict]:
 def enviar(pdf: str, d: dict, a_quien: str) -> None:
     """Por Telegram: 'admin' (TELEGRAM_ADMIN_CHAT_ID) o 'agentes' (TELEGRAM_CHAT_ID, separados por coma)."""
     import os
-    from src.notificar import documento
+    from src.notificar import documento_a_todos
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chats = os.environ.get("TELEGRAM_ADMIN_CHAT_ID" if a_quien == "admin" else "TELEGRAM_CHAT_ID", "")
     if not (token and chats):
         raise SystemExit("❌ Falta TELEGRAM_BOT_TOKEN o el chat de destino")
-    for chat in filter(None, map(str.strip, chats.split(","))):
-        documento(pdf, token, chat, pie(d))
+    if fallos := documento_a_todos(pdf, token, chats, pie(d)):
+        raise SystemExit("❌ Fallaron algunos envíos del PDF:\n  " + "\n  ".join(fallos))
     print(f"✅ Enviado ({a_quien})")
 
 

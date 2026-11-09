@@ -15,7 +15,7 @@
 #     - WhatsApp: CALLMEBOT_PHONE, CALLMEBOT_APIKEY
 #   Si algo falla, avisa SOLO al administrador (TELEGRAM_ADMIN_CHAT_ID, src/monitor.py).
 #
-#   Después de la alerta, el informe semanal en PDF (src/informe_semanal.py: pulso del mercado, mapa y
+#   Después de la alerta (aunque su envío falle en algún destino), el informe semanal en PDF (src/informe_semanal.py: pulso del mercado, mapa y
 #   tabla por comuna, oportunidades con comparables y entorno, bajadas y candidatas para captar). Si el
 #   informe falla, la alerta ya salió y el administrador recibe un aviso.
 #
@@ -78,6 +78,7 @@ jobs:
               || echo "⚠️  Sin modelos/$f"
           done
       - name: Generar alerta
+        id: generar
         run: python -m src.oportunidades --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}" --fuente http
       - name: Enviar alerta
         env:
@@ -92,7 +93,10 @@ jobs:
           python -m src.notificar "${archivos[0]}"
       - name: Informe semanal en PDF
         id: informe
-        continue-on-error: true            # la alerta ya salió: un fallo aquí no la estropea
+        # Aunque el envío de la alerta haya fallado en algún destino (9-nov: la conexión con Telegram se cortó y
+        # el PDF no salió): basta con que la alerta se haya generado
+        if: always() && steps.generar.outcome == 'success'
+        continue-on-error: true            # un fallo aquí no estropea la alerta
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -104,7 +108,7 @@ jobs:
           python -m src.informe_semanal --ciudad "${{ github.event.inputs.ciudad || 'Cali' }}" \
             --enviar "${{ inputs.destino || 'agentes' }}"
       - name: Avisar al administrador si el informe falló
-        if: steps.informe.outcome == 'failure'
+        if: always() && steps.informe.outcome == 'failure'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
