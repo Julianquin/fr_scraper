@@ -11,6 +11,11 @@ Telegram se convierte a HTML (el enlace queda dentro del texto, sin ocupar espac
 el enlace va escrito después del texto. Los mensajes largos se parten por bloques (una oportunidad
 por bloque).
 
+Cada llamada a Telegram se reintenta (REINTENTOS) si falla la red o el servidor: el 9-nov la alerta no
+salió porque la conexión se cortó una vez («Connection reset by peer») y el programa se detuvo. Lo que no
+se arregla reintentando (chat no encontrado, bot bloqueado) no se reintenta. Un destino que falla no
+detiene a los demás; al final se dice cuáles fallaron y el programa termina con error.
+
 Uso:
     python -m src.notificar reports/oportunidades/cali_2026-10-23_whatsapp.txt
 """
@@ -26,6 +31,8 @@ import urllib.parse
 import urllib.request
 
 LIMITE = {"telegram": 3500, "whatsapp": 1500}   # caracteres por mensaje (con margen)
+REINTENTOS = (5, 20, 60)    # segundos de espera antes de cada nuevo intento (4 intentos en total)
+PAUSA_PARTES = 1            # segundos entre los mensajes de una misma alerta (Telegram: ~1 por segundo por chat)
 
 
 ENLACE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
@@ -60,19 +67,39 @@ def _get(url: str) -> str:
         return r.read().decode("utf-8", "replace")
 
 
-def telegram(texto: str, token: str, chat_id: str) -> None:
-    for parte in partir(texto, LIMITE["telegram"]):
-        datos = urllib.parse.urlencode({"chat_id": chat_id, "text": _a_html(parte),
-                                        "parse_mode": "HTML",
-                                        "disable_web_page_preview": "true"}).encode()
+def _api(metodo: str, token: str, datos: bytes, cabeceras: dict | None = None, timeout: int = 60) -> dict:
+    """Llama a la API de Telegram (`metodo`: sendMessage, sendDocument…) con reintentos: si se corta la conexión,
+    se agota el tiempo, el servidor falla (5xx) o pide esperar (429, respetando su `retry_after`). Lo que no se
+    arregla reintentando (400 chat no encontrado, 403 bot bloqueado…) es un RuntimeError inmediato. La URL lleva el
+    token: nunca se imprime."""
+    url = f"https://api.telegram.org/bot{token}/{metodo}"
+    esperas = [0, *REINTENTOS]
+    for intento, espera in enumerate(esperas, 1):
+        time.sleep(espera)
         try:
-            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
-                                        data=datos, timeout=60) as r:
-                json.load(r)
+            pedido = urllib.request.Request(url, data=datos, headers=cabeceras or {})
+            with urllib.request.urlopen(pedido, timeout=timeout) as r:
+                return json.load(r)
         except urllib.error.HTTPError as e:
-            # p. ej. 403 "bot was blocked by the user", 400 "chat not found"
-            detalle = json.loads(e.read() or b"{}").get("description", str(e))
-            raise RuntimeError(detalle) from None
+            cuerpo = json.loads(e.read() or b"{}")
+            detalle = cuerpo.get("description", f"HTTP {e.code}")
+            if e.code < 500 and e.code != 429:
+                raise RuntimeError(detalle) from None          # p. ej. 403 bot bloqueado, 400 chat not found
+            if e.code == 429 and intento < len(esperas):        # Telegram dice cuánto esperar
+                esperas[intento] = max(esperas[intento], cuerpo.get("parameters", {}).get("retry_after", 0))
+            error = detalle
+        except (urllib.error.URLError, OSError) as e:          # conexión cortada o rechazada, tiempo agotado
+            error = str(getattr(e, "reason", e))
+        print(f"⚠️  Telegram {metodo}: {error} (intento {intento} de {len(esperas)})", file=sys.stderr)
+    raise RuntimeError(f"sin respuesta de Telegram tras {len(esperas)} intentos ({error})")
+
+
+def telegram(texto: str, token: str, chat_id: str) -> None:
+    for i, parte in enumerate(partir(texto, LIMITE["telegram"])):
+        time.sleep(PAUSA_PARTES if i else 0)
+        _api("sendMessage", token, urllib.parse.urlencode({
+            "chat_id": chat_id, "text": _a_html(parte), "parse_mode": "HTML",
+            "disable_web_page_preview": "true"}).encode())
 
 
 def documento(ruta: str, token: str, chat_id: str, texto: str = "") -> None:
@@ -87,14 +114,18 @@ def documento(ruta: str, token: str, chat_id: str, texto: str = "") -> None:
     tipo = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
     cuerpo += (f'--{limite}\r\nContent-Disposition: form-data; name="document"; filename="{p.name}"\r\n'
                f"Content-Type: {tipo}\r\n\r\n").encode() + p.read_bytes() + f"\r\n--{limite}--\r\n".encode()
-    pedido = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendDocument", data=cuerpo,
-                                    headers={"Content-Type": f"multipart/form-data; boundary={limite}"})
-    try:
-        with urllib.request.urlopen(pedido, timeout=120) as r:
-            json.load(r)
-    except urllib.error.HTTPError as e:
-        detalle = json.loads(e.read() or b"{}").get("description", str(e))
-        raise RuntimeError(detalle) from None
+    _api("sendDocument", token, cuerpo, {"Content-Type": f"multipart/form-data; boundary={limite}"}, timeout=120)
+
+
+def documento_a_todos(ruta: str, token: str, chats: str, texto: str = "") -> list[str]:
+    """El archivo a cada chat de `chats` (separados por coma), sin detenerse si uno falla: la lista de fallos."""
+    fallos = []
+    for chat in filter(None, map(str.strip, chats.split(","))):
+        try:
+            documento(ruta, token, chat, texto)
+        except RuntimeError as e:
+            fallos.append(f"Telegram {chat}: {e}")
+    return fallos
 
 
 def whatsapp(texto: str, phone: str, apikey: str) -> None:
@@ -126,12 +157,16 @@ def main() -> None:
                 fallos.append(f"Telegram {chat}: {e}")
         enviados.append(f"Telegram ({ok}/{len(chats)} destinos)")
     if env("CALLMEBOT_PHONE") and env("CALLMEBOT_APIKEY"):
-        whatsapp(texto, env("CALLMEBOT_PHONE"), env("CALLMEBOT_APIKEY"))
-        enviados.append("WhatsApp")
-    if not enviados:
+        try:
+            whatsapp(texto, env("CALLMEBOT_PHONE"), env("CALLMEBOT_APIKEY"))
+            enviados.append("WhatsApp")
+        except (RuntimeError, OSError) as e:
+            fallos.append(f"WhatsApp: {e}")
+    if not enviados and not fallos:
         sys.exit("❌ No hay credenciales: define TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID "
                  "o CALLMEBOT_PHONE/CALLMEBOT_APIKEY.")
-    print(f"✅ Enviado por {' y '.join(enviados)}")
+    if enviados:
+        print(f"✅ Enviado por {' y '.join(enviados)}")
     if fallos:
         sys.exit("❌ Fallaron algunos envíos:\n  " + "\n  ".join(fallos))
 
