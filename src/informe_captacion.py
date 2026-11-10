@@ -355,26 +355,38 @@ def _como_aviso(f: pd.Series, ciudad: str) -> pd.Series:
                       "barrio_oficial": z["barrio_oficial"], "comuna": z["comuna"], "Barrio": f.get("barrio")})
 
 
-def estimar(f: pd.Series) -> dict:
-    """Precio estimado por el modelo: estimado, rango p10–p90 (80%) y confianza."""
-    from src.modelo_precio import ModeloPrecio, preparar
-    r = ModeloPrecio.cargar().predecir(preparar(pd.DataFrame([f]))).iloc[0]
-    return {"estimado": float(r["precio_estimado"]), "p10": float(r["precio_p10"]), "p90": float(r["precio_p90"]),
-            "pm2": float(r["pm2_estimado"]), "confianza": r["confianza"]}
+def estimar(f: pd.Series, gemelos: list[str] | None = None) -> dict:
+    """Precio estimado por el modelo: estimado, rango p10–p90 (80%) y confianza, de un modelo que NO vio el aviso
+    (modelo_precio.estimar_sin_trampa). Un aviso de Metrocuadrado no entra al entrenamiento, pero su gemelo de
+    FincaRaíz sí: entonces, el estimado sin ver del gemelo (por m², al área de `f`). `visto`: True si no hay forma de
+    dar uno sin ver (sin la tabla de estimados sin ver): el informe lo advierte."""
+    from src.modelo_precio import estimado_por_id, estimar_sin_trampa, preparar
+    r = estimar_sin_trampa(preparar(pd.DataFrame([f]))).iloc[0]
+    m = {"estimado": float(r["precio_estimado"]), "p10": float(r["precio_p10"]), "p90": float(r["precio_p90"]),
+         "pm2": float(r["pm2_estimado"]), "confianza": r["confianza"], "visto": not r["sin_ver"]}
+    if f.get("portal") == "Metrocuadrado":
+        for g in gemelos or []:
+            if (t := estimado_por_id(g)) is not None:
+                area = float(pd.to_numeric(f["m2"]))
+                m.update(estimado=t["pm2"] * area, p10=t["p10_m2"] * area, p90=t["p90_m2"] * area, pm2=t["pm2"],
+                         confianza=t["confianza"], visto=False)
+                break
+    return m
 
 
 # ── El mercado alrededor ───────────────────────────────────────────────────────────────────────────────
 
 
-def en_venta(ciudad: str, f: pd.Series) -> pd.DataFrame:
+def en_venta(ciudad: str, f: pd.Series) -> tuple[pd.DataFrame, list[str]]:
     """Viviendas en venta de los dos portales con el formato de la alerta (columna `portal`), sin repetidos:
-    de Metrocuadrado solo las que no están también en FincaRaíz, y sin el propio inmueble `f` en ninguno."""
+    de Metrocuadrado solo las que no están también en FincaRaíz, y sin el propio inmueble `f` en ninguno. Además,
+    los avisos de FincaRaíz del mismo inmueble que `f` (sus gemelos), para el estimado sin ver."""
     from src import fuente_http, unificar, viz_map
     fr = op.cargar(ciudad).assign(portal="FincaRaíz")
     try:
         avisos = unificar.unificar(ciudad)[0]
     except FileNotFoundError:               # sin el estado de Metrocuadrado
-        return fr
+        return fr, []
     con_fr = avisos.loc[avisos["portal"] == "fincaraiz", "id_unificado"]
     solo = avisos[(avisos["portal"] == "metrocuadrado") & ~avisos["id_unificado"].isin(con_fr)]
     solo = solo.drop_duplicates("id_inmueble").set_index("id_inmueble")
@@ -391,9 +403,12 @@ def en_venta(ciudad: str, f: pd.Series) -> pd.DataFrame:
     if f.get("portal"):                     # el propio inmueble, en los dos portales
         clave = ("fincaraiz:" if f["portal"] == "FincaRaíz" else "metrocuadrado:") + str(f["id_inmueble"])
         grupo = avisos.loc[avisos["clave"] == clave, "id_unificado"]
-        mismo = avisos.loc[avisos["id_unificado"].isin(grupo), "id_inmueble"]
-        todo = todo[~todo["id_inmueble"].isin(mismo)]
-    return todo.reset_index(drop=True)
+        en_grupo = avisos["id_unificado"].isin(grupo)
+        todo = todo[~todo["id_inmueble"].isin(avisos.loc[en_grupo, "id_inmueble"])]
+        gemelos = avisos.loc[en_grupo & (avisos["portal"] == "fincaraiz"), "id_inmueble"].astype(str).tolist()
+    else:
+        gemelos = []
+    return todo.reset_index(drop=True), gemelos
 
 
 def datos(f: pd.Series) -> dict:
@@ -401,7 +416,7 @@ def datos(f: pd.Series) -> dict:
     ciudad = ambito(zonas.canonica(f["ciudad"]))
     hasta = _hasta()
     c = _como_aviso(f, ciudad)
-    pool = en_venta(ciudad, f)
+    pool, gemelos = en_venta(ciudad, f)
     comps, nivel = op._comparables(c, pool)
     if nivel is None:                   # pocos: se usan los del barrio que haya, con confianza baja
         comps, nivel = op._comparables(c, pool, minimo=3)
@@ -420,7 +435,7 @@ def datos(f: pd.Series) -> dict:
     retirados, nivel_ret = op._comparables(c, ret, minimo=MIN_RETIRADOS)
     retirados = retirados.assign(dias=(retirados["fecha_baja"] - retirados["first_seen"]).dt.days).dropna(subset=["dias"])
 
-    m = estimar(f)
+    m = estimar(f, gemelos)
     m2 = c["Area_m2"]
     q = comps["pm2"].quantile([.25, .5, .75]) if len(comps) else pd.Series(np.nan, index=[.25, .5, .75])
     bajo, alto = max(m["p10"], q[.25] * m2), min(m["p90"], q[.75] * m2)
@@ -626,6 +641,9 @@ def informe_html(d: dict) -> str:
     if len(ret) >= MIN_RETIRADOS:
         puntos.append(f"De los parecidos que ya se retiraron del portal desde el {_fecha(pd.Timestamp(INICIO_BAJAS), año=False)}, "
                       f"la mitad lo hizo antes de <b>{ret['dias'].median():.0f} días</b> de publicado.")
+    if d["pedido"] and m.get("visto"):
+        puntos.append("Ojo: el modelo se entrenó con este aviso y su estimado tiende al precio pedido (falta la tabla de "
+                      "estimados sin ver); tómalo con cautela.")
     if d["pedido"]:
         dif = d["pedido"] / m["estimado"] - 1
         puntos.append(f"Hoy se pide <b>{_mill(d['pedido'], 0)}</b>: {_pct(abs(dif))} "

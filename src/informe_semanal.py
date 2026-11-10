@@ -182,7 +182,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     sel = op.seleccionar(ev, UMBRAL, TOP) if len(ev) else ev
     sel_bj = op.seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) if len(bj) else bj
     avisos, inm, _ = unificar.unificar(ciudad)
-    sel = op.enriquecer(sel, venta, hasta, avisos, desde)   # modelo, 3 similares, Metrocuadrado, republicación
+    sel = op.enriquecer(sel, venta, hasta, avisos)          # modelo, 3 similares, Metrocuadrado, republicación
     sel_bj = op.enriquecer(sel_bj, venta, hasta, avisos)
     if len(sel):
         sel = sel.join(_entorno(sel))
@@ -195,6 +195,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
                   & (cap["confianza"] != "Baja")]
         cap = cap.sort_values("dias_pub", ascending=False).head(CAPTAR_FILAS).assign(n_total=len(cap))
         cap["quien"] = quien_publica(cap, avisos)
+        cap = op.con_modelo(cap)                         # estimado de un modelo que no las vio
 
     # Oferta sin repetidos (los dos portales), con su comuna y un precio por m² saneado como el de venta
     con_zonas = zonas.tiene_zonas(ciudad)
@@ -419,6 +420,14 @@ def _fila(nombre: str, r: pd.Series, pmax: float, rmax: float) -> str:
       </tr>"""
 
 
+def _frente_modelo(r: pd.Series) -> str:
+    """'18% más' / '5% menos' / 'en línea' frente al estimado del modelo (que no vio el aviso); '—' sin él."""
+    b = r.get("bajo_modelo")
+    if pd.isna(b):
+        return "—"
+    return "en línea" if abs(b) < .03 else f"{_pct(abs(b))} {'menos' if b > 0 else 'más'}"
+
+
 def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
     hasta = d["hasta"]
     dias = (hasta - r["first_seen"]).days
@@ -517,6 +526,7 @@ def informe_html(d: dict) -> str:
     captar = "".join(
         f"<tr><td>{html.escape(_barrio(r, nombres))}</td><td class='nw'>{html.escape(r['Tipo_propiedad'])} · {r['Area_m2']:.0f} m²</td>"
         f"<td class='num'>{_mill(r['Precio'], 0)}</td><td class='num'>{_pct(-r['descuento'])} más</td>"
+        f"<td class='num'>{_frente_modelo(r)}</td>"
         f"<td class='num'>{r['dias_pub']:.0f}</td><td class='nw'>{html.escape(r.get('quien') or '')}</td>"
         f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
         for _, r in d["captar"].iterrows())
@@ -623,7 +633,7 @@ def informe_html(d: dict) -> str:
   {_pct(CAPTAR_SOBRE[1])} más que inmuebles similares: propietarios que pueden estar abiertos a un precio realista. Las que
   más tiempo llevan:</p>
 {f'''<table class="mini"><thead><tr><th>Zona</th><th>Inmueble</th><th class="num">Precio</th>
-  <th class="num">Frente a similares</th><th class="num">Días publicada</th><th>Lo publica</th><th></th></tr></thead><tbody>{captar}</tbody></table>
+  <th class="num">Frente a similares</th><th class="num">Frente al modelo</th><th class="num">Días publicada</th><th>Lo publica</th><th></th></tr></thead><tbody>{captar}</tbody></table>
 <p class="nota-c">Lo publica: «Particular» si Metrocuadrado lo marca así o si en FincaRaíz el anunciante tiene 1 o 2 avisos
   y no es una empresa (una pista, no un dato del portal); «N anunciantes» si el mismo inmueble está con varios.</p>'''
   if captar else '<p class="vacio">Esta semana no hay candidatas.</p>'}

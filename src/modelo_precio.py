@@ -8,6 +8,13 @@ Datos: los avisos de venta ACTIVOS de estado/avisos (src/consolidar.py), solo vi
 
 Objetivo: log(precio por m²). El precio estimado es exp(predicción) × área.
 
+Estimados sin ver (estimados_sin_ver, estimar_sin_trampa): el modelo vigente ya vio los avisos con los que se
+entrenó, y para ellos su estimado tiende al precio pedido (medido el 8-nov en 25.347 avisos: error 5,0% frente a
+11,3% sin verlos; de los que piden ≥15% más de lo que valen, reconoce el 27%). Por eso el entrenamiento del domingo
+entrena además en 5 partes y guarda, para cada aviso del entrenamiento, el estimado de la parte que no lo vio
+(data/modelos/estimados_sin_ver.parquet, R2 modelos/). estimar_sin_trampa() da el estimado honesto de cualquier
+aviso: de esa tabla si el modelo lo vio (por su id, por su duplicado o por el mismo inmueble), del modelo si no.
+
 Validación honesta:
   - por grupos: el mismo inmueble (mismas coordenadas, área y habitaciones, aunque lo publiquen
     anunciantes distintos) nunca queda en entrenamiento y prueba a la vez;
@@ -71,7 +78,7 @@ def limpiar(a: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     n_grupo = a.groupby(["ciudad", "tipo"])["lpm2"].transform("size")
     a = a[(n_grupo < 20) | ((a["lpm2"] - mediana).abs() <= 1.2)]       # ~3,3 veces arriba o abajo
     pasos.append(("Sin extremos frente a su ciudad y tipo", len(a)))
-    a = a.drop_duplicates(["ciudad", "barrio", "tipo", "precio", "m2", "habitaciones", "banos"]).reset_index(drop=True)
+    a = a.drop_duplicates(CLAVE_DUPLICADO).reset_index(drop=True)
     pasos.append(("Sin duplicados exactos", len(a)))
     return a, pd.DataFrame(pasos, columns=["paso", "avisos"]).set_index("paso")
 
@@ -391,6 +398,9 @@ MODELOS = BASE_DIR / "data" / "modelos"
 ARCHIVO = MODELOS / "precio_vivienda.joblib"
 FICHA = MODELOS / "precio_vivienda_ficha.json"
 COBERTURA = 0.80                     # el rango p10–p90 debe contener el 80% de los precios
+SIN_VER = MODELOS / "estimados_sin_ver.parquet"
+PARTES_SIN_VER = 5
+CLAVE_DUPLICADO = ["ciudad", "barrio", "tipo", "precio", "m2", "habitaciones", "banos"]   # la de limpiar()
 
 
 class ModeloPrecio:
@@ -496,6 +506,89 @@ def entrenar(a: pd.DataFrame, publicados_antes: str | None = None) -> ModeloPrec
     return mod
 
 
+def _clave_duplicado(a: pd.DataFrame) -> pd.Series:
+    """La clave con que limpiar() quita duplicados exactos, como texto (los vacíos, 'nan')."""
+    return pd.Series(["|".join(map(str, t)) for t in zip(*(a[c].tolist() for c in CLAVE_DUPLICADO))], index=a.index)
+
+
+def estimados_sin_ver(a: pd.DataFrame, publicados_antes: str | None = None,
+                      partes: int = PARTES_SIN_VER) -> pd.DataFrame:
+    """Para cada aviso con el que se entrena el modelo vigente (`a` limpio, con el mismo corte), el estimado de un
+    modelo que NO lo vio: `partes` modelos, cada uno sin una parte de los inmuebles (sin partir un inmueble). Por m²
+    (precio, p10, p90) y con su confianza; con `grupo` y `clave` para reconocer el mismo inmueble con otro número."""
+    from sklearn.model_selection import GroupKFold
+    if publicados_antes:
+        a = a[a["fecha_publicacion"].astype(str).str[:10] < publicados_antes]
+    a = a.reset_index(drop=True)
+    salida = []
+    for k, (tr, te) in enumerate(GroupKFold(n_splits=partes).split(a, groups=grupos(a)), 1):
+        b = a.iloc[te]
+        p = entrenar(a.iloc[tr]).predecir(b)
+        m2 = pd.to_numeric(b["m2"], errors="coerce").to_numpy()
+        salida.append(pd.DataFrame({
+            "id_inmueble": b["id_inmueble"].astype(str).to_numpy(), "grupo": grupos(b).to_numpy(),
+            "clave": _clave_duplicado(b).to_numpy(), "pm2": p["pm2_estimado"].to_numpy(),
+            "p10_m2": p["precio_p10"].to_numpy() / m2, "p90_m2": p["precio_p90"].to_numpy() / m2,
+            "confianza": p["confianza"].to_numpy()}))
+        print(f"   estimados sin ver: parte {k} de {partes}", flush=True)
+    return pd.concat(salida, ignore_index=True).assign(
+        fecha_datos=str(a["fecha_publicacion"].astype(str).str[:10].max()), publicados_antes=publicados_antes)
+
+
+_CACHE: dict = {}
+
+
+def _vigentes() -> tuple["ModeloPrecio", pd.DataFrame | None]:
+    """El modelo vigente y su tabla de estimados sin ver (None si no está o es de otro entrenamiento)."""
+    if "modelo" not in _CACHE:
+        modelo = ModeloPrecio.cargar()
+        tabla = pd.read_parquet(SIN_VER) if SIN_VER.exists() else None
+        if tabla is not None and (tabla["fecha_datos"].iloc[0] != modelo.fecha_datos
+                                  or tabla["publicados_antes"].iloc[0] != modelo.publicados_antes):
+            print(f"⚠️  La tabla de estimados sin ver no es del modelo vigente ({tabla['fecha_datos'].iloc[0]} "
+                  f"frente a {modelo.fecha_datos}): no se usa")
+            tabla = None
+        _CACHE["modelo"], _CACHE["tabla"] = modelo, tabla
+    return _CACHE["modelo"], _CACHE["tabla"]
+
+
+def estimar_sin_trampa(a: pd.DataFrame) -> pd.DataFrame:
+    """Estimado honesto de avisos del estado del barrido (filas de preparar()): el de la tabla de estimados sin ver si
+    el modelo vio el aviso (por su id, por su duplicado exacto o por el mismo inmueble: mismas coordenadas, área y
+    habitaciones); si no, el del modelo vigente, que no lo vio. Columnas de predecir() más `sin_ver`: False si no hay
+    forma de saberlo (sin tabla, un aviso publicado antes del corte del modelo): mejor no mostrar ese estimado."""
+    modelo, tabla = _vigentes()
+    a = a.reset_index(drop=True)
+    p = modelo.predecir(a)
+    m2 = pd.to_numeric(a["m2"], errors="coerce").to_numpy()
+    if tabla is None:
+        corte = modelo.publicados_antes
+        p["sin_ver"] = (a["fecha_publicacion"].astype(str).str[:10] >= corte).to_numpy() if corte else False
+        return p
+    fila = pd.Series(np.nan, index=a.index)
+    for col, clave in (("id_inmueble", a["id_inmueble"].astype(str)), ("clave", _clave_duplicado(a)), ("grupo", grupos(a))):
+        pos = pd.Series(np.arange(len(tabla)), index=tabla[col]).groupby(level=0).first()
+        fila = fila.fillna(clave.map(pos))
+    visto = fila.notna().to_numpy()
+    t = tabla.iloc[fila[visto].astype(int).to_numpy()]
+    p.loc[visto, "pm2_estimado"] = t["pm2"].to_numpy()
+    p.loc[visto, "precio_estimado"] = t["pm2"].to_numpy() * m2[visto]
+    p.loc[visto, "precio_p10"] = t["p10_m2"].to_numpy() * m2[visto]
+    p.loc[visto, "precio_p90"] = t["p90_m2"].to_numpy() * m2[visto]
+    p.loc[visto, "confianza"] = t["confianza"].to_numpy()
+    p["sin_ver"] = True                          # con la tabla: lo que no está en ella, el modelo no lo vio
+    return p
+
+
+def estimado_por_id(id_inmueble: str) -> pd.Series | None:
+    """La fila de la tabla de estimados sin ver de un aviso de FincaRaíz (por m²), o None."""
+    _, tabla = _vigentes()
+    if tabla is None:
+        return None
+    t = tabla[tabla["id_inmueble"] == str(id_inmueble)]
+    return t.iloc[0] if len(t) else None
+
+
 def evaluar(a: pd.DataFrame, dias_temporal: int = 28) -> dict:
     """Ficha del modelo: lo entrena sin una parte de los avisos y lo mide en ella, con el MISMO camino de
     predicción que se usa en producción. (1) Por inmueble: 20% de los inmuebles fuera. (2) Temporal:
@@ -543,13 +636,16 @@ if __name__ == "__main__":
     import time
     # Con `python -m`, este archivo corre como __main__: se usa el módulo importado para que el modelo
     # guardado sea `src.modelo_precio.ModeloPrecio` y se pueda cargar desde cualquier otro programa
-    from src.modelo_precio import ARCHIVO, FICHA, ModeloPrecio, cargar, entrenar, evaluar, limpiar
+    from src.modelo_precio import (ARCHIVO, FICHA, PARTES_SIN_VER, SIN_VER, ModeloPrecio, cargar, entrenar,
+                                   estimados_sin_ver, evaluar, limpiar)
     p = argparse.ArgumentParser(description="Modelo de precios de vivienda (E7)")
     sub = p.add_subparsers(dest="accion", required=True)
     e = sub.add_parser("entrenar", help="entrena con todos los avisos activos y guarda modelo y ficha")
     e.add_argument("--sin-evaluar", action="store_true", help="no calcula la ficha (más rápido)")
     e.add_argument("--publicados-antes", help="solo avisos publicados antes de esta fecha (AAAA-MM-DD)")
     e.add_argument("--subir", action="store_true", help="sube modelo y ficha a R2 (modelos/)")
+    e.add_argument("--sin-ver", action="store_true",
+                   help=f"calcula también los estimados sin ver ({PARTES_SIN_VER} modelos más) y los guarda/sube")
     q = sub.add_parser("predecir", help="estima el precio de los avisos activos de una ciudad")
     q.add_argument("--ciudad", default="Cali")
     args = p.parse_args()
@@ -560,11 +656,17 @@ if __name__ == "__main__":
         modelo = entrenar(datos, args.publicados_antes)
         modelo.ficha = ficha
         modelo.guardar()
+        if args.sin_ver:
+            tabla = estimados_sin_ver(datos, args.publicados_antes)
+            tabla.to_parquet(SIN_VER, index=False)
+            print(f"💾 {SIN_VER.relative_to(BASE_DIR)} ({len(tabla):,} avisos, {SIN_VER.stat().st_size / 1e6:.1f} MB)")
         if ficha:
             print(json.dumps({k: ficha[k] for k in ("por_inmueble", "temporal")}, ensure_ascii=False, indent=2))
         if args.subir:
             from src import almacen
             almacen.subir_archivo(ARCHIVO, "modelos/precio_vivienda.joblib")
+            if args.sin_ver:
+                almacen.subir_archivo(SIN_VER, "modelos/estimados_sin_ver.parquet")
             if FICHA.exists():
                 almacen.subir_archivo(FICHA, "modelos/precio_vivienda_ficha.json")
                 # Una ficha por semana, para comparar (src/monitor.py modelo); el modelo solo el vigente
