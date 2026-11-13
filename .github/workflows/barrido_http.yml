@@ -50,6 +50,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Árbol de segmentos repartido en 4 grupos
+        env:            # para leer el plan anterior en R2 (segmentos.recordar)
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: python -m src.scraper_http plan --grupos 4
       - uses: actions/upload-artifact@v4
         with:
@@ -146,6 +151,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Árbol de segmentos de arriendo repartido en 4 grupos
+        env:            # para leer el plan anterior en R2 (segmentos.recordar)
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: python -m src.scraper_http --raiz arriendo plan --grupos 4
       - uses: actions/upload-artifact@v4
         with:

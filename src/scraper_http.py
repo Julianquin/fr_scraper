@@ -45,11 +45,35 @@ def hoy() -> str:
 
 
 # ── 1. Plan ──────────────────────────────────────────────────────────────────
+def plan_anterior(raiz: str = "venta") -> pd.DataFrame | None:
+    """El plan.csv más reciente que guardó `juntar` en R2 (raw/<raiz>_http/fecha=…/plan.csv), o None (sin claves de
+    R2, como en local, o si todavía no hay ninguno)."""
+    import io
+    import os
+    if not all(os.environ.get(v) for v in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")):
+        return None
+    from src import almacen
+    s3, bucket = almacen._cliente()
+    claves = [o["Key"] for pagina in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"raw/{raiz}_http/")
+              for o in pagina.get("Contents", []) if o["Key"].endswith("/plan.csv")]
+    if not claves:
+        return None
+    clave = max(claves)                                  # fecha=AAAA-MM-DD: el orden de texto es el de fecha
+    print(f"Plan anterior: {clave}")
+    return pd.read_csv(io.BytesIO(s3.get_object(Bucket=bucket, Key=clave)["Body"].read()))
+
+
 def plan(grupos: int, pausa: float, raiz: str = "venta") -> pd.DataFrame:
-    """Arma el árbol de segmentos y reparte las hojas en `grupos` de páginas parecidas."""
+    """Arma el árbol de segmentos (con los del plan anterior que la muestra de hoy no vea) y reparte las hojas en
+    `grupos` de páginas parecidas."""
     from src import segmentos
     trabajo, _ = carpetas(raiz)
-    arbol = segmentos.construir(pausa, raiz)
+    try:
+        previo = plan_anterior(raiz)
+    except Exception as e:  # noqa: BLE001 — sin el plan de ayer, el de hoy sale igual (solo con la muestra)
+        print(f"⚠️  No se pudo leer el plan anterior de R2: {e}")
+        previo = None
+    arbol = segmentos.construir(pausa, raiz, previo)
     hojas = arbol[arbol["accion"] != "partido"].copy()
     hojas["paginas_estimadas"] = hojas["paginas"] * hojas["accion"].map(lambda a: len(ORDENES[a]))
     hojas = hojas.sort_values("paginas_estimadas", ascending=False).reset_index(drop=True)
@@ -152,6 +176,8 @@ def juntar(subir: bool, raiz: str = "venta") -> dict:
         from src import almacen
         almacen.subir_archivo(destino, f"raw/{raiz}_http/fecha={fecha}/scrape.parquet")
         almacen.subir_archivo(destino.parent / "reporte.json", f"raw/{raiz}_http/fecha={fecha}/reporte.json")
+        if (trabajo / "plan.csv").exists():             # el plan de mañana parte de este (segmentos.recordar)
+            almacen.subir_archivo(trabajo / "plan.csv", f"raw/{raiz}_http/fecha={fecha}/plan.csv")
     return reporte
 
 

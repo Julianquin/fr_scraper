@@ -15,6 +15,13 @@ Al partir un segmento, compara la suma de sus hijos con su total: la diferencia 
 avisos que ningún hijo cubre (sin tipo, ciudad o zona reconocible). El resultado dice cuántas
 páginas cuesta un barrido completo y qué cobertura nacional lograría.
 
+Las ciudades y las zonas se descubren mirando una muestra de avisos, y una muestra puede no ver
+una zona o un municipio con pocos avisos etiquetados: del 5 al 11-nov la zona Chapinero de Bogotá
+(1.765 apartamentos) quedó fuera del barrido, ~800 apartamentos se dieron por retirados y volvieron
+el 12-nov. Dos defensas: ZONAS_CONOCIDAS (las zonas de Bogotá y Medellín se barren siempre) y
+`recordar` (cualquier segmento del plan de ayer que la muestra de hoy no vio se añade igual, salvo
+que ya lo cubra otro segmento de hoy).
+
 Uso:
     python -m src.segmentos [--raiz arriendo]   # arma el árbol → data/analisis/e1/segmentos_arbol[_arriendo].csv
 """
@@ -31,6 +38,15 @@ from src.config import BASE_DIR
 from src.fincaraiz_http import POR_PAGINA, ULTIMA_PAGINA, pedir
 
 LIMITE = 9_500                   # margen bajo el tope de 10.000 para que el crecimiento no lo rompa
+# Zonas de las ciudades que se parten por zona (slug corto del portal → nombre), vistas el 13-nov-2026: se barren
+# siempre, aunque la muestra de la noche no las vea (las que no tengan avisos de ese tipo se saltan solas)
+ZONAS_CONOCIDAS = {
+    "bogota": {"zona-centro": "Zona centro", "zona-chapinero": "Zona chapinero", "zona-noroccidental": "Zona Noroccidente",
+               "zona-nororiental": "Zona nororiental", "zona-norte": "Zona norte", "zona-occidental": "Zona occidental",
+               "zona-sur": "Zona sur"},
+    "medellin": {"centro": "Centro", "noroccidente": "Noroccidente", "nororiente": "Nororiente",
+                 "occidente": "Occidente", "suroccidente": "Suroccidente", "suroriente": "Suroriente"},
+}
 OUT = BASE_DIR / "data" / "analisis" / "e1"
 RAICES = ("venta", "arriendo")
 
@@ -151,11 +167,14 @@ class Arbol:
         if t <= LIMITE:
             self.hoja(ruta, "ciudad", padre, t)
             return t
-        zonas = self.muestrear(ruta, "zone")
+        # slug del portal: 'zone-colombia-bogota-zona-norte' → 'zona-norte'
+        vistas = {(sp.split(f"-{c}-", 1)[-1] if f"-{c}-" in sp else slug(n)): n
+                  for n, sp in self.muestrear(ruta, "zone").items()}
+        conocidas = ZONAS_CONOCIDAS.get(c, {})
+        if nuevas := set(vistas) - set(conocidas):
+            print(f"ℹ️  {ruta}: zonas que no están en ZONAS_CONOCIDAS: {sorted(nuevas)} (añadirlas)")
         suma = 0
-        for nombre, slug_portal in sorted(zonas.items()):
-            # slug del portal: 'zone-colombia-bogota-zona-norte' → 'zona-norte'
-            z = slug_portal.split(f"-{c}-", 1)[-1] if f"-{c}-" in slug_portal else slug(nombre)
+        for z in sorted(set(vistas) | set(conocidas)):
             rz = f"{self.raiz}/{tp}/{z}/{c}"
             tz = self.total(rz)
             if tz == 0:
@@ -167,11 +186,33 @@ class Arbol:
         return min(t, suma)
 
 
-def construir(pausa: float, raiz: str = "venta") -> pd.DataFrame:
+def recordar(arbol: "Arbol", previo: pd.DataFrame) -> list[str]:
+    """Añade al árbol de hoy los segmentos hoja del plan anterior (`previo`, su plan.csv) que la muestra de hoy no
+    vio: los que no están en el árbol de hoy (ni como hoja ni partidos) y cuyo padre no es hoy una hoja (si lo es,
+    ya los cubre). Solo si todavía tienen avisos. Devuelve las rutas añadidas."""
+    hoy = {f["ruta"] for f in arbol.filas}
+    hojas_hoy = {f["ruta"] for f in arbol.filas if f["accion"] != "partido"}
+    añadidas = []
+    for _, h in previo.iterrows():
+        if h["ruta"] in hoy or (isinstance(h.get("padre"), str) and h["padre"] in hojas_hoy):
+            continue
+        t = arbol.total(h["ruta"])
+        if t:
+            arbol.hoja(h["ruta"], h["nivel"], h.get("padre") if isinstance(h.get("padre"), str) else None, t,
+                       "barrer" if t <= LIMITE else "barrer_dos_ordenes")
+            añadidas.append(h["ruta"])
+    return añadidas
+
+
+def construir(pausa: float, raiz: str = "venta", previo: pd.DataFrame | None = None) -> pd.DataFrame:
+    """El árbol de hoy; con `previo` (el plan de ayer), más los segmentos de ayer que la muestra de hoy no vio."""
     arbol = Arbol(pausa, raiz)
     t0 = time.time()
     nacional = arbol.total(raiz)
     cubiertos = sum(arbol.departamento(d) for d in DEPARTAMENTOS)
+    if previo is not None and len(previo):
+        if añadidas := recordar(arbol, previo):
+            print(f"⚠️  La muestra de hoy no vio {len(añadidas)} segmentos del plan anterior; se barren igual: {añadidas}")
     df = pd.DataFrame(arbol.filas)
     OUT.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUT / ("segmentos_arbol.csv" if raiz == "venta" else f"segmentos_arbol_{raiz}.csv"), index=False)
