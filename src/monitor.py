@@ -115,8 +115,11 @@ def revisar(raiz: str, fecha: str, meta: dict | None, rep: dict | None) -> tuple
     if acu.get("baja"):
         desde = f"Desde el {meta['acumulado_desde']} (retirado = {meta['regla_bajas']['ausencias_para_baja']} días sin verse)" \
             if meta.get("acumulado_desde") else "Desde el inicio"
+        # Desde el 14-nov solo cuentan las que vuelven de una baja dada con la regla vigente (`reaparece_regla`);
+        # antes se contaban todas y en Metrocuadrado salía más del 100%
+        volvieron = acu.get("reaparece_regla", acu.get("reaparece", 0))
         lineas.append(f"{desde}: {_n(acu['baja'])} retirados, de los que volvieron "
-                      f"{_n(acu.get('reaparece', 0))} ({_pct(acu.get('reaparece', 0) / acu['baja'])})")
+                      f"{_n(volvieron)} ({_pct(volvieron / acu['baja'])})")
     if len(meta["barridos"]) > 1 and not res["ausencias_contadas"]:
         avisos.append(f"{nombre}: barrido incompleto ({_pct(res['cobertura_portal'])} de lo que declara el portal, "
                       f"{_pct(res['vistos'] / activos)} de los activos): hoy nadie se dio por retirado"

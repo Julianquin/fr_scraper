@@ -107,7 +107,7 @@ PISO_RELATIVO = 0.80            # vistos / activos propios, aunque el portal dig
 REPUBLICADO_DIAS = 14           # un aviso retirado hace menos que esto todavía puede volver republicado
 TIPOS_EQUIVALENTES = {"Apartaestudio": "Apartamento"}
 # `estado` (sin sufijo) es el estado físico del inmueble ("Usado"…); el de control es `estado_aviso`
-CONTROL = ["primera_vez", "ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia"]
+CONTROL = ["primera_vez", "ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia", "baja_dada"]
 
 
 def ruta_barrido(fecha: str, raiz: str = "venta") -> Path:
@@ -231,6 +231,33 @@ def cargar_estado(r: Rutas = rutas()) -> tuple[pd.DataFrame, dict]:
     return pd.DataFrame(), {"ultimo_barrido": None, "barridos": []}
 
 
+def _historial_completo(r: Rutas) -> pd.DataFrame:
+    """Todo el historial de la raíz, al día con R2 (solo baja lo que falta; ~130 KB por día). Solo para rellenar
+    una vez. Sin claves de R2 (en local), el que haya en disco."""
+    import os
+    if os.environ.get("R2_BUCKET"):
+        from src import almacen
+        almacen.traer(f"{r.r2}/historial/", BASE_DIR / "data")
+    partes = [pd.read_parquet(p, columns=["fecha", "id_inmueble", "evento"]) for p in sorted(r.historial.glob("fecha=*.parquet"))]
+    h = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(columns=["fecha", "id_inmueble", "evento"])
+    return h.assign(id_inmueble=h["id_inmueble"].astype(str), fecha=h["fecha"].astype(str))
+
+
+def _rellenar_bajas_dadas(previo: pd.DataFrame, r: Rutas, desde: str | None) -> tuple[pd.Series, int]:
+    """Una vez (14-nov): `baja_dada` (el día en que se registró la última baja de cada aviso) y cuántos de los que
+    reaparecieron desde `desde` venían de una baja dada desde `desde` (las de la regla vigente), desde el historial."""
+    h = _historial_completo(r)
+    bajas = h[h["evento"] == "baja"].sort_values("fecha")
+    dada = bajas.drop_duplicates("id_inmueble", keep="last").set_index("id_inmueble")["fecha"]
+    con_baja = previo["estado_aviso"].eq("retirado") & previo["fecha_baja"].notna()
+    n = 0
+    if desde:
+        b = bajas[bajas["fecha"] >= desde]
+        for _, v in h[(h["evento"] == "reaparece") & (h["fecha"] >= desde)].iterrows():
+            n += int(((b["id_inmueble"] == v["id_inmueble"]) & (b["fecha"] < v["fecha"])).any())
+    return previo.index.to_series().map(dada).where(con_baja), n
+
+
 def consolidar(fecha: str, raiz: str = "venta") -> dict:
     """Aplica el barrido de `fecha` sobre el estado y escribe el historial del día."""
     r = rutas(raiz)
@@ -239,6 +266,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         raise YaProcesado(f"El {fecha} ya está procesado (último: {meta['ultimo_barrido']}). "
                          "Usa --reconstruir para rehacer desde cero.")
 
+    reaparece_regla_previa = 0         # solo la primera vez con `baja_dada` (_rellenar_bajas_dadas)
     hoy = pd.read_parquet(ruta_barrido(fecha, raiz))
     hoy["id_inmueble"] = hoy["id_inmueble"].astype(str)
     hoy = hoy.drop_duplicates("id_inmueble").set_index("id_inmueble")
@@ -252,6 +280,8 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         ausencias_contadas, cobertura, anunciantes = False, None, {}
     else:
         previo = previo.set_index("id_inmueble")
+        if "baja_dada" not in previo:                   # estado anterior al 14-nov: se rellena una vez
+            previo["baja_dada"], reaparece_regla_previa = _rellenar_bajas_dadas(previo, r, meta.get("acumulado_desde"))
         vistos = hoy.index
         nuevos = vistos.difference(previo.index)
         comunes = vistos.intersection(previo.index)
@@ -284,6 +314,11 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         de_barrido = previo.loc[volvieron, "fecha_baja"].notna().to_numpy()     # sin fecha: del rescate
         for ids, nombre in ((volvieron[de_barrido], "reaparece"), (volvieron[~de_barrido], "reactivado")):
             eventos.append(_evento(fecha, ids, nombre, despues=hoy.loc[ids, "precio"].to_numpy()))
+        # La tasa de bajas falsas mide la regla vigente: solo cuentan las que vuelven de una baja dada con ella
+        # (el 9-nov, en Metrocuadrado, volvían más de los que se habían retirado: eran bajas de la regla vieja)
+        desde_regla = meta.get("acumulado_desde") if meta.get("regla_bajas") == {"ausencias_para_baja": AUSENCIAS_PARA_BAJA} else fecha
+        dada = previo.loc[volvieron[de_barrido], "baja_dada"].astype(str)
+        reaparece_regla = int((previo.loc[volvieron[de_barrido], "baja_dada"].notna() & (dada >= str(desde_regla))).sum())
 
         # Cambios en los campos vigilados (subidas y bajadas)
         for campo, nombre in VIGILADOS.items():
@@ -309,7 +344,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
         # Columnas que no vienen en el barrido (p. ej. `origen` de lo rescatado): se conservan
         for c in previo.columns.difference(hoy.columns).difference(CONTROL):
             estado[c] = previo[c].reindex(estado.index)
-        for c in ("ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia"):
+        for c in ("ultima_vez", "estado_aviso", "fecha_baja", "ausencias", "primera_ausencia", "baja_dada"):
             estado.loc[faltan, c] = previo.loc[faltan, c]
 
         f = faltan[previo.loc[faltan, "estado_aviso"].eq("activo").to_numpy()]      # activos que faltaron hoy
@@ -336,6 +371,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
             anunciantes["baja"] = _top(baja, previo, catalogo)
             estado.loc[baja, "estado_aviso"] = "retirado"
             estado.loc[baja, "fecha_baja"] = estado.loc[baja, "primera_ausencia"]
+            estado.loc[baja, "baja_dada"] = fecha
             eventos.append(_evento(fecha, baja, "baja", antes=pd.to_numeric(estado.loc[baja, "precio"]).to_numpy()))
 
     # Los vistos hoy quedan activos y con el contador en cero
@@ -343,6 +379,7 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
     estado.loc[vistos, "ultima_vez"] = fecha
     estado.loc[vistos, "estado_aviso"] = "activo"
     estado.loc[vistos, "fecha_baja"] = None
+    estado.loc[vistos, "baja_dada"] = None
     estado.loc[vistos, "ausencias"] = 0
     estado.loc[vistos, "primera_ausencia"] = None
 
@@ -361,13 +398,17 @@ def consolidar(fecha: str, raiz: str = "venta") -> dict:
                "precio_baja": int((cp["valor_despues"] < cp["valor_antes"]).sum()),
                "precio_sube": int((cp["valor_despues"] > cp["valor_antes"]).sum()),
                **hist["evento"].value_counts().to_dict(), "anunciantes": anunciantes}
+    if not previo.empty:
+        resumen["reaparece_regla"] = reaparece_regla
     # El monitor (src/monitor.py) lee el resumen del día y el acumulado: la tasa de "reaparece"
     # sobre las bajas dice si la regla de ausencias está bien calibrada
     # El acumulado vuelve a cero cuando cambia la regla de bajas, para medir solo la regla vigente
     regla = {"ausencias_para_baja": AUSENCIAS_PARA_BAJA}
     nueva = meta.get("regla_bajas") != regla
     acumulado = {} if nueva else meta.get("acumulado", {})
-    for ev in ("alta", "baja", "reaparece", "republicado"):
+    if not nueva and "reaparece_regla" not in acumulado:      # una vez: lo que llevaba la regla vigente hasta ayer
+        acumulado["reaparece_regla"] = reaparece_regla_previa
+    for ev in ("alta", "baja", "reaparece", "republicado", "reaparece_regla"):
         acumulado[ev] = acumulado.get(ev, 0) + int(resumen.get(ev, 0))
     meta = meta | {"ultimo_barrido": fecha, "barridos": meta["barridos"] + [fecha],
                    "ultimo_resumen": resumen, "acumulado": acumulado, "regla_bajas": regla,
