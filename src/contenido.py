@@ -174,7 +174,10 @@ def _semana_iso(f: pd.Timestamp) -> str:
 def elegir_barrio(t: pd.DataFrame, hasta: pd.Timestamp, ciudad_m2: float, vistos: dict) -> tuple[str, str] | None:
     """El barrio de la semana de `hasta`: el mismo de lunes a domingo, anotado en `vistos` ({"2026-W47": {...}}).
     Uno nuevo: de los `candidatos` que aún no han salido, el de más viviendas, alternando
-    uno por encima y otro por debajo del m² de la ciudad (que no salgan seguidos los caros del sur)."""
+    uno por encima y otro por debajo del m² de la ciudad (que no salgan seguidos los caros del sur).
+    Solo se anota de lunes a miércoles: de jueves a domingo esa semana ya no tiene carrusel (sale los miércoles), y
+    anotarlo lo gastaría sin publicarse (pasaba con el primer domingo: Pance). Esos días el elegido es provisional
+    y el lunes se vuelve a elegir."""
     semana = _semana_iso(hasta)
     if (x := vistos.get(semana)) and (x["comuna"], x["barrio"]) in t.index:
         return x["comuna"], x["barrio"]
@@ -191,7 +194,8 @@ def elegir_barrio(t: pd.DataFrame, hasta: pd.Timestamp, ciudad_m2: float, vistos
         otro_lado = libres[(libres["precio_m2"] < ciudad_m2) if caro else (libres["precio_m2"] >= ciudad_m2)]
         libres = otro_lado if len(otro_lado) else libres
     comuna, barrio = libres["viviendas"].idxmax()
-    vistos[semana] = {"comuna": str(comuna), "barrio": barrio, "precio_m2": _num(t.loc[(comuna, barrio), "precio_m2"])}
+    if hasta.weekday() <= 2:
+        vistos[semana] = {"comuna": str(comuna), "barrio": barrio, "precio_m2": _num(t.loc[(comuna, barrio), "precio_m2"])}
     return comuna, barrio
 
 
