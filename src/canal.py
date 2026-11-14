@@ -3,7 +3,11 @@ Canal público de Telegram: publicaciones diarias que el administrador aprueba a
 
 Cada día, tras el barrido de Metrocuadrado (canal.yml), `proponer` manda al chat del administrador las
 publicaciones del día, cada una EXACTAMENTE como saldrá en el canal y con dos botones, «Publicar» y «Descartar»:
-  - todos los días, la oportunidad del día (1–2, con criterios más estrictos que la alerta: CRITERIOS);
+  - todos los días, la oportunidad del día (1–2, con criterios más estrictos que la alerta: CRITERIOS), de dos
+    fuentes: las publicadas en los últimos 7 días y las de cualquier antigüedad que acaban de bajar de precio (en
+    los 2 últimos barridos) y con eso cumplen los criterios. Lo publicado hace más de una semana que no ha cambiado
+    queda fuera: el 14-nov, de 266 avisos activos de Cali que cumplían los criterios, 171 llevaban más de 3 meses y
+    86 más de un año sin bajar el precio (abandonados, desactualizados o con algún problema, no oportunidades);
   - los lunes, el pulso del mercado de la semana; los jueves, las mayores bajadas de precio.
 Al pulsar un botón, Telegram avisa al Worker de Cloudflare (cloudflare/bot/), que contesta y lanza `aprobar`: la
 publicación queda en cola, o sale ya si son más de las 07:00 de Colombia. A las 07:00 el Worker lanza `publicar`, que
@@ -33,13 +37,16 @@ from src.config import BASE_DIR
 
 # Criterios de la oportunidad del día (más estrictos que la alerta: es pública)
 CRITERIOS = {
-    "dias": 2,                  # publicada en los últimos 2 días
+    "dias": 7,                  # publicada en los últimos 7 días (antes 2: los días flojos no había ninguna)…
+    "dias_bajada": 2,           # …o que bajó de precio en los 2 últimos barridos, sea cual sea su antigüedad
     "bajo_similares": 0.20,     # ≥ 20% bajo sus similares…
     "bajo_modelo": 0.10,        # …y ≥ 10% bajo el modelo (estimado sin ver): las dos medidas coinciden
     "confianza": "Alta",        # similares en el barrio, 15 o más
     "maximo": 2,                # oportunidades por día
 }
 TOP_BAJADAS = 3
+BAJADA_BRUSCA = 0.25            # una bajada así en 14 días puede ser un error de digitación (285 → 190 M): se avisa
+DIAS_BRUSCA = 14
 HORA_PUBLICAR = 7               # hora de Colombia
 COLOMBIA = "America/Bogota"
 LOCAL = BASE_DIR / "data" / "canal"       # sin claves de R2 (pruebas en local), el estado vive aquí
@@ -101,22 +108,64 @@ def _preparar(ciudad: str):
     return df, hasta, op.historial(hasta)
 
 
-def oportunidades_del_dia(ciudad: str, ya: set[str]) -> pd.DataFrame:
-    """Las oportunidades publicadas en los últimos CRITERIOS['dias'] que cumplen todos los criterios y no se
-    propusieron antes, las de mayor descuento primero (como mucho CRITERIOS['maximo'])."""
+def _ultimo_barrido() -> pd.Timestamp:
+    """Fecha del último barrido de venta: la de las bajadas de precio (first_seen, en cambio, llega hasta la víspera)."""
+    from src.consolidar import rutas
+    return pd.Timestamp(json.loads(rutas("venta").meta.read_text())["ultimo_barrido"])
+
+
+def _cumplen(ev: pd.DataFrame) -> pd.DataFrame:
+    return ev[(ev["descuento"] >= CRITERIOS["bajo_similares"]) & ev["motivo_descarte"].isna() & ~ev["verificar"]
+              & (ev["confianza"] == CRITERIOS["confianza"])]
+
+
+def oportunidades_del_dia(ciudad: str, ya: dict[str, str]) -> pd.DataFrame:
+    """Las oportunidades del día, las de mayor descuento primero (como mucho CRITERIOS['maximo']), de dos fuentes
+    (columna `fuente`):
+      - «nueva»: publicada en los últimos CRITERIOS['dias'] días y nunca propuesta (sin republicados: no son nuevas);
+      - «bajada»: bajó de precio en los últimos CRITERIOS['dias_bajada'] barridos (también al republicar), sea cual
+        sea su antigüedad; vuelve a proponerse aunque ya se hubiera propuesto, si la bajada es posterior.
+    `ya`: {id del aviso: fecha en que se propuso}."""
     df, hasta, hist = _preparar(ciudad)
-    nuevos = df[df["first_seen"] > hasta - pd.Timedelta(days=CRITERIOS["dias"])]
-    nuevos = nuevos[~nuevos["id_inmueble"].isin(ya)]
-    ev = op.calificar(df, nuevos, hist) if len(nuevos) else nuevos
-    if ev.empty:
-        return ev
-    ev = ev[(ev["descuento"] >= CRITERIOS["bajo_similares"]) & ev["motivo_descarte"].isna() & ~ev["verificar"]
-            & (ev["confianza"] == CRITERIOS["confianza"])]
-    if ev.empty:
-        return ev
-    ev = op.enriquecer(ev.sort_values("descuento", ascending=False).head(10), df, hasta)
-    ev = ev[(ev["bajo_modelo"] >= CRITERIOS["bajo_modelo"]) & ev["rep_precio_antes"].isna()]   # sin republicados
-    return ev.head(CRITERIOS["maximo"])
+    candidatas = []
+
+    nuevos = df[(df["first_seen"] > hasta - pd.Timedelta(days=CRITERIOS["dias"])) & ~df["id_inmueble"].isin(list(ya))]
+    ev = _cumplen(op.calificar(df, nuevos, hist)) if len(nuevos) else nuevos.iloc[:0]
+    if len(ev):
+        ev = op.enriquecer(ev.sort_values("descuento", ascending=False).head(10), df, hasta)
+        candidatas.append(ev[ev["rep_precio_antes"].isna()].assign(fuente="nueva"))
+
+    ultimo = _ultimo_barrido()
+    bj = op.bajadas(df, hist, ultimo - pd.Timedelta(days=CRITERIOS["dias_bajada"] - 1), ultimo)
+    if len(bj):
+        bj = bj[[ya.get(i, "") < str(f)[:10] for i, f in zip(bj["id_inmueble"], bj["fecha_baja"])]]   # bajada posterior
+        bj = _cumplen(bj)
+        if len(bj):
+            candidatas.append(op.enriquecer(bj.sort_values("descuento", ascending=False).head(10), df, hasta)
+                              .assign(fuente="bajada"))
+
+    if not candidatas:
+        return df.iloc[:0]
+    todas = pd.concat(candidatas, ignore_index=True)
+    todas = todas[todas["bajo_modelo"] >= CRITERIOS["bajo_modelo"]]
+    # Una nueva que además acaba de bajar: una sola vez, como bajada (dice más)
+    todas = todas.sort_values("fuente").drop_duplicates("id_inmueble", keep="first")
+    return todas.sort_values("descuento", ascending=False).head(CRITERIOS["maximo"])
+
+
+def bajada_brusca(id_inmueble: str) -> str | None:
+    """Nota para el administrador (no para el canal) si el aviso bajó BAJADA_BRUSCA o más en DIAS_BRUSCA días: puede
+    ser un error de digitación y no una oportunidad. None si no."""
+    ev = op._eventos()
+    desde = f"{_ultimo_barrido() - pd.Timedelta(days=DIAS_BRUSCA):%Y-%m-%d}"
+    b = ev[(ev["id_inmueble"] == str(id_inmueble)) & ev["evento"].isin(["cambio_precio", "republicado"])
+           & (ev["fecha"] >= desde) & (ev["precio_despues"] <= (1 - BAJADA_BRUSCA) * ev["precio_antes"])]
+    if b.empty:
+        return None
+    x = b.sort_values("fecha").iloc[-1]
+    return (f"⚠️ La siguiente bajó {1 - x['precio_despues'] / x['precio_antes']:.0%} el {x['fecha']} "
+            f"({op._millones(x['precio_antes'])} → {op._millones(x['precio_despues'])}). Puede ser un error al escribir el "
+            f"precio: míralo en el aviso antes de publicarla.")
 
 
 def texto_oportunidad(r: pd.Series, pie: str) -> str:
@@ -127,6 +176,8 @@ def texto_oportunidad(r: pd.Series, pie: str) -> str:
         f"*{op._ficha(r)}*",
         f"📍 {op._zona(r)}",
         f"💰 {op._millones(r['Precio'])} ({op._m2(r['precio_m2'])} M/m²)",
+        (f"📉 *Bajó {r['baja']:.0%}* {'al republicarse' if r.get('al_republicar') is True else 'de precio'} "
+         f"(antes {op._millones(r['precio_antes'])})") if r.get("fuente") == "bajada" else None,
         "",
         f"📊 *{r['descuento']:.0%} bajo sus {r['n_comps']} similares* {'del barrio' if r['nivel_comps'] == 'barrio' else 'cercanos'} "
         f"(mediana {op._m2(r['med_comps'])} M/m²)",
@@ -227,8 +278,11 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     pie = contacto()
     hoy = ahora_colombia()
     propuestas: list[tuple[str, str, str | None]] = []          # (tipo, texto, id del aviso)
-    for _, r in oportunidades_del_dia(ciudad, set(e["propuestos"])).iterrows():
+    notas = {}                                                   # id del aviso → aviso solo para el administrador
+    for _, r in oportunidades_del_dia(ciudad, e["propuestos"]).iterrows():
         propuestas.append(("oportunidad", texto_oportunidad(r, pie), str(r["id_inmueble"])))
+        if nota := bajada_brusca(r["id_inmueble"]):
+            notas[str(r["id_inmueble"])] = nota
     if hoy.day_of_week == 0:
         propuestas.append(("pulso", texto_pulso(ciudad, pie), None))
     if hoy.day_of_week == 3 and (t := texto_bajadas(ciudad, pie)):
@@ -236,8 +290,8 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     n_op = sum(t == "oportunidad" for t, _, _ in propuestas)
     print(f"{hoy:%Y-%m-%d}: {n_op} oportunidades · {len(propuestas) - n_op} más ({[t for t, _, _ in propuestas]})")
     if not enviar:
-        for _, texto, _ in propuestas:
-            print("\n" + "─" * 60 + "\n" + texto)
+        for _, texto, id_aviso in propuestas:
+            print("\n" + "─" * 60 + ("\n" + notas[id_aviso] if id_aviso in notas else "") + "\n" + texto)
         return [(t, x) for t, x, _ in propuestas]
     token, admin, _ = _credenciales(canal=False)
     from src.notificar import telegram
@@ -249,6 +303,8 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
                    if propuestas else "."))
     telegram(cabecera, token, admin)
     for tipo, texto, id_aviso in propuestas:
+        if id_aviso in notas:
+            telegram(notas[id_aviso], token, admin)
         mensaje = enviar_propuesta(texto, token, admin)
         e["propuestas"][str(mensaje)] = {"tipo": tipo, "id": id_aviso, "fecha": f"{hoy:%Y-%m-%d}"}
         if id_aviso:
