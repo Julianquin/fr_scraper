@@ -219,6 +219,106 @@ def ficha_barrio(t: pd.DataFrame, comuna: str, barrio: str, d: dict) -> dict:
     }
 
 
+# ── El mes ────────────────────────────────────────────────────────────────────────────────────────────────
+# Lo que cambia de un mes a otro. No la mediana del m² por comuna o barrio: en 3 semanas, solo por qué viviendas
+# entran y salen, el 15–20 % de las comunas y barrios ya cambia más de un 3 %, mientras el precio pedido de las
+# mismas viviendas se movía un −0,01 % (medido el 14-nov). Así que el precio se mide con las MISMAS viviendas (las
+# que estuvieron en venta todo el mes) y, aparte, lo que entra (publicadas), lo que sale (retiradas) y cuántas
+# bajaron o subieron de precio.
+BARRIDO_COMPLETO = pd.Timestamp("2026-10-25")   # desde aquí el barrido ve toda la oferta: antes, el mes no se cuenta
+MIN_COMUNA_MES = 300            # una comuna entra en el mes con al menos estas viviendas en venta todo el mes (con
+                                # menos, «el 3 % bajó» son 3 o 4 avisos)
+NOMBRES_MES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
+               "noviembre", "diciembre"]
+
+
+def mes_anterior(hasta: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """El último mes completo antes de `hasta`: (primer día, último día)."""
+    fin = pd.Timestamp(hasta).normalize().replace(day=1) - pd.Timedelta(days=1)
+    return fin.replace(day=1), fin
+
+
+def es_semana_del_mes(hasta: pd.Timestamp) -> bool:
+    """La semana que lleva el mes: la primera de cada mes (el informe, el canal y el carrusel de ese lunes)."""
+    return pd.Timestamp(hasta).day <= 7
+
+
+def _movimientos(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> pd.DataFrame:
+    """Viviendas de Fincaraíz de la ciudad publicadas o retiradas en el periodo (columnas `publicada`, `retirada`),
+    con su comuna. Del estado completo (también las ya retiradas), no solo de lo que sigue en venta."""
+    from src import oportunidades as op, zonas
+    from src.consolidar import rutas
+    r = rutas("venta")
+    a = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud", "barrio",
+                                           "estado_aviso", "fecha_publicacion"])
+    aqui = (zonas.en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"]) if ciudad in zonas.AREAS
+            else a["ciudad"].map(zonas.canonica) == ciudad)
+    a = a[aqui & a["tipo"].isin(op.TIPOS)].assign(id_inmueble=lambda x: x["id_inmueble"].astype(str))
+    publicada = pd.to_datetime(a["fecha_publicacion"], errors="coerce").between(desde, hasta)
+    dias = pd.date_range(desde, hasta).strftime("%Y-%m-%d")
+    partes = [pd.read_parquet(p, columns=["id_inmueble", "evento"]) for d in dias
+              if (p := r.historial / f"fecha={d}.parquet").exists()]
+    bajas = set()
+    if partes:
+        h = pd.concat(partes, ignore_index=True)
+        bajas = set(h.loc[h["evento"] == "baja", "id_inmueble"].astype(str))
+    # Como src/informe_semanal._retiradas: una baja que volvió a publicarse no fue una retirada
+    retirada = a["id_inmueble"].isin(bajas) & a["estado_aviso"].eq("retirado")
+    m = a[publicada | retirada].assign(publicada=publicada, retirada=retirada)
+    if zonas.tiene_zonas(ciudad):
+        m = zonas.asignar_zonas(m.rename(columns={"latitud": "Latitud", "longitud": "Longitud", "barrio": "Barrio"}),
+                                ciudad)
+    else:
+        m = m.assign(comuna=None)
+    return m
+
+
+def _mismas(venta: pd.DataFrame, desde: pd.Timestamp, hasta: pd.Timestamp) -> pd.DataFrame:
+    """Las viviendas en venta todo el periodo (publicadas antes y siguen) y cuánto cambió su precio en él
+    (`cambio`: producto de sus cambios de precio menos 1; sin las correcciones de digitación)."""
+    from src import oportunidades as op
+    ev = op._eventos()
+    e = ev[(ev["evento"] == "cambio_precio") & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
+    factor = (e["precio_despues"] / e["precio_antes"]).groupby(e["id_inmueble"].astype(str)).prod()
+    v = venta[venta["first_seen"] <= desde]
+    return v.assign(cambio=v["id_inmueble"].astype(str).map(factor).fillna(1.0) - 1)
+
+
+def _resumen_mes(m: pd.DataFrame, mov: pd.DataFrame) -> dict:
+    """Cuenta como bajada o subida un cambio de al menos BAJA_MIN (3 %), como las bajadas del canal."""
+    from src import oportunidades as op
+    bajo, subio = m["cambio"] <= -op.BAJA_MIN, m["cambio"] >= op.BAJA_MIN
+    return {"en_venta_todo": len(m), "bajaron": int(bajo.sum()), "subieron": int(subio.sum()),
+            "bajada_mediana": _num(-m.loc[bajo, "cambio"].median(), 3) if bajo.any() else None,
+            "cambio_mismas": _num(m["cambio"].mean(), 4) if len(m) else None,
+            "publicadas": int(mov["publicada"].sum()), "retiradas": int(mov["retirada"].sum())}
+
+
+def datos_mes(d: dict, desde: pd.Timestamp, hasta: pd.Timestamp) -> dict:
+    """Un mes (de `desde` a `hasta`) en cifras: lo de la ciudad y, por comuna, lo de las que tienen muestra."""
+    m = _mismas(d["venta"], desde, hasta)
+    mov = _movimientos(d["ciudad"], desde, hasta)
+    comunas = []
+    for c, x in m.dropna(subset=["comuna"]).groupby("comuna"):
+        if len(x) < MIN_COMUNA_MES:
+            continue
+        comunas.append({"codigo": str(c), "nombre": d["nombres"].get(c, c),
+                        **_resumen_mes(x, mov[mov["comuna"] == c])})
+    return {"mes": f"{desde:%Y-%m}", "nombre": NOMBRES_MES[desde.month - 1], "desde": desde, "hasta": hasta,
+            "completo": bool(desde >= BARRIDO_COMPLETO), **_resumen_mes(m, mov), "comunas": comunas}
+
+
+def mes(d: dict) -> dict:
+    """El último mes completo y, si también se vio entero, el anterior (para comparar). Lo de cada mes se calcula con
+    lo que sigue hoy en venta: las del mes anterior que se vendieron después no cuentan (una aproximación)."""
+    desde, hasta = mes_anterior(d["hasta"])
+    actual = datos_mes(d, desde, hasta)
+    a_desde, a_hasta = mes_anterior(desde)
+    anterior = datos_mes(d, a_desde, a_hasta) if actual["completo"] and a_desde >= BARRIDO_COMPLETO else None
+    return {**actual, "anterior": anterior, "es_semana_del_mes": es_semana_del_mes(d["hasta"]),
+            "min_comuna": MIN_COMUNA_MES}
+
+
 # ── El mercado de la semana ───────────────────────────────────────────────────────────────────────────────
 def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     """El mercado de los últimos 7 días en cifras, del mismo cálculo que el informe semanal. `vistos`: los barrios
@@ -254,7 +354,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
             "arriendos": d["arriendos"], "canon_mediano": d["canon_mediano"], "rentabilidad": d["rentab"],
         },
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
-        "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "bajadas": bajadas,
+        "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "mes": mes(d), "bajadas": bajadas,
         "captacion": captacion,
     })
 

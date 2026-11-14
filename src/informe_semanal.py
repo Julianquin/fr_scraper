@@ -394,7 +394,11 @@ def frases(d: dict) -> list[str]:
         f"<b>{_n(d['retiradas'])}</b> y <b>{_n(d['bajadas'])}</b> bajaron de precio"
         + (f" (rebaja mediana del {_pct(d['bajada_mediana'])})." if d["bajada_mediana"] else "."),
     ]
-    if len(t):
+    b = d.get("barrio_semana")
+    if not d.get("mensual", True) and b:
+        lineas.append(f"El barrio de la semana es <b>{html.escape(PREFIJO.sub('', b['barrio']))}</b> "
+                      f"({html.escape(b['comuna_nombre'])}): {_mill(b['precio_m2'])}/m², {_puesto(b)}.")
+    elif len(t):
         cara, rent = t.index[0], t["rentab"].dropna()
         lineas.append(
             f"La zona más cara por m² es <b>{html.escape(nombres[cara])}</b> "
@@ -517,12 +521,106 @@ def _por_zona_html(d: dict, periodo: str) -> str:
   vacancia; «—»: menos de {MIN_ARRIENDOS} arriendos.</p>"""
 
 
+def _puesto(b: dict) -> str:
+    p, de = b["puesto_m2"], b["de"]
+    if p == 1:
+        return f"el más caro de los {de} barrios con al menos 15 viviendas en venta"
+    if p == de:
+        return f"el más económico de los {de} barrios con al menos 15 viviendas en venta"
+    return (f"el {p}.º más caro" if p <= de / 2 else f"el {de - p + 1}.º más económico") + \
+        f" de {de} barrios con al menos 15 viviendas en venta"
+
+
+def _signo(x: float, dec: int = 1) -> str:
+    """Con signo (+0,4 %, −1,2 %); lo que redondea a cero, sin signo."""
+    v = round(x * 100, dec) + 0.0
+    return (f"{v:.{dec}f}%" if v == 0 else f"{v:+.{dec}f}%").replace(".", ",").replace("-", "−")
+
+
+def _barrio_html(d: dict) -> str:
+    """Las semanas que no son la del mes: un barrio en lugar del mapa y la tabla por comuna, que de una semana a otra
+    casi no cambian (src/contenido.py elige el barrio y rota entre todos)."""
+    b, div = d.get("barrio_semana"), d["division"]
+    aviso = (f"El mapa y la tabla por {div} salen en el primer informe de cada mes: de una semana a otra apenas "
+             f"cambian.")
+    if not b:
+        return f'<p class="nota">{aviso}</p>'
+    nom, com = html.escape(PREFIJO.sub("", b["barrio"])), html.escape(b["comuna_nombre"])
+    h = b.get("habitaciones")
+    hab = "" if h is None else (f"{h:.0f}" if float(h).is_integer() else f"{int(h)}–{int(h) + 1}") + " habitaciones · "
+    bajo = b["bajaron_mes"] / b["en_fincaraiz"] if b.get("en_fincaraiz") else None
+    renta = (f"Rentabilidad bruta típica: <b>{_pct(b['rentabilidad'], 1)}</b> (canon mediano {_miles(b['canon_m2'])}/m² "
+             f"con {_n(b['arriendos'])} arriendos; {d['ciudad']}: {_pct(b['ciudad_rentabilidad'], 1)})."
+             if b.get("rentabilidad") else
+             f"Hay menos de 15 arriendos publicados en el barrio: sin rentabilidad propia"
+             + (f" (la de su {div}: {_pct(b['comuna_rentabilidad'], 1)})." if b.get("comuna_rentabilidad") else "."))
+    filas = "".join(
+        f"<tr><td>{'<b>' if x['barrio'] == b['barrio'] else ''}{html.escape(PREFIJO.sub('', x['barrio']))}"
+        f"{'</b>' if x['barrio'] == b['barrio'] else ''}</td><td class='num'>{_n(x['viviendas'])}</td>"
+        f"<td class='num'>{_mill(x['precio_m2'])}</td></tr>" for x in b.get("su_comuna") or [])
+    tabla = (f'<p class="mini-tit">Los barrios de la {com} con al menos 15 viviendas en venta</p>'
+             f'<table class="mini"><thead><tr><th>Barrio</th><th class="num">Viviendas en venta</th>'
+             f'<th class="num">Precio mediano por m²</th></tr></thead><tbody>{filas}</tbody></table>'
+             if len(b.get("su_comuna") or []) >= 2 else "")
+    return f"""<h2>El barrio de la semana: {nom}</h2>
+<p class="sub">{com} · {_n(b['viviendas'])} viviendas en venta · {_puesto(b)} por precio del m²</p>
+<div class="tiles">
+  {_tile("Precio mediano por m²", _mill(b['precio_m2']), f"{com}: {_mill(b['comuna_precio_m2']) if b.get('comuna_precio_m2') else '—'} · {d['ciudad']}: {_mill(b['ciudad_precio_m2'])}")}
+  {_tile("Vivienda típica", f"{_n(b['area'])} m²", f"{hab}{_mill(b['precio'])} · la mitad entre {_mill(b['precio_p25'])} y {_mill(b['precio_p75'])}")}
+  {_tile("Llevan publicadas", f"{_n(b['dias_publicadas'])} días" if b.get('dias_publicadas') is not None else "—", "mediana de las que están en venta")}
+  {_tile("Bajaron de precio", _pct(bajo, 1) if bajo is not None else "—", f"en los últimos {b['dias_bajadas']} días (FincaRaíz)")}
+</div>
+<p>{renta} El estrato más común es el {b.get('estrato') or '—'}; el {_pct(b['apartamentos'])} son apartamentos.</p>
+{tabla}
+<p class="nota">Cada semana, un barrio distinto. {aviso}</p>"""
+
+
+def _mes_html(d: dict) -> str:
+    """La semana del mes: lo que se movió el mes anterior (src/contenido.py: mes)."""
+    m, div = d["mes"], d["division"]
+    if not m["completo"]:
+        return (f'<p class="nota">El resumen del mes empieza con el primer mes completo del barrido diario (desde el '
+                f'25 de octubre de 2026): {m["nombre"]} no se vio entero.</p>')
+    a = m.get("anterior")
+    antes = lambda k, f=_n: f" · {a['nombre']}: {f(a[k])}" if a and a.get(k) is not None else ""
+    fin = pd.Timestamp(m["hasta"])
+    filas = "".join(
+        f"<tr><td>{html.escape(c['nombre'])}</td><td class='num'>{_n(c['en_venta_todo'])}</td>"
+        f"<td class='num'>{_n(c['publicadas'])}</td><td class='num'>{_n(c['retiradas'])}</td>"
+        f"<td class='num'>{_pct(c['bajaron'] / c['en_venta_todo'], 1)}</td>"
+        f"<td class='num'>{_pct(c['subieron'] / c['en_venta_todo'], 1)}</td>"
+        f"<td class='num'>{_signo(c['cambio_mismas'])}</td></tr>"
+        for c in sorted(m["comunas"], key=lambda c: -c["en_venta_todo"]))
+    return f"""<div class="salto"></div>
+<p class="kicker">Informe semanal · {d['ciudad']} · el mes</p>
+<h1>El mes de {m['nombre']}</h1>
+<p class="periodo">Del 1 al {fin.day} de {m['nombre']} de {fin.year} · lo que entró, lo que salió y cuánto cambió el precio
+  de las mismas viviendas</p>
+<div class="tiles">
+  {_tile("Publicadas", _n(m['publicadas']), "viviendas nuevas en FincaRaíz" + antes('publicadas'))}
+  {_tile("Retiradas", _n(m['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse" + antes('retiradas'))}
+  {_tile("Bajaron de precio", _n(m['bajaron']), f"{_pct(m['bajaron'] / m['en_venta_todo'], 1)} de las {_n(m['en_venta_todo'])} en venta todo el mes" + antes('bajaron'))}
+  {_tile("Precio de las mismas viviendas", _signo(m['cambio_mismas']), f"{_n(m['subieron'])} subieron" + (f" · bajada mediana {_pct(m['bajada_mediana'], 1)}" if m.get('bajada_mediana') else "") + antes('cambio_mismas', _signo))}
+</div>
+<table class="mini"><thead><tr><th>{div.capitalize()}</th><th class="num">En venta<br>todo el mes</th>
+  <th class="num">Publicadas</th><th class="num">Retiradas</th><th class="num">Bajaron<br>de precio</th>
+  <th class="num">Subieron<br>de precio</th><th class="num">Precio de las<br>mismas viviendas</th></tr></thead>
+  <tbody>{filas}</tbody></table>
+<p class="nota">{_plural(div).capitalize()} con al menos {m['min_comuna']} viviendas en venta todo el mes. Bajaron o subieron: un
+  cambio de su precio pedido de al menos {_pct(op.BAJA_MIN)}. Precio de las mismas viviendas: el cambio medio del precio
+  pedido de las que estuvieron en venta todo el mes. No comparamos la mediana del m² con la del mes anterior: sube o
+  baja sobre todo según qué viviendas entran y salen (en tres semanas de noviembre, un 15–20 % de las {_plural(div)} y
+  barrios cambió más de un 3 % así, mientras el precio de las mismas viviendas no se movía).</p>"""
+
+
 def informe_html(d: dict) -> str:
     t, nombres, div = d["tabla"], d["nombres"], d["division"]
     periodo = _periodo(d["desde"], d["hasta"])
-    por_zona = _por_zona_html(d, periodo) if len(t) else (
+    mensual = d.get("mensual", True)
+    por_zona = (_por_zona_html(d, periodo) if mensual else _barrio_html(d)) if len(t) else (
         f'<p class="nota">Todavía no tenemos los polígonos oficiales de {_plural(div)} y barrios de {d["ciudad"]}: '
         f'el informe va sin mapa ni tabla por {div}, y los similares se buscan a menos de 1 km.</p>')
+    del_mes = _mes_html(d) if mensual and d.get("mes") else ""
     oportunidades = "".join(_oportunidad(r, i, d) for i, (_, r) in enumerate(d["sel"].iterrows(), 1))
     bajadas = "".join(
         f"<tr><td>{html.escape(op._ficha(r))}</td><td>{html.escape(_barrio(r, nombres))}</td>"
@@ -617,6 +715,7 @@ def informe_html(d: dict) -> str:
 <div class="resumen"><ul>{"".join(f"<li>{f}</li>" for f in frases(d))}</ul></div>
 
 {por_zona}
+{del_mes}
 
 <div class="salto"></div>
 <p class="kicker">Informe semanal · {d['ciudad']}</p>
@@ -661,10 +760,30 @@ def pie(d: dict) -> str:
             f"de precio, {_n(len(d['sel']))} oportunidades y {_n(d['captar_n'])} candidatas para captar.")
 
 
+def edicion(d: dict) -> dict:
+    """Añade a `d` lo que depende de la semana: la primera de cada mes lleva el mapa y la tabla por comuna y el mes
+    anterior (`mensual`, `mes`); las demás, el barrio de la semana. El barrio lo anota el canal cada madrugada en
+    contenido/barrios_semana.json: aquí solo se lee (sin anotar), así que es el mismo del carrusel."""
+    from src import contenido
+    d["mensual"] = contenido.es_semana_del_mes(d["hasta"])
+    d["mes"] = contenido.mes(d) if d["mensual"] and d["con_zonas"] else None
+    d["barrio_semana"] = None
+    if d["con_zonas"]:
+        try:
+            tb = contenido.por_barrio(d)
+            vistos = dict((contenido.leer(contenido.BARRIOS_SEMANA) or {}).get(d["ciudad"], {}))
+            elegido = contenido.elegir_barrio(tb, d["hasta"], d["precio_m2"], vistos)
+            d["barrio_semana"] = contenido.ficha_barrio(tb, *elegido, d) if elegido else None
+        except Exception as e:          # noqa: BLE001 — sin el barrio, el informe sale igual
+            print(f"⚠️  Sin barrio de la semana: {type(e).__name__}: {e}")
+    return d
+
+
 def generar(ciudad: str = "Cali", fecha: str | None = None) -> tuple[str, dict]:
     """Escribe el .html y el .pdf; devuelve la ruta del PDF y los datos."""
     from weasyprint import HTML
     d = datos(ciudad, fecha)
+    edicion(d)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     base = OUT_DIR / f"{zonas.slug(ciudad)}_{d['hasta']:%Y-%m-%d}"
     texto = informe_html(d)

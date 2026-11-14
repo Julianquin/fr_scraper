@@ -70,6 +70,9 @@ jobs:
           python -m src.almacen traer estado/historial/ --destino data
           python -m src.consolidar --raiz m2_venta --bajar      # el mismo inmueble en los dos portales
           python -m src.almacen traer osm/ --destino data        # informe: el entorno de cada oportunidad
+          # Informe: el barrio de la semana que ya eligió el canal esta madrugada (data/contenido/, donde lo busca
+          # src/contenido.leer sin claves de R2): así es el mismo del carrusel; sin él, se elige sin anotar
+          python -m src.almacen traer contenido/barrios_semana.json --destino data || echo "⚠️  Sin barrios_semana.json"
           # El modelo de precios y sus estimados sin ver (los calcula modelo.yml los domingos); sin ellos la alerta
           # sale igual, sin la línea del modelo en los avisos que el modelo ya vio
           mkdir -p data/modelos

@@ -210,6 +210,16 @@ def texto_pulso(ciudad: str, pie: str) -> str:
               f"📉 {n(d['bajadas'])} bajaron de precio" + (f" (mediana −{d['bajada_mediana']:.0%})" if d.get("bajada_mediana") else ""),
               f"💰 Precio pedido mediano: {op._m2(d['precio_m2'])} M/m²",
               f"💵 Rentabilidad bruta típica: {d['rentab']:.1%}".replace(".", ",")]
+    if contenido.es_semana_del_mes(d["hasta"]) and d["con_zonas"]:       # la primera semana del mes: el mes anterior
+        m = contenido.mes(d)
+        if m["completo"]:
+            v = round(m["cambio_mismas"] * 100, 1) + 0.0
+            cambio = (f"{v:.1f} %" if v == 0 else f"{v:+.1f} %").replace(".", ",").replace("-", "−")
+            lineas += ["", f"*El mes de {m['nombre']}*",
+                       f"🆕 {n(m['publicadas'])} publicadas · ❌ {n(m['retiradas'])} retiradas",
+                       f"📉 {n(m['bajaron'])} bajaron de precio y {n(m['subieron'])} subieron, de las "
+                       f"{n(m['en_venta_todo'])} en venta todo el mes",
+                       f"💰 El precio pedido de esas mismas viviendas: {cambio} en el mes"]
     lineas += ["", "_Precios pedidos en avisos públicos de vivienda en venta._", pie]
     return "\n".join(lineas).strip()
 
