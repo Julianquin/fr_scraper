@@ -190,9 +190,13 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     # Para captar: llevan tiempo y piden bastante más que sus comparables
     viejas = venta[venta["dias_pub"].between(*CAPTAR_DIAS)]
     cap = op.calificar(venta, viejas, hist) if len(viejas) else viejas
+    captar_comunas = pd.DataFrame(columns=["viejas", "sobre"])
     if len(cap):
         cap = cap[cap["descuento"].between(-CAPTAR_SOBRE[1], -CAPTAR_SOBRE[0]) & cap["motivo_descarte"].isna()
                   & (cap["confianza"] != "Baja")]
+        # En agregado (para lo público): de las que llevan 4–12 meses, cuántas piden de más, por comuna
+        captar_comunas = pd.DataFrame({"viejas": viejas.groupby("comuna").size(),
+                                       "sobre": cap.groupby("comuna").size()}).fillna(0).astype(int)
         cap = cap.sort_values("dias_pub", ascending=False).head(CAPTAR_FILAS).assign(n_total=len(cap))
         cap["quien"] = quien_publica(cap, avisos)
         cap = op.con_modelo(cap)                         # estimado de un modelo que no las vio
@@ -230,6 +234,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "bajo_umbral": int((ev["descuento"] >= UMBRAL).sum()) if len(ev) else 0,
         "sel": sel, "sel_bj": sel_bj,
         "captar_n": int(cap["n_total"].iloc[0]) if len(cap) else 0, "captar": cap,
+        "captar_comunas": captar_comunas, "viejas": len(viejas),
     }
 
 

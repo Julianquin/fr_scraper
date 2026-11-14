@@ -15,7 +15,8 @@ copia al canal lo aprobado (copyMessage: mismo texto y formato, sin «reenviado 
 
 Nada de la marca vive en el código ni en los registros (el repositorio es público): el canal sale del secret
 TELEGRAM_CANAL_ID y la línea de contacto de marca/config.json en R2 ({"contacto": "…"}). Estado en R2:
-canal/estado.json (qué se propuso, qué está en cola, qué se publicó).
+canal/estado.json (qué se propuso, qué está en cola, qué se publicó). Cada oportunidad propuesta guarda además su
+ficha en cifras (src/contenido.py), que pasa a «publicados» al aprobarla: de ahí salen las piezas de redes.
 
 Uso:
     python -m src.canal proponer [--ciudad Cali] [--no-enviar]   # --no-enviar: solo imprime las propuestas
@@ -32,6 +33,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src import contenido
 from src import oportunidades as op
 from src.config import BASE_DIR
 
@@ -277,40 +279,43 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     e = estado()
     pie = contacto()
     hoy = ahora_colombia()
-    propuestas: list[tuple[str, str, str | None]] = []          # (tipo, texto, id del aviso)
+    propuestas: list[tuple[str, str, str | None, dict | None]] = []     # (tipo, texto, id del aviso, ficha)
     notas = {}                                                   # id del aviso → aviso solo para el administrador
     for _, r in oportunidades_del_dia(ciudad, e["propuestos"]).iterrows():
-        propuestas.append(("oportunidad", texto_oportunidad(r, pie), str(r["id_inmueble"])))
-        if nota := bajada_brusca(r["id_inmueble"]):
+        nota = bajada_brusca(r["id_inmueble"])
+        propuestas.append(("oportunidad", texto_oportunidad(r, pie), str(r["id_inmueble"]),
+                           {**contenido.ficha(r), "bajada_brusca": nota is not None}))
+        if nota:
             notas[str(r["id_inmueble"])] = nota
     if hoy.day_of_week == 0:
-        propuestas.append(("pulso", texto_pulso(ciudad, pie), None))
+        propuestas.append(("pulso", texto_pulso(ciudad, pie), None, None))
     if hoy.day_of_week == 3 and (t := texto_bajadas(ciudad, pie)):
-        propuestas.append(("bajadas", t, None))
-    n_op = sum(t == "oportunidad" for t, _, _ in propuestas)
-    print(f"{hoy:%Y-%m-%d}: {n_op} oportunidades · {len(propuestas) - n_op} más ({[t for t, _, _ in propuestas]})")
+        propuestas.append(("bajadas", t, None, None))
+    n_op = sum(p[0] == "oportunidad" for p in propuestas)
+    print(f"{hoy:%Y-%m-%d}: {n_op} oportunidades · {len(propuestas) - n_op} más ({[p[0] for p in propuestas]})")
     if not enviar:
-        for _, texto, id_aviso in propuestas:
+        for _, texto, id_aviso, _ in propuestas:
             print("\n" + "─" * 60 + ("\n" + notas[id_aviso] if id_aviso in notas else "") + "\n" + texto)
-        return [(t, x) for t, x, _ in propuestas]
+        return [(p[0], p[1]) for p in propuestas]
     token, admin, _ = _credenciales(canal=False)
     from src.notificar import telegram
     cabecera = (f"*📝 Propuestas para el canal · {hoy.day}-{hoy.month:02d}*\n"
                 + (f"{n_op} oportunidad{'es' if n_op != 1 else ''} del día" if n_op else
                    "Hoy ninguna oportunidad cumple los criterios del canal")
-                + (" · y " + " y ".join(t for t, _, _ in propuestas if t != "oportunidad") if len(propuestas) > n_op else "")
+                + (" · y " + " y ".join(p[0] for p in propuestas if p[0] != "oportunidad") if len(propuestas) > n_op else "")
                 + (f".\nLas que apruebes salen a las 0{HORA_PUBLICAR}:00 de Colombia (si apruebas más tarde, al momento)."
                    if propuestas else "."))
     telegram(cabecera, token, admin)
-    for tipo, texto, id_aviso in propuestas:
+    for tipo, texto, id_aviso, cifras in propuestas:
         if id_aviso in notas:
             telegram(notas[id_aviso], token, admin)
         mensaje = enviar_propuesta(texto, token, admin)
-        e["propuestas"][str(mensaje)] = {"tipo": tipo, "id": id_aviso, "fecha": f"{hoy:%Y-%m-%d}"}
+        e["propuestas"][str(mensaje)] = {"tipo": tipo, "id": id_aviso, "fecha": f"{hoy:%Y-%m-%d}",
+                                         **({"ficha": cifras} if cifras else {})}
         if id_aviso:
             e["propuestos"][id_aviso] = f"{hoy:%Y-%m-%d}"
     guardar_estado(e)
-    return [(t, x) for t, x, _ in propuestas]
+    return [(p[0], p[1]) for p in propuestas]
 
 
 def aprobar(mensaje: int) -> None:
