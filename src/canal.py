@@ -202,20 +202,14 @@ def texto_pulso(ciudad: str, pie: str) -> str:
     meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
     periodo = f"{d['desde'].day}–{d['hasta'].day} {meses[d['hasta'].month - 1]}"
     n = lambda x: f"{x:,.0f}".replace(",", ".")
-    t = d["todas"]
-    t = t[[c <= "22" or c == "81" for c in t.index]].dropna(subset=["precio_m2"]) if len(t) else t
-    nombre = lambda c: d["nombres"].get(c, c).replace("Comuna 0", "Comuna ").replace(
-        "Zona de expansión (corredor Cali–Jamundí)", "Zona de expansión")
+    # Sin la comuna más cara y la más barata: eran las mismas cada semana (FLUJOS.md: lo semanal cuenta lo que pasa;
+    # las comunas, una vez al mes y con su cambio)
     lineas = [f"*📈 El mercado de la semana · {ciudad}* ({periodo})", "",
               f"🏠 {n(d['viviendas'])} viviendas en venta",
               f"🆕 {n(d['publicadas'])} publicadas · ❌ {n(d['retiradas'])} retiradas",
               f"📉 {n(d['bajadas'])} bajaron de precio" + (f" (mediana −{d['bajada_mediana']:.0%})" if d.get("bajada_mediana") else ""),
               f"💰 Precio pedido mediano: {op._m2(d['precio_m2'])} M/m²",
               f"💵 Rentabilidad bruta típica: {d['rentab']:.1%}".replace(".", ",")]
-    if len(t) >= 2:
-        caro, barato = t["precio_m2"].idxmax(), t["precio_m2"].idxmin()
-        lineas += ["", f"La más cara: {nombre(caro)} ({op._m2(t.loc[caro, 'precio_m2'])} M/m²) · "
-                       f"la más barata: {nombre(barato)} ({op._m2(t.loc[barato, 'precio_m2'])} M/m²)"]
     lineas += ["", "_Precios pedidos en avisos públicos de vivienda en venta._", pie]
     return "\n".join(lineas).strip()
 

@@ -235,6 +235,8 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "sel": sel, "sel_bj": sel_bj,
         "captar_n": int(cap["n_total"].iloc[0]) if len(cap) else 0, "captar": cap,
         "captar_comunas": captar_comunas, "viejas": len(viejas),
+        # Para las cifras por barrio de src/contenido.py
+        "inmuebles": con_precio, "venta": venta, "arriendos_ok": arr_ok,
     }
 
 
