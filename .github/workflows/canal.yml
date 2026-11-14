@@ -81,6 +81,9 @@ jobs:
             aprobar)  python -m src.canal aprobar --mensaje "$MENSAJE" ;;
             publicar) python -m src.canal publicar ;;
           esac
+      - name: Cifras de la semana para las piezas de redes (contenido/semana.json, sin marca)
+        if: env.ACCION == 'proponer'
+        run: python -m src.contenido semana
       - name: Avisar al administrador si algo falló
         if: failure()
         run: >-
