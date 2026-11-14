@@ -38,7 +38,9 @@ export default {
     const mensaje = clic.message.message_id;
     let etiqueta, aviso;
     if (clic.data === "pub") {
-      etiqueta = "✅ Aprobada · sale a las 07:00 (o ya, si es más tarde)";
+      // Lo mismo que decide src/canal.py aprobar: antes de las 07:00 de Colombia, a la cola; después, al momento
+      const horaColombia = (new Date().getUTCHours() + 24 - 5) % 24;
+      etiqueta = horaColombia >= 7 ? "✅ Publicada en el canal" : "✅ Aprobada · sale a las 07:00 (Colombia)";
       aviso = "Aprobada";
       ctx.waitUntil(lanzar(env, { accion: "aprobar", mensaje: String(mensaje) }));
     } else if (clic.data === "des") {
