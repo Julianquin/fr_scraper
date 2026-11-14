@@ -210,9 +210,11 @@ def copiar_al_canal(mensaje_id: int, token: str, admin: str, canal: str) -> None
                                                        "message_id": mensaje_id}).encode())
 
 
-def _credenciales() -> tuple[str, str, str]:
+def _credenciales(canal: bool = True) -> tuple[str, str, str | None]:
+    """Token del bot, chat del administrador y (para aprobar y publicar) el canal."""
     env = os.environ.get
-    faltan = [v for v in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_CHAT_ID", "TELEGRAM_CANAL_ID") if not env(v)]
+    necesarias = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ADMIN_CHAT_ID") + (("TELEGRAM_CANAL_ID",) if canal else ())
+    faltan = [v for v in necesarias if not env(v)]
     if faltan:
         raise SystemExit(f"❌ Faltan {', '.join(faltan)}")
     return env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_ADMIN_CHAT_ID"), env("TELEGRAM_CANAL_ID")
@@ -227,9 +229,9 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     propuestas: list[tuple[str, str, str | None]] = []          # (tipo, texto, id del aviso)
     for _, r in oportunidades_del_dia(ciudad, set(e["propuestos"])).iterrows():
         propuestas.append(("oportunidad", texto_oportunidad(r, pie), str(r["id_inmueble"])))
-    if hoy.dayofweek == 0:
+    if hoy.day_of_week == 0:
         propuestas.append(("pulso", texto_pulso(ciudad, pie), None))
-    if hoy.dayofweek == 3 and (t := texto_bajadas(ciudad, pie)):
+    if hoy.day_of_week == 3 and (t := texto_bajadas(ciudad, pie)):
         propuestas.append(("bajadas", t, None))
     n_op = sum(t == "oportunidad" for t, _, _ in propuestas)
     print(f"{hoy:%Y-%m-%d}: {n_op} oportunidades · {len(propuestas) - n_op} más ({[t for t, _, _ in propuestas]})")
@@ -237,7 +239,7 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
         for _, texto, _ in propuestas:
             print("\n" + "─" * 60 + "\n" + texto)
         return [(t, x) for t, x, _ in propuestas]
-    token, admin, _ = _credenciales()
+    token, admin, _ = _credenciales(canal=False)
     from src.notificar import telegram
     cabecera = (f"*📝 Propuestas para el canal · {hoy.day}-{hoy.month:02d}*\n"
                 + (f"{n_op} oportunidad{'es' if n_op != 1 else ''} del día" if n_op else
@@ -295,11 +297,14 @@ def main() -> None:
     pr = sub.add_parser("proponer")
     pr.add_argument("--ciudad", default="Cali")
     pr.add_argument("--no-enviar", action="store_true", help="solo imprime las propuestas")
+    pr.add_argument("--dias", type=int, help=f"ventana de publicación (por defecto {CRITERIOS['dias']}; para pruebas)")
+    pr.add_argument("--maximo", type=int, help=f"oportunidades como mucho (por defecto {CRITERIOS['maximo']})")
     ap = sub.add_parser("aprobar")
     ap.add_argument("--mensaje", type=int, required=True)
     sub.add_parser("publicar")
     a = p.parse_args()
     if a.accion == "proponer":
+        CRITERIOS.update({k: v for k, v in (("dias", a.dias), ("maximo", a.maximo)) if v})
         proponer(a.ciudad, not a.no_enviar)
     elif a.accion == "aprobar":
         aprobar(a.mensaje)
