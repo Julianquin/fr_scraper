@@ -192,7 +192,8 @@ def bajadas(df: pd.DataFrame, hist: pd.DataFrame, desde: pd.Timestamp,
     b = b.sort_values("fecha").drop_duplicates("id_inmueble", keep="last")
     b = b.assign(baja=1 - b["precio_despues"] / b["precio_antes"], al_republicar=b["evento"] == "republicado")
     b = b[b["baja"].between(BAJA_MIN, 0.5)][["id_inmueble", "fecha", "precio_antes", "baja", "al_republicar"]]
-    candidatos = df.merge(b.rename(columns={"fecha": "fecha_baja"}), on="id_inmueble")
+    # `fecha_baja` aquí es el día de la bajada de precio; la del aviso (día de retiro, vacía en los activos) estorbaría
+    candidatos = df.drop(columns="fecha_baja", errors="ignore").merge(b.rename(columns={"fecha": "fecha_baja"}), on="id_inmueble")
     return calificar(df, candidatos, hist)
 
 
@@ -336,7 +337,7 @@ def _m2(x: float) -> str:
 
 def _ficha(r: pd.Series) -> str:
     hab = f" · {r['Habitaciones']:.0f} hab" if pd.notna(r["Habitaciones"]) else ""
-    banos = f" · {r['Baños']:.0f} baños" if pd.notna(r["Baños"]) else ""
+    banos = f" · {r['Baños']:.0f} baño{'s' if r['Baños'] != 1 else ''}" if pd.notna(r["Baños"]) else ""
     return f"{r['Tipo_propiedad']} · {r['Area_m2']:.0f} m²{hab}{banos}"
 
 
