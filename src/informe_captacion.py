@@ -361,7 +361,11 @@ def estimar(f: pd.Series, gemelos: list[str] | None = None) -> dict:
     FincaRaíz sí: entonces, el estimado sin ver del gemelo (por m², al área de `f`). `visto`: True si no hay forma de
     dar uno sin ver (sin la tabla de estimados sin ver): el informe lo advierte."""
     from src.modelo_precio import estimado_por_id, estimar_sin_trampa, preparar
-    r = estimar_sin_trampa(preparar(pd.DataFrame([f]))).iloc[0]
+    fila = pd.DataFrame([f])
+    if f.get("portal") == "Metrocuadrado":              # E8.4: con el vocabulario de FincaRaíz, como al entrenar
+        from src.modelo_precio import armonizar_m2
+        fila = armonizar_m2(fila)
+    r = estimar_sin_trampa(preparar(fila)).iloc[0]
     m = {"estimado": float(r["precio_estimado"]), "p10": float(r["precio_p10"]), "p90": float(r["precio_p90"]),
          "pm2": float(r["pm2_estimado"]), "confianza": r["confianza"], "visto": not r["sin_ver"]}
     if f.get("portal") == "Metrocuadrado":

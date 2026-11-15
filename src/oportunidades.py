@@ -301,9 +301,14 @@ def con_modelo(sel: pd.DataFrame) -> pd.DataFrame:
         return sel
     from src.consolidar import rutas
     ids = set(sel["id_inmueble"].astype(str))
-    raices = ["venta"] + (["m2_venta"] if any("-M" in i for i in ids) else [])   # E8.1: las de Metrocuadrado
-    partes = [x[x["id_inmueble"].astype(str).isin(ids)] for r in raices
-              if (ruta := rutas(r).avisos).exists() for x in [pd.read_parquet(ruta)]]
+    from src.modelo_precio import armonizar_m2
+    partes = []
+    for r in ["venta", "m2_venta"]:                     # E8.1: también las de Metrocuadrado
+        if (ruta := rutas(r).avisos).exists():
+            x = pd.read_parquet(ruta)
+            x = x[x["id_inmueble"].astype(str).isin(ids)]
+            if len(x):
+                partes.append(armonizar_m2(x) if r == "m2_venta" else x)   # E8.4: su vocabulario, el de FincaRaíz
     a = pd.concat(partes, ignore_index=True).drop_duplicates("id_inmueble") if partes else pd.DataFrame()
     if a.empty:                                 # ninguno en los estados del barrido
         return sel

@@ -4,7 +4,11 @@ Modelo de estimación de precios de vivienda (bloque E7): preparación de datos 
 el CI (.github/workflows/modelo.yml: los domingos tras el barrido; modelo y ficha a R2, modelos/).
 
 Datos: los avisos de venta ACTIVOS de estado/avisos (src/consolidar.py), solo vivienda
-(apartamento, apartaestudio, casa). Son precios pedidos, no de cierre.
+(apartamento, apartaestudio, casa), y desde el 15-nov (E8.4) los de los inmuebles que solo están en Metrocuadrado
+(uno por inmueble, con su ubicación; `armonizar_m2` los pasa al vocabulario de FincaRaíz y les pone la marca interna
+`fuente_m2`). Medido el 15-nov con 39.178 inmuebles que ningún modelo vio: error mediano 11,5 → 10,7 % (los de
+FincaRaíz 10,8 → 10,6 %; los que solo están en Metrocuadrado 12,9 → 11,0 %; Cali 11,9 → 11,4 %) y el rango p10–p90
+contiene el 80,0 % (antes el 77,3 %). Son precios pedidos, no de cierre.
 
 Objetivo: log(precio por m²). El precio estimado es exp(predicción) × área.
 
@@ -29,6 +33,7 @@ Uso (en un notebook):
 from __future__ import annotations
 import json
 import warnings
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -38,25 +43,107 @@ from sklearn.model_selection import GroupShuffleSplit, KFold
 from src.config import BASE_DIR
 
 AVISOS = BASE_DIR / "data" / "estado" / "avisos.parquet"   # actualizar: python -m src.consolidar --bajar
+AVISOS_M2 = BASE_DIR / "data" / "estado_m2_venta" / "avisos.parquet"   # --raiz m2_venta --bajar
 TIPOS = ["Apartamento", "Apartaestudio", "Casa"]
 SEMILLA = 0
 NUMERICAS = ["m2", "m2_construido", "m2_terreno", "habitaciones", "banos", "parqueaderos", "piso",
-             "latitud", "longitud", "n_imagenes"]
+             "latitud", "longitud", "n_imagenes", "fuente_m2"]
 CATEGORICAS = ["tipo", "estado", "departamento"]          # pocas categorías: van tal cual
 ALTA_CARDINALIDAD = ["ciudad", "barrio", "zona", "comuna"]  # muchas: codificadas por su precio medio
 N_AMENIDADES = 40
 
 
-def cargar(ruta: Path = AVISOS) -> pd.DataFrame:
-    """Avisos de vivienda activos, con `es_proyecto`."""
+def cargar(ruta: Path = AVISOS, con_m2: bool = True) -> pd.DataFrame:
+    """Avisos de vivienda activos, con `es_proyecto`; con `con_m2`, también los inmuebles que solo están en
+    Metrocuadrado (si están su estado y el unificado en disco)."""
     a = pd.read_parquet(ruta)
-    return preparar(a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)])
+    a = a[(a["estado_aviso"] == "activo") & a["tipo"].isin(TIPOS)].assign(fuente_m2=0)
+    if con_m2:
+        m = _solo_m2()
+        if len(m):
+            a = pd.concat([a, m[a.columns.intersection(m.columns)]], ignore_index=True)
+            print(f"   modelo: {len(a) - len(m):,} avisos de FincaRaíz + {len(m):,} inmuebles que solo están en "
+                  "Metrocuadrado", flush=True)
+    return preparar(a)
+
+
+# ── Metrocuadrado (E8.4): las viviendas que solo están allí, con el vocabulario de FincaRaíz ──────────────
+# Amenidades de FincaRaíz (las que usa el modelo) ← sus equivalentes en Metrocuadrado
+AMENIDADES_M2 = {
+    "Trans. Público cercano": ["cercaTransportePublico"], "Zona Residencial": ["zonaResidencial"],
+    "Zona de lavandería": ["conZonaLavanderia"], "Supermercados / C.Comerciales": ["cercaSupermercado", "cercaCentroComercial"],
+    "Ascensor": ["ascensor"], "Cocina Integral": ["conCocinaIntegral_o"],
+    "Colegios / Universidades": ["cercaColegioUniversidad", "cercaAJardinesYColegios"], "Parques cercanos": ["cercaParque"],
+    "Baño Auxiliar": ["banosAuxiliar"], "Portería / Recepción": ["porteria", "recepcionLobby"],
+    "Vigilancia": ["conVigilancia-cb"], "Salón Comunal": ["conSalonComunal"], "Zonas Verdes": ["conZonasVerdes"],
+    "Parqueadero Visitantes": ["conParqueaderoVisitantes_o"], "Closet": ["walkingCloset"], "Balcón": ["conBalcon"],
+    "Zona Infantil": ["conZonaNinos"], "Vista panorámica": ["conVistaPanoramica"], "Gimnasio": ["conGimnasio"],
+    "Garaje(s)": ["conGarajeCubierto"], "Citófono": ["conCitofono"], "Estudio": ["conEstudioBiblioteca"],
+    "En conjunto cerrado": ["enConjuntoCerrado"], "Circuito cerrado de TV": ["conCircuitoCerradoTV"],
+    "Depósito / Bodega": ["conDeposito", "despensa"], "Piscina": ["conPiscina"], "Hall de Alcobas": ["conHall"],
+    "Cocina tipo Americano": ["conCocinaAmericana_o"],
+    "Canchas Deportivas": ["conCanchaFutbol", "conCanchaTenis", "conCanchaBasket", "conCanchaSquash"],
+    "Sobre vía principal": ["sobreViaPrincipal"], "Jardín": ["conJardin", "conJardinInterior"],
+    "Zona Comercial": ["zonaComercial"], "Sauna / Turco / Jacuzzi": ["conSauna", "conJacuzzi", "conTurco"],
+    "Cuarto de servicio": ["conCuartoServicio"], "Chimenea": ["conChimenea"], "Terraza": ["terrazaRooftop", "conTerraza"],
+}
+_DE_M2 = {m: f for f, ms in AMENIDADES_M2.items() for m in ms}
+ANTIGUEDAD_M2 = {"Entre 0 y 5 años": 2, "Entre 5 y 10 años": 3, "Entre 10 y 20 años": 3, "Más de 20 años": 4}
+
+
+@lru_cache(maxsize=1)
+def _departamentos() -> dict:
+    """Ciudad (canónica) → departamento, como lo escribe FincaRaíz (Metrocuadrado no lo trae)."""
+    from src import zonas
+    a = pd.read_parquet(AVISOS, columns=["ciudad", "departamento"]).dropna()
+    return a.assign(c=a["ciudad"].map(zonas.canonica)).groupby("c")["departamento"].agg(lambda s: s.mode().iloc[0]).to_dict()
+
+
+def armonizar_m2(m: pd.DataFrame) -> pd.DataFrame:
+    """Filas del estado de Metrocuadrado con el vocabulario de FincaRaíz, para entrenar y para estimar: amenidades
+    con sus nombres, antigüedad en sus códigos, ciudad canónica y su departamento, zona «Zona norte»,
+    `fecha_publicacion` = el día de su alta (1900 si el barrido lo encontró ya publicado: el portal no da la fecha),
+    ubicación corregida y `fuente_m2` = 1: una marca interna para que el modelo corrija lo que el vocabulario no
+    iguala (nunca se enseña)."""
+    from src import oportunidades as op, zonas
+    m = m.copy()
+    m["ciudad"] = m["ciudad"].map(zonas.canonica).fillna(m["ciudad"])
+    m["departamento"] = m["ciudad"].map(_departamentos())
+    m["zona"] = m["zona"].where(m["zona"].isna(), "Zona " + m["zona"].astype(str).str.lower())
+    m["antiguedad"] = m["antiguedad_texto"].map(ANTIGUEDAD_M2) if "antiguedad_texto" in m else np.nan
+    m["amenidades"] = m["amenidades"].fillna("").astype(str).str.split("|").map(
+        lambda l: "|".join(sorted({_DE_M2[x] for x in l if x in _DE_M2})))
+    altas = op.altas_m2()
+    m["fecha_publicacion"] = m["id_inmueble"].astype(str).map(altas).dt.strftime("%Y-%m-%d").fillna("1900-01-01")
+    m = zonas.corregir_ubicacion(m, solo_imposibles=True)
+    return m.assign(fuente_m2=1)
+
+
+def _solo_m2() -> pd.DataFrame:
+    """Viviendas activas de Metrocuadrado de todo el país cuyo inmueble no está en FincaRaíz (estado unificado), una
+    por inmueble (la más barata) y con ubicación, armonizadas. Vacío si falta su estado o el unificado."""
+    from src.unificar import ESTADO
+    if not AVISOS_M2.exists() or not (ESTADO / "avisos.parquet").exists():
+        print("   modelo: sin el estado de Metrocuadrado o el unificado: solo FincaRaíz", flush=True)
+        return pd.DataFrame()
+    ids = pd.read_parquet(ESTADO / "avisos.parquet", columns=["clave", "id_unificado"]).set_index("clave")["id_unificado"]
+    fr = pd.read_parquet(AVISOS, columns=["id_inmueble", "estado_aviso"])
+    con_fr = set(("fincaraiz:" + fr.loc[fr["estado_aviso"] == "activo", "id_inmueble"].astype(str)).map(ids).dropna())
+    m = pd.read_parquet(AVISOS_M2)
+    m = m[(m["estado_aviso"] == "activo") & m["tipo"].isin(TIPOS)].copy()
+    m["_g"] = ("metrocuadrado:" + m["id_inmueble"].astype(str)).map(ids)
+    m = m[m["_g"].notna() & ~m["_g"].isin(con_fr)]
+    m = m.assign(_p=pd.to_numeric(m["precio"], errors="coerce")).sort_values("_p").drop_duplicates("_g")
+    m = armonizar_m2(m.drop(columns=["_g", "_p"]))
+    return m[pd.to_numeric(m["latitud"], errors="coerce").notna() & pd.to_numeric(m["longitud"], errors="coerce").notna()]
 
 
 def preparar(a: pd.DataFrame) -> pd.DataFrame:
     """Filas del estado del barrido (o una ficha con sus columnas) listas para el modelo: `es_proyecto` y
     sin vacíos en el texto. La usan el entrenamiento, la alerta y el informe de captación."""
     a = a.copy()
+    if "fuente_m2" not in a:                   # FincaRaíz (las de Metrocuadrado vienen de armonizar_m2)
+        a["fuente_m2"] = 0
     etiquetas = a["etiquetas"].fillna("[]").map(lambda s: json.loads(s) if isinstance(s, str) else [])
     a["es_proyecto"] = etiquetas.map(lambda l: "Proyecto" in l or "Unidad de proyecto" in l)
     for c in ("amenidades", "descripcion"):
@@ -112,9 +199,12 @@ def variables(a: pd.DataFrame, amenidades: list[str] | None = None) -> tuple[pd.
 
 
 def grupos(a: pd.DataFrame) -> pd.Series:
-    """Mismo inmueble = mismas coordenadas (4 decimales), área y habitaciones."""
-    return (a["latitud"].round(4).astype(str) + "|" + a["longitud"].round(4).astype(str) + "|"
-            + a["m2"].astype(str) + "|" + a["habitaciones"].astype(str))
+    """Mismo inmueble = mismas coordenadas (4 decimales), área y habitaciones. Lo que falta, «nan» (con pandas 3 el
+    texto de un vacío es vacío, y un grupo vacío rompe la partición)."""
+    num = lambda c: pd.to_numeric(a[c], errors="coerce")
+    t = lambda x: x.astype(str).fillna("nan")
+    return (t(num("latitud").round(4)) + "|" + t(num("longitud").round(4)) + "|" + t(num("m2")) + "|"
+            + t(num("habitaciones")))
 
 
 def particion_grupos(grupo: pd.Series, prueba: float = 0.2, semilla: int = SEMILLA) -> tuple[np.ndarray, np.ndarray]:
