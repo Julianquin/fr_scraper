@@ -104,11 +104,13 @@ def historial(hasta: pd.Timestamp) -> pd.DataFrame:
 
 
 def _comparables(c: pd.Series, pool: pd.DataFrame, minimo: int = MIN_COMPS) -> tuple[pd.DataFrame, str | None]:
-    """Comparables de `c` y el nivel donde se encontraron ('barrio' | '1 km' | 'comuna').
+    """Comparables de `c` y el nivel donde se encontraron ('barrio' | '1 km' | 'comuna'). Sin el propio inmueble
+    publicado por otra inmobiliaria o en otro portal: si el pool y `c` traen `_grupo` (registro único; `mercado`).
     Si ningún nivel alcanza `minimo` devuelve los del barrio (para diagnóstico) y None.
     También busca arriendos comparables a un aviso de venta (src/rentabilidad.py)."""
     base = pool[(pool["Tipo_propiedad"] == c["Tipo_propiedad"])
                 & (pool["id_inmueble"] != c["id_inmueble"])
+                & ((pool["_grupo"] != c["_grupo"]) if "_grupo" in pool and pd.notna(c.get("_grupo")) else True)
                 & pool["Area_m2"].between(c["Area_m2"] * (1 - TOL_AREA), c["Area_m2"] * (1 + TOL_AREA))]
     if pd.notna(c["Habitaciones"]):
         base = base[(base["Habitaciones"] - c["Habitaciones"]).abs() <= 1]
@@ -243,7 +245,30 @@ def solo_metrocuadrado(ciudad: str, avisos: pd.DataFrame | None = None) -> pd.Da
         m2 = cargar(ciudad, viz_map.limpiar_ciudad(m2, ciudad))
     except ValueError:                                              # ninguna válida en la ciudad
         return pd.DataFrame()
-    return m2.assign(portal="Metrocuadrado")
+    return m2.assign(portal="Metrocuadrado", _grupo=("metrocuadrado:" + m2["id_inmueble"].astype(str)).map(
+        avisos.set_index("clave")["id_unificado"]))
+
+
+def mercado(ciudad: str, df: pd.DataFrame, avisos: pd.DataFrame | None = None
+            ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """El mercado entero, un solo grupo de similares (E8.3): (pool, df, m2). `df`: los avisos de FincaRaíz de
+    `cargar`, que vuelven con `portal` y su inmueble (`_grupo`); `m2`: los que solo están en Metrocuadrado; `pool`:
+    los dos juntos, un aviso por inmueble entre portales. Medido el 15-nov (4 semanas de Cali): más viviendas con
+    similares (85,5 → 87,6 %) y en su barrio (59 → 64 %), 37 similares de mediana en vez de 30, confianza alta del 47
+    al 53 %; en los gemelos de los dos portales, área y precio por m² iguales (mediana 1,000). Sin el estado de
+    Metrocuadrado, el pool es FincaRaíz."""
+    from src import unificar
+    if avisos is None:
+        try:
+            avisos = unificar.unificar(ciudad)[0]
+        except FileNotFoundError as e:
+            print(f"⚠️  Sin Metrocuadrado ({e})")
+            return df.assign(portal="FincaRaíz"), df.assign(portal="FincaRaíz"), pd.DataFrame()
+    grupo = avisos.set_index("clave")["id_unificado"]
+    df = df.assign(portal="FincaRaíz", _grupo=("fincaraiz:" + df["id_inmueble"].astype(str)).map(grupo))
+    m2 = solo_metrocuadrado(ciudad, avisos)
+    pool = pd.concat([df, m2], ignore_index=True) if len(m2) else df
+    return pool, df, m2
 
 
 def seleccionar_bajadas(bj: pd.DataFrame, excluir: pd.Index, top: int) -> pd.DataFrame:
@@ -633,23 +658,23 @@ def main() -> None:
     hasta = pd.Timestamp(args.fecha) if args.fecha else df["first_seen"].max()
     desde = hasta - pd.Timedelta(days=args.dias - 1)
     hist = historial(hasta)
-    df = df.assign(portal="FincaRaíz")
 
-    # E8.1: también los inmuebles que solo están en Metrocuadrado, comparados con los similares de FincaRaíz
-    avisos, m2 = None, pd.DataFrame()
+    # Un solo mercado (E8.1–E8.3): también los inmuebles que solo están en Metrocuadrado, y los similares de los dos
+    # portales (`pool`, sin gemelos)
+    avisos, pool, m2 = None, df.assign(portal="FincaRaíz"), pd.DataFrame()
     if FUENTE == "http":
         from src import unificar
         try:
             avisos = unificar.unificar(args.ciudad)[0]
-            m2 = solo_metrocuadrado(args.ciudad, avisos)
+            pool, df, m2 = mercado(args.ciudad, df, avisos)
         except FileNotFoundError as e:           # sin el estado de Metrocuadrado: la alerta sale sin él
             print(f"⚠️  Sin Metrocuadrado ({e})")
     nuevos = df[df["first_seen"].between(desde, hasta)]
     if len(m2):
         nuevos = pd.concat([nuevos, m2[m2["first_seen"].between(desde, hasta)]], ignore_index=True)
-    ev = calificar(df, nuevos, hist)
-    bj = pd.concat([bajadas(df, hist, desde, hasta)]
-                   + ([bajadas(m2, hist, desde, hasta, pool=df)] if len(m2) else []), ignore_index=True)
+    ev = calificar(pool, nuevos, hist)
+    bj = pd.concat([bajadas(df, hist, desde, hasta, pool=pool)]
+                   + ([bajadas(m2, hist, desde, hasta, pool=pool)] if len(m2) else []), ignore_index=True)
     if ev.empty and bj.empty:
         print("No hay avisos nuevos ni bajadas de precio en el periodo.")
         return
@@ -662,8 +687,8 @@ def main() -> None:
     sel = seleccionar(ev, args.umbral, args.top) if not ev.empty else ev
     sel_bj = seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) \
         if not bj.empty else bj
-    sel = enriquecer(sel, df, hasta, avisos)
-    sel_bj = enriquecer(sel_bj, df, hasta, avisos)
+    sel = enriquecer(sel, pool, hasta, avisos)
+    sel_bj = enriquecer(sel_bj, pool, hasta, avisos)
 
     bajo = ev[ev["descuento"] >= args.umbral] if not ev.empty else ev
     meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]

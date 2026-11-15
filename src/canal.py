@@ -127,31 +127,30 @@ def oportunidades_del_dia(ciudad: str, ya: dict[str, str]) -> pd.DataFrame:
       - «nueva»: publicada en los últimos CRITERIOS['dias'] días y nunca propuesta (sin republicados: no son nuevas);
       - «bajada»: bajó de precio en los últimos CRITERIOS['dias_bajada'] barridos (también al republicar), sea cual
         sea su antigüedad; vuelve a proponerse aunque ya se hubiera propuesto, si la bajada es posterior.
-    De FincaRaíz y de los inmuebles que solo están en Metrocuadrado (E8.1; columna `portal`): las suyas son «nuevas» si
-    aparecieron en los últimos días (el portal no publica la fecha). Todas se comparan con los similares de FincaRaíz,
-    así el descuento se mide igual. `ya`: {id del aviso: fecha en que se propuso}."""
+    Un solo mercado (E8.1–E8.3): FincaRaíz y los inmuebles que solo están en Metrocuadrado (las suyas son «nuevas» si
+    aparecieron en los últimos días: el portal no publica la fecha), comparados con los similares de los dos portales.
+    `ya`: {id del aviso: fecha en que se propuso}."""
     df, hasta, hist = _preparar(ciudad)
-    df = df.assign(portal="FincaRaíz")
-    m2 = op.solo_metrocuadrado(ciudad)
+    pool, df, m2 = op.mercado(ciudad, df)
     candidatas = []
 
     reciente = lambda d: d[(d["first_seen"] > hasta - pd.Timedelta(days=CRITERIOS["dias"]))
                            & ~d["id_inmueble"].isin(list(ya))]
     nuevos = pd.concat([reciente(df)] + ([reciente(m2)] if len(m2) else []), ignore_index=True)
-    ev = _cumplen(op.calificar(df, nuevos, hist)) if len(nuevos) else nuevos.iloc[:0]
+    ev = _cumplen(op.calificar(pool, nuevos, hist)) if len(nuevos) else nuevos.iloc[:0]
     if len(ev):
-        ev = op.enriquecer(ev.sort_values("descuento", ascending=False).head(10), df, hasta)
+        ev = op.enriquecer(ev.sort_values("descuento", ascending=False).head(10), pool, hasta)
         candidatas.append(ev[ev["rep_precio_antes"].isna()].assign(fuente="nueva"))
 
     ultimo = _ultimo_barrido()
     desde_bj = ultimo - pd.Timedelta(days=CRITERIOS["dias_bajada"] - 1)
-    bj = pd.concat([op.bajadas(df, hist, desde_bj, ultimo)]
-                   + ([op.bajadas(m2, hist, desde_bj, ultimo, pool=df)] if len(m2) else []), ignore_index=True)
+    bj = pd.concat([op.bajadas(df, hist, desde_bj, ultimo, pool=pool)]
+                   + ([op.bajadas(m2, hist, desde_bj, ultimo, pool=pool)] if len(m2) else []), ignore_index=True)
     if len(bj):
         bj = bj[[ya.get(i, "") < str(f)[:10] for i, f in zip(bj["id_inmueble"], bj["fecha_baja"])]]   # bajada posterior
         bj = _cumplen(bj)
         if len(bj):
-            candidatas.append(op.enriquecer(bj.sort_values("descuento", ascending=False).head(10), df, hasta)
+            candidatas.append(op.enriquecer(bj.sort_values("descuento", ascending=False).head(10), pool, hasta)
                               .assign(fuente="bajada"))
 
     if not candidatas:
@@ -233,18 +232,17 @@ def texto_pulso(ciudad: str, pie: str) -> str:
 
 
 def texto_bajadas(ciudad: str, pie: str) -> str | None:
-    """Las mayores bajadas de precio de la semana (los jueves), con dónde quedan frente a sus similares. De FincaRaíz y
-    de los inmuebles que solo están en Metrocuadrado (E8.1), comparadas con los similares de FincaRaíz."""
+    """Las mayores bajadas de precio de la semana (los jueves), con dónde quedan frente a sus similares. Un solo
+    mercado: los dos portales, comparadas con los similares de los dos (E8.1–E8.3)."""
     df, hasta, hist = _preparar(ciudad)
-    df = df.assign(portal="FincaRaíz")
-    m2 = op.solo_metrocuadrado(ciudad)
+    pool, df, m2 = op.mercado(ciudad, df)
     desde = hasta - pd.Timedelta(days=6)
-    bj = pd.concat([op.bajadas(df, hist, desde, hasta)]
-                   + ([op.bajadas(m2, hist, desde, hasta, pool=df)] if len(m2) else []), ignore_index=True)
+    bj = pd.concat([op.bajadas(df, hist, desde, hasta, pool=pool)]
+                   + ([op.bajadas(m2, hist, desde, hasta, pool=pool)] if len(m2) else []), ignore_index=True)
     bj = op.seleccionar_bajadas(bj, pd.Index([]), TOP_BAJADAS) if len(bj) else bj
     if bj.empty:
         return None
-    bj = op.enriquecer(bj, df, hasta)
+    bj = op.enriquecer(bj, pool, hasta)
     bloques = [f"*📉 Bajaron de precio esta semana · {ciudad}*"]
     for _, r in bj.iterrows():
         bloques.append("\n".join(x for x in [

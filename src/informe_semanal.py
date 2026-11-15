@@ -157,31 +157,30 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     # Oportunidades: el mismo cálculo de la alerta, con sus comparables, el otro portal y el entorno
     hist = op.historial(hasta)
     avisos, inm, _ = unificar.unificar(ciudad)
-    # Un solo mercado (E8.1–E8.2): las oportunidades y las bajadas, también de los inmuebles que solo están en
-    # Metrocuadrado (comparados con los similares de FincaRaíz); los movimientos de la semana, por inmueble en los dos
-    # portales (src/movimientos.py).
-    venta = venta.assign(portal="FincaRaíz")
-    m2 = op.solo_metrocuadrado(ciudad, avisos)
+    # Un solo mercado (E8.1–E8.3): las oportunidades, las bajadas y las de captar, también de los inmuebles que solo
+    # están en Metrocuadrado, comparadas con los similares de los dos portales (`pool`, sin gemelos); los movimientos
+    # de la semana, por inmueble en los dos portales (src/movimientos.py).
+    pool, venta, m2 = op.mercado(ciudad, venta, avisos)
     nuevos = venta[venta["first_seen"].between(desde, hasta)]
     a_evaluar = pd.concat([nuevos] + ([m2[m2["first_seen"].between(desde, hasta)]] if len(m2) else []),
                           ignore_index=True)
-    ev = op.calificar(venta, a_evaluar, hist) if len(a_evaluar) else a_evaluar
-    bj = pd.concat([op.bajadas(venta, hist, desde, hasta)]
-                   + ([op.bajadas(m2, hist, desde, hasta, pool=venta)] if len(m2) else []), ignore_index=True)
+    ev = op.calificar(pool, a_evaluar, hist) if len(a_evaluar) else a_evaluar
+    bj = pd.concat([op.bajadas(venta, hist, desde, hasta, pool=pool)]
+                   + ([op.bajadas(m2, hist, desde, hasta, pool=pool)] if len(m2) else []), ignore_index=True)
     mov = movimientos.periodo(ciudad, desde, hasta).loc["total"]
     arr = rentabilidad.arriendos(ciudad)
     ev = rentabilidad.estimar(ev, arr) if len(ev) else ev
     bj = rentabilidad.estimar(bj, arr) if len(bj) else bj
     sel = op.seleccionar(ev, UMBRAL, TOP) if len(ev) else ev
     sel_bj = op.seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) if len(bj) else bj
-    sel = op.enriquecer(sel, venta, hasta, avisos)          # modelo, 3 similares, Metrocuadrado, republicación
-    sel_bj = op.enriquecer(sel_bj, venta, hasta, avisos)
+    sel = op.enriquecer(sel, pool, hasta, avisos)           # modelo, 3 similares, el otro portal, republicación
+    sel_bj = op.enriquecer(sel_bj, pool, hasta, avisos)
     if len(sel):
         sel = sel.join(_entorno(sel))
 
     # Para captar: llevan tiempo y piden bastante más que sus comparables
     viejas = venta[venta["dias_pub"].between(*CAPTAR_DIAS)]
-    cap = op.calificar(venta, viejas, hist) if len(viejas) else viejas
+    cap = op.calificar(pool, viejas, hist) if len(viejas) else viejas
     captar_comunas = pd.DataFrame(columns=["viejas", "sobre"])
     if len(cap):
         cap = cap[cap["descuento"].between(-CAPTAR_SOBRE[1], -CAPTAR_SOBRE[0]) & cap["motivo_descarte"].isna()
