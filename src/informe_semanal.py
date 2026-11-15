@@ -5,8 +5,9 @@ historia (tendencias, días hasta venderse, acierto de la alerta) se irá sumand
 
   Página 1 · Pulso del mercado
     - viviendas en venta sin repetidos entre FincaRaíz y Metrocuadrado (src/unificar.py); publicadas,
-      retiradas y que bajaron de precio en la semana (de FincaRaíz: Metrocuadrado todavía no tiene una
-      semana de historia); arriendos de vivienda, canon y rentabilidad bruta típica
+      retiradas y que bajaron de precio en la semana, por inmueble en los dos portales (src/movimientos.py);
+      arriendos de vivienda, canon y rentabilidad bruta típica. En el informe no se nombra ningún portal: es un
+      solo mercado
     - el resumen en tres frases y el mapa de la ciudad por comuna o localidad, coloreado por precio por m²
   Página 2 · Por comuna o localidad (src/zonas.py, src/geo_ciudades.py; sin polígonos, la ciudad va sin ellas): viviendas en venta, precio mediano por m², días publicados (edad mediana de los
     avisos activos), canon mediano por m² y rentabilidad bruta típica (canon por m² × 12 ÷ precio por m²)
@@ -36,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from src.consolidar import AUSENCIAS_PARA_BAJA
-from src import oportunidades as op, rentabilidad, unificar, viz_map, zonas
+from src import movimientos, oportunidades as op, rentabilidad, unificar, viz_map, zonas
 from src.config import BASE_DIR
 
 OUT_DIR = BASE_DIR / "reports" / "informe"
@@ -60,24 +61,6 @@ ALREDEDORES = "#d9d8d2"                                             # fuera del 
 
 
 # ── Datos ─────────────────────────────────────────────────────────────────────
-
-def _retiradas(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> int:
-    """Viviendas de la ciudad con la baja confirmada en la semana (historial de src/consolidar.py), sin las que
-    ya volvieron a publicarse (una baja que reaparece no fue una retirada)."""
-    from src.consolidar import rutas
-    r = rutas("venta")
-    todos = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud", "estado_aviso"])
-    todos = todos[todos["estado_aviso"].eq("retirado")]
-    aqui = (zonas.en_area(ciudad, todos["latitud"], todos["longitud"], todos["ciudad"]) if ciudad in zonas.AREAS
-            else todos["ciudad"].map(zonas.canonica) == ciudad)
-    viv = todos.loc[aqui & todos["tipo"].isin(op.TIPOS), "id_inmueble"].astype(str)
-    dias = pd.date_range(desde, hasta).strftime("%Y-%m-%d")
-    partes = [pd.read_parquet(p) for d in dias if (p := r.historial / f"fecha={d}.parquet").exists()]
-    if not partes:
-        return 0
-    h = pd.concat(partes, ignore_index=True)
-    return int(((h["evento"] == "baja") & h["id_inmueble"].astype(str).isin(viv)).sum())
-
 
 def _por_comuna(inm: pd.DataFrame, arr: pd.DataFrame, venta: pd.DataFrame) -> pd.DataFrame:
     """Viviendas en venta, precio mediano por m², días publicados, canon mediano por m² y rentabilidad bruta."""
@@ -173,15 +156,24 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
 
     # Oportunidades: el mismo cálculo de la alerta, con sus comparables, el otro portal y el entorno
     hist = op.historial(hasta)
+    avisos, inm, _ = unificar.unificar(ciudad)
+    # Un solo mercado (E8.1–E8.2): las oportunidades y las bajadas, también de los inmuebles que solo están en
+    # Metrocuadrado (comparados con los similares de FincaRaíz); los movimientos de la semana, por inmueble en los dos
+    # portales (src/movimientos.py).
+    venta = venta.assign(portal="FincaRaíz")
+    m2 = op.solo_metrocuadrado(ciudad, avisos)
     nuevos = venta[venta["first_seen"].between(desde, hasta)]
-    ev = op.calificar(venta, nuevos, hist) if len(nuevos) else nuevos
-    bj = op.bajadas(venta, hist, desde, hasta)
+    a_evaluar = pd.concat([nuevos] + ([m2[m2["first_seen"].between(desde, hasta)]] if len(m2) else []),
+                          ignore_index=True)
+    ev = op.calificar(venta, a_evaluar, hist) if len(a_evaluar) else a_evaluar
+    bj = pd.concat([op.bajadas(venta, hist, desde, hasta)]
+                   + ([op.bajadas(m2, hist, desde, hasta, pool=venta)] if len(m2) else []), ignore_index=True)
+    mov = movimientos.periodo(ciudad, desde, hasta).loc["total"]
     arr = rentabilidad.arriendos(ciudad)
     ev = rentabilidad.estimar(ev, arr) if len(ev) else ev
     bj = rentabilidad.estimar(bj, arr) if len(bj) else bj
     sel = op.seleccionar(ev, UMBRAL, TOP) if len(ev) else ev
     sel_bj = op.seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) if len(bj) else bj
-    avisos, inm, _ = unificar.unificar(ciudad)
     sel = op.enriquecer(sel, venta, hasta, avisos)          # modelo, 3 similares, Metrocuadrado, republicación
     sel_bj = op.enriquecer(sel_bj, venta, hasta, avisos)
     if len(sel):
@@ -225,8 +217,9 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "avisos_m2": int((avisos["portal"] == "metrocuadrado").sum()),
         "solo_m2": int((inm["portales"] == "metrocuadrado").sum()),
         "en_los_dos": int((inm["portales"] == "fincaraiz+metrocuadrado").sum()),
-        "publicadas": len(nuevos), "retiradas": _retiradas(ciudad, desde, hasta),
-        "bajadas": len(bj), "bajada_mediana": float(bj["baja"].median()) if len(bj) else None,
+        "publicadas": int(mov["publicadas"]), "retiradas": int(mov["retiradas"]),
+        "bajadas": int(mov["bajadas"]),
+        "bajada_mediana": None if pd.isna(mov["bajada_mediana"]) else float(mov["bajada_mediana"]),
         "arriendos": len(arr_ok), "canon_mediano": float(arr_ok["Precio"].median()),
         "precio_m2": float(precio_m2), "rentab": float(12 * canon_m2 / precio_m2),
         "tabla": tabla, "todas": todas, "barrios": barrios, "puntos": con_precio[["Latitud", "Longitud", "comuna"]],
@@ -387,9 +380,9 @@ def mapa(valores: pd.Series, ciudad: str, puntos: pd.DataFrame, barrios: pd.Seri
 def frases(d: dict) -> list[str]:
     t, nombres = d["tabla"], d["nombres"]
     lineas = [
-        f"En {d['ciudad']} hay <b>{_n(d['viviendas'])} viviendas en venta</b> sin contar repetidos: "
-        f"{_n(d['avisos_fr'])} avisos en FincaRaíz y {_n(d['avisos_m2'])} en Metrocuadrado. "
-        f"{_n(d['en_los_dos'])} están en los dos portales y {_n(d['solo_m2'])} solo en Metrocuadrado.",
+        f"En {d['ciudad']} hay <b>{_n(d['viviendas'])} viviendas en venta</b> sin contar repetidos: una vivienda "
+        f"publicada en varios portales o por varias inmobiliarias cuenta una vez ({_n(d['avisos_fr'] + d['avisos_m2'])} "
+        f"avisos en total).",
         f"Esta semana se publicaron <b>{_n(d['publicadas'])}</b> viviendas, se confirmó el retiro de "
         f"<b>{_n(d['retiradas'])}</b> y <b>{_n(d['bajadas'])}</b> bajaron de precio"
         + (f" (rebaja mediana del {_pct(d['bajada_mediana'])})." if d["bajada_mediana"] else "."),
@@ -451,8 +444,8 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
         lineas.append(html.escape(op._mayus(rep)))
     if pd.notna(r.get("m2_precio")):
         dif = r["m2_precio"] / r["Precio"] - 1
-        cuanto = "mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'} que en FincaRaíz"
-        lineas.append(f'<b>También en Metrocuadrado:</b> {_mill(r["m2_precio"], 0)} ({cuanto}) · '
+        cuanto = "mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'}"
+        lineas.append(f'<b>También en otro portal:</b> {_mill(r["m2_precio"], 0)} ({cuanto}) · '
                       f'<a href="{html.escape(str(r["m2_url"]))}">ver ↗</a>')
     if pd.notna(r.get("canon_est")):
         lineas.append(f"Arriendo estimado {_mill(r['canon_est'])}/mes · rentabilidad bruta {_pct(r['rentab_bruta'], 1)} "
@@ -498,7 +491,7 @@ def _por_zona_html(d: dict, periodo: str) -> str:
                  if por_barrio else "")
     from src.mapa_ciudad import URL as URL_MAPAS
     enlace = (f'<p class="enlace"><a href="{URL_MAPAS}/{zonas.slug(d["ciudad"])}.html">Ver mapa interactivo ↗</a> '
-              f'todos los avisos de los dos portales, por barrio y con su enlace</p>')
+              f'todos los avisos, por barrio y con su enlace</p>')
     return f"""<h2>Precio por m² por {'barrio' if por_barrio else div}</h2>
 <div class="mapa-fila"><div>{svg_mapa}</div>
   <div class="mapa-txt">{enlace}<div class="leyenda">{leyenda}</div>{nota_mapa}
@@ -548,7 +541,7 @@ def _barrio_html(d: dict) -> str:
     nom, com = html.escape(PREFIJO.sub("", b["barrio"])), html.escape(b["comuna_nombre"])
     h = b.get("habitaciones")
     hab = "" if h is None else (f"{h:.0f}" if float(h).is_integer() else f"{int(h)}–{int(h) + 1}") + " habitaciones · "
-    bajo = b["bajaron_mes"] / b["en_fincaraiz"] if b.get("en_fincaraiz") else None
+    bajo = b["bajaron_mes"] / b["en_venta_mes"] if b.get("en_venta_mes") else None
     renta = (f"Rentabilidad bruta típica: <b>{_pct(b['rentabilidad'], 1)}</b> (canon mediano {_miles(b['canon_m2'])}/m² "
              f"con {_n(b['arriendos'])} arriendos; {d['ciudad']}: {_pct(b['ciudad_rentabilidad'], 1)})."
              if b.get("rentabilidad") else
@@ -568,7 +561,7 @@ def _barrio_html(d: dict) -> str:
   {_tile("Precio mediano por m²", _mill(b['precio_m2']), f"{com}: {_mill(b['comuna_precio_m2']) if b.get('comuna_precio_m2') else '—'} · {d['ciudad']}: {_mill(b['ciudad_precio_m2'])}")}
   {_tile("Vivienda típica", f"{_n(b['area'])} m²", f"{hab}{_mill(b['precio'])} · la mitad entre {_mill(b['precio_p25'])} y {_mill(b['precio_p75'])}")}
   {_tile("Llevan publicadas", f"{_n(b['dias_publicadas'])} días" if b.get('dias_publicadas') is not None else "—", "mediana de las que están en venta")}
-  {_tile("Bajaron de precio", _pct(bajo, 1) if bajo is not None else "—", f"en los últimos {b['dias_bajadas']} días (FincaRaíz)")}
+  {_tile("Bajaron de precio", _pct(bajo, 1) if bajo is not None else "—", f"en los últimos {b['dias_bajadas']} días")}
 </div>
 <p>{renta} El estrato más común es el {b.get('estrato') or '—'}; el {_pct(b['apartamentos'])} son apartamentos.</p>
 {tabla}
@@ -597,7 +590,7 @@ def _mes_html(d: dict) -> str:
 <p class="periodo">Del 1 al {fin.day} de {m['nombre']} de {fin.year} · lo que entró, lo que salió y cuánto cambió el precio
   de las mismas viviendas</p>
 <div class="tiles">
-  {_tile("Publicadas", _n(m['publicadas']), "viviendas nuevas en FincaRaíz" + antes('publicadas'))}
+  {_tile("Publicadas", _n(m['publicadas']), "viviendas nuevas, sin repetidos" + antes('publicadas'))}
   {_tile("Retiradas", _n(m['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse" + antes('retiradas'))}
   {_tile("Bajaron de precio", _n(m['bajaron']), f"{_pct(m['bajaron'] / m['en_venta_todo'], 1)} de las {_n(m['en_venta_todo'])} en venta todo el mes" + antes('bajaron'))}
   {_tile("Precio de las mismas viviendas", _signo(m['cambio_mismas']), f"{_n(m['subieron'])} subieron" + (f" · bajada mediana {_pct(m['bajada_mediana'], 1)}" if m.get('bajada_mediana') else "") + antes('cambio_mismas', _signo))}
@@ -699,10 +692,10 @@ def informe_html(d: dict) -> str:
 
 <p class="kicker">Informe semanal · vivienda en venta y arriendo</p>
 <h1>Pulso del mercado · {d['ciudad']}</h1>
-<p class="periodo">{periodo} · datos de FincaRaíz y Metrocuadrado</p>
+<p class="periodo">{periodo} · datos de los principales portales inmobiliarios</p>
 <div class="tiles">
   {_tile("Viviendas en venta", _n(d['viviendas']), f"sin repetidos · {_n(d['avisos_fr'] + d['avisos_m2'])} avisos")}
-  {_tile("Publicadas esta semana", _n(d['publicadas']), "viviendas nuevas en FincaRaíz")}
+  {_tile("Publicadas esta semana", _n(d['publicadas']), "viviendas nuevas, sin repetidos")}
   {_tile("Retiradas esta semana", _n(d['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse")}
   {_tile("Bajaron de precio", _n(d['bajadas']), f"rebaja mediana del {_pct(d['bajada_mediana'])}" if d['bajada_mediana'] else "")}
 </div>
@@ -720,7 +713,7 @@ def informe_html(d: dict) -> str:
 <div class="salto"></div>
 <p class="kicker">Informe semanal · {d['ciudad']}</p>
 <h1>Oportunidades de la semana</h1>
-<p class="periodo">{periodo} · de {_n(d['evaluadas'])} viviendas publicadas, {_n(d['con_comparables'])} tenían
+<p class="periodo">{periodo} · de {_n(d['evaluadas'])} viviendas nuevas, {_n(d['con_comparables'])} tenían
   suficientes similares para compararlas y {_n(d['bajo_umbral'])} estaban al menos un {_pct(UMBRAL)} por debajo. Estas
   son las más claras.</p>
 {oportunidades or '<p class="vacio">Esta semana no hubo oportunidades que pasaran los filtros.</p>'}
@@ -740,15 +733,15 @@ def informe_html(d: dict) -> str:
   más tiempo llevan:</p>
 {f'''<table class="mini"><thead><tr><th>Zona</th><th>Inmueble</th><th class="num">Precio</th>
   <th class="num">Frente a similares</th><th class="num">Frente al modelo</th><th class="num">Días publicada</th><th>Lo publica</th><th></th></tr></thead><tbody>{captar}</tbody></table>
-<p class="nota-c">Lo publica: «Particular» si Metrocuadrado lo marca así o si en FincaRaíz el anunciante tiene 1 o 2 avisos
-  y no es una empresa (una pista, no un dato del portal); «N anunciantes» si el mismo inmueble está con varios.</p>'''
+<p class="nota-c">Lo publica: «Particular» si el portal lo marca así o si el anunciante tiene 1 o 2 avisos y no es una
+  empresa (una pista, no un dato del portal); «N anunciantes» si el mismo inmueble está con varios.</p>'''
   if captar else '<p class="vacio">Esta semana no hay candidatas.</p>'}
-<p class="nota">Viviendas: apartamentos, apartaestudios y casas. Sin repetidos: un inmueble publicado en los dos
-  portales o por varias inmobiliarias cuenta una vez. Los movimientos de la semana (publicadas, retiradas, bajadas)
-  son de FincaRaíz. Arriendos: sin amoblados ni por días. Similares: mismo tipo y estrato, área ±30% y ±1 habitación,
+<p class="nota">Viviendas: apartamentos, apartaestudios y casas. Sin repetidos: un inmueble publicado en varios
+  portales o por varias inmobiliarias cuenta una vez, también en los movimientos de la semana (publicadas, retiradas,
+  bajadas); retirada: ya no está publicada en ningún portal. Arriendos: sin amoblados ni por días. Similares: mismo tipo y estrato, área ±30% y ±1 habitación,
   en el mismo barrio oficial (o a menos de 1 km, o en la {div}); el descuento compara el precio por m² con la mediana
   de esos similares. Entorno: OpenStreetMap. Es una estimación del precio de mercado, no un avalúo (Ley 1673 de
-  2013): verifica siempre el inmueble y su documentación. Fuente: avisos públicos de FincaRaíz y Metrocuadrado{
+  2013): verifica siempre el inmueble y su documentación. Fuente: avisos públicos de portales inmobiliarios{
   f"; {_plural(div)} y barrios: {d['fuente_zonas']}" if d["con_zonas"] and d["fuente_zonas"] else ""}.</p>
 </body></html>"""
 

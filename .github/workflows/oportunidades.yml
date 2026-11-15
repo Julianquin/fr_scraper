@@ -68,6 +68,9 @@ jobs:
           python -m src.consolidar --bajar
           python -m src.consolidar --raiz arriendo --bajar
           python -m src.almacen traer estado/historial/ --destino data
+          python -m src.almacen traer estado_m2_venta/historial/ --destino data   # altas y bajadas de Metrocuadrado (E8.1)
+          python -m src.almacen traer estado_unificado/avisos.parquet --destino data      # cada aviso con su inmueble: los
+          python -m src.almacen traer estado_unificado/inmuebles.parquet --destino data   # movimientos sin repetidos (E8.2)
           python -m src.consolidar --raiz m2_venta --bajar      # el mismo inmueble en los dos portales
           python -m src.almacen traer osm/ --destino data        # informe: el entorno de cada oportunidad
           # Informe: el barrio de la semana que ya eligió el canal esta madrugada (data/contenido/, donde lo busca

@@ -263,7 +263,7 @@ PAGINA = r"""<!doctype html>
   <div class="filtros" id="filtros"></div>
 </div>
 <div class="leyenda" id="leyenda"></div>
-<div class="pie">Avisos públicos de FincaRaíz y Metrocuadrado · no es un avalúo</div>
+<div class="pie">Avisos públicos de portales inmobiliarios · no es un avalúo</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 <script>
@@ -325,8 +325,12 @@ function popup(p) {
   const tipo = datos.tipos[p[2]], [pf, pm, m2, hab, uf, um] = p.slice(3);
   const precio = pf ?? pm, pm2 = precio && m2 ? ` · ${(precio / m2).toLocaleString("es-CO", {maximumFractionDigits: 1})} M/m²` : "";
   let h = `<b>${tipo}</b>${m2 ? " · " + m2 + " m²" : ""}${hab ? " · " + hab + " hab" : ""}<br><b>${mill(precio)}</b>${pm2}<br>`;
-  if (uf) h += `FincaRaíz ${pf && pm && pf !== pm ? mill(pf) + " " : ""}<a href="${C.dominios.fr}${uf}" target="_blank" rel="noopener">ver ↗</a><br>`;
-  if (um) h += `Metrocuadrado ${pf && pm && pf !== pm ? mill(pm) + " " : ""}<a href="${C.dominios.m2}${um}" target="_blank" rel="noopener">ver ↗</a>`;
+  // Un solo mercado: sin nombrar el portal. Si está en dos, el segundo enlace es «en otro portal» (y su precio si cambia)
+  const enlaces = [];
+  if (uf) enlaces.push([C.dominios.fr + uf, pf]);
+  if (um) enlaces.push([C.dominios.m2 + um, pm]);
+  h += enlaces.map(([u, pr], i) => `<a href="${u}" target="_blank" rel="noopener">${i ? "en otro portal" : "Ver aviso"}` +
+    `${pf && pm && pf !== pm ? " (" + mill(pr) + ")" : ""} ↗</a>`).join(" · ");
   if (p[9]) h += `<br><i style="color:#52514e">Ubicación aproximada: el centro del barrio que dice el aviso<br>(no traía coordenadas o caían en otro lugar)</i>`;
   return h;
 }
@@ -337,7 +341,7 @@ function pintar() {
   grupo.addLayers(visibles);
   document.getElementById("sub").innerHTML =
     `${visibles.length.toLocaleString("es-CO")} de ${marcas.length.toLocaleString("es-CO")} avisos activos · ` +
-    `${C.dos.toLocaleString("es-CO")} en los dos portales · ${C.fecha}` +
+    `${C.fecha}` +
     (C.area ? ` · <a href="${C.area.slug}.html">${C.area.nombre} ↗</a>` : "");
 }
 fetch(`datos/${C.slug}.json`).then(r => r.json()).then(d => {
@@ -356,7 +360,7 @@ fetch(`datos/${C.slug}.json`).then(r => r.json()).then(d => {
   marcas.forEach(m => cuenta[m.grupo] = (cuenta[m.grupo] || 0) + 1);
   document.getElementById("filtros").innerHTML = Object.keys(COLOR).filter(g => cuenta[g]).map(g =>
     `<label><input type="checkbox" value="${g}" checked><i style="background:${COLOR[g]}"></i>${g} · ${cuenta[g].toLocaleString("es-CO")}</label>`).join("") +
-    `<label><i style="background:#fff;border:2px solid #0b0b0b"></i>borde oscuro: en los dos portales</label>` +
+    `<label><i style="background:#fff;border:2px solid #0b0b0b"></i>borde oscuro: publicado en más de un portal</label>` +
     (d.puntos.some(p => p[9]) ? `<label><i style="background:#fff;border:2px dashed #52514e"></i>punteado: ubicación aproximada</label>` : "");
   document.querySelectorAll("#filtros input").forEach(i => i.addEventListener("change", pintar));
   pintar();
@@ -379,7 +383,7 @@ INDICE = r"""<!doctype html>
   a { color: var(--blue); font-weight: 600; text-decoration: none; } span { color: var(--ink-2); }
 </style></head><body><main>
 <h1>Mapas de mercado</h1>
-<p>Avisos activos de vivienda, comercio y lotes en FincaRaíz y Metrocuadrado · __FECHA__</p>
+<p>Avisos activos de vivienda, comercio y lotes en los principales portales · __FECHA__</p>
 <ul>__FILAS__</ul>
 </main></body></html>"""
 

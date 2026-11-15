@@ -184,8 +184,9 @@ def seleccionar(ev: pd.DataFrame, umbral: float, top: int) -> pd.DataFrame:
 
 
 def bajadas(df: pd.DataFrame, hist: pd.DataFrame, desde: pd.Timestamp,
-            hasta: pd.Timestamp) -> pd.DataFrame:
-    """Avisos de la ciudad que bajaron de precio en la semana (última bajada de cada uno)."""
+            hasta: pd.Timestamp, pool: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Avisos de `df` que bajaron de precio en la semana (última bajada de cada uno), comparados con `pool` (por
+    defecto, los mismos `df`; para los de Metrocuadrado, los de FincaRaíz)."""
     ev = _eventos()
     b = ev[ev["evento"].isin(["cambio_precio", "republicado"]) & (ev["precio_despues"] < ev["precio_antes"])
            & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
@@ -194,7 +195,55 @@ def bajadas(df: pd.DataFrame, hist: pd.DataFrame, desde: pd.Timestamp,
     b = b[b["baja"].between(BAJA_MIN, 0.5)][["id_inmueble", "fecha", "precio_antes", "baja", "al_republicar"]]
     # `fecha_baja` aquí es el día de la bajada de precio; la del aviso (día de retiro, vacía en los activos) estorbaría
     candidatos = df.drop(columns="fecha_baja", errors="ignore").merge(b.rename(columns={"fecha": "fecha_baja"}), on="id_inmueble")
-    return calificar(df, candidatos, hist)
+    return calificar(df if pool is None else pool, candidatos, hist)
+
+
+# ── Metrocuadrado (E8.1): los inmuebles que solo están allí ───────────────────
+def altas_m2() -> pd.Series:
+    """Por aviso de Metrocuadrado, el día en que apareció (evento `alta` de su barrido). Los que el barrido encontró
+    ya publicados (`descubierto`: todo el primer día, el 28-oct, y lo que suma al crecer la cobertura) no tienen
+    fecha: el portal no publica cuándo se puso el aviso."""
+    from src.consolidar import rutas
+    partes = [pd.read_parquet(p, columns=["fecha", "id_inmueble", "evento"])
+              for p in sorted(rutas("m2_venta").historial.glob("fecha=*.parquet"))]
+    if not partes:
+        return pd.Series(dtype="datetime64[ns]")
+    h = pd.concat(partes, ignore_index=True)
+    h = h[h["evento"].isin(["alta", "descubierto"])].sort_values("fecha").drop_duplicates("id_inmueble")
+    h = h[h["evento"] == "alta"]
+    return pd.Series(pd.to_datetime(h["fecha"]).to_numpy(), index=h["id_inmueble"].astype(str))
+
+
+def solo_metrocuadrado(ciudad: str, avisos: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Las viviendas de Metrocuadrado cuyo inmueble no está en FincaRaíz (registro único, src/unificar.py), con el
+    formato de `cargar` y `portal` = "Metrocuadrado"; una por inmueble (la más barata si está repetida dentro del
+    portal), con la ubicación corregida del registro único. `first_seen`: el día de su `alta` (vacío si el barrido la
+    encontró ya publicada). `avisos`: el primero de lo que devuelve unificar.unificar(ciudad), si ya se tiene.
+    Vacío si no hay estado de Metrocuadrado. Las que están en los dos portales salen por FincaRaíz."""
+    from src import fuente_http, unificar, viz_map
+    if avisos is None:
+        try:
+            avisos = unificar.unificar(ciudad)[0]
+        except FileNotFoundError as e:
+            print(f"⚠️  Sin Metrocuadrado ({e})")
+            return pd.DataFrame()
+    con_fr = avisos.loc[avisos["portal"] == "fincaraiz", "id_unificado"]
+    solo = avisos[(avisos["portal"] == "metrocuadrado") & ~avisos["id_unificado"].isin(con_fr)]
+    solo = (solo.assign(_p=pd.to_numeric(solo["precio"], errors="coerce")).sort_values("_p")
+            .drop_duplicates("id_unificado").drop_duplicates("id_inmueble").set_index("id_inmueble"))
+    m2 = fuente_http.dataset_activo("m2_venta")
+    m2 = m2[m2["id_inmueble"].isin(solo.index)].copy()
+    if m2.empty:
+        return pd.DataFrame()
+    m2["Latitud"] = m2["id_inmueble"].map(solo["latitud"])        # la ubicación corregida (src/unificar.py)
+    m2["Longitud"] = m2["id_inmueble"].map(solo["longitud"])
+    m2["Ciudad"] = m2["Ciudad"].map(zonas.canonica)                # "Bogotá D.C." → "Bogotá"
+    m2["first_seen"] = m2["id_inmueble"].map(altas_m2())
+    try:
+        m2 = cargar(ciudad, viz_map.limpiar_ciudad(m2, ciudad))
+    except ValueError:                                              # ninguna válida en la ciudad
+        return pd.DataFrame()
+    return m2.assign(portal="Metrocuadrado")
 
 
 def seleccionar_bajadas(bj: pd.DataFrame, excluir: pd.Index, top: int) -> pd.DataFrame:
@@ -226,8 +275,13 @@ def con_modelo(sel: pd.DataFrame) -> pd.DataFrame:
         print(f"⚠️  Sin el precio del modelo: no está {ARCHIVO}")
         return sel
     from src.consolidar import rutas
-    a = pd.read_parquet(rutas("venta").avisos)
-    a = a[a["id_inmueble"].astype(str).isin(sel["id_inmueble"])].drop_duplicates("id_inmueble")
+    ids = set(sel["id_inmueble"].astype(str))
+    raices = ["venta"] + (["m2_venta"] if any("-M" in i for i in ids) else [])   # E8.1: las de Metrocuadrado
+    partes = [x[x["id_inmueble"].astype(str).isin(ids)] for r in raices
+              if (ruta := rutas(r).avisos).exists() for x in [pd.read_parquet(ruta)]]
+    a = pd.concat(partes, ignore_index=True).drop_duplicates("id_inmueble") if partes else pd.DataFrame()
+    if a.empty:                                 # ninguno en los estados del barrido
+        return sel
     a = zonas.corregir_ubicacion(a, solo_imposibles=True)
     p = estimar_sin_trampa(preparar(a))
     p.index = a["id_inmueble"].astype(str).to_numpy()
@@ -389,12 +443,12 @@ def _comp_txt(c: pd.Series) -> str:
 
 
 def _otro_portal_txt(r: pd.Series) -> str | None:
-    """'también en Metrocuadrado a $430 M (2% más)'; None si no está en Metrocuadrado."""
+    """'también en otro portal a $430 M (2% más)'; None si no lo está. Sin nombrar el portal: un solo mercado."""
     if pd.isna(r.get("m2_precio")):
         return None
     dif = r["m2_precio"] / r["Precio"] - 1
     cuanto = "el mismo precio" if abs(dif) < .005 else f"{abs(dif):.0%} {'más' if dif > 0 else 'menos'}"
-    return f"también en Metrocuadrado a {_millones(r['m2_precio'])} ({cuanto})"
+    return f"también en otro portal a {_millones(r['m2_precio'])} ({cuanto})"
 
 
 def _republicado_txt(r: pd.Series, hasta: pd.Timestamp, fmt=None) -> str | None:
@@ -513,8 +567,8 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
 
 
 def _enlaces(r: pd.Series) -> list[str]:
-    """El aviso en FincaRaíz y, si está, el mismo inmueble en Metrocuadrado con su precio."""
-    lineas = [f"🔗 [Ver aviso en FincaRaíz]({r['URL detalle']})"]
+    """El aviso y, si está, el mismo inmueble en otro portal con su precio."""
+    lineas = [f"🔗 [Ver aviso]({r['URL detalle']})"]
     if otro := _otro_portal_txt(r):
         lineas.append(f"🔁 {_mayus(otro)} · [ver]({r['m2_url']})")
     return lineas
@@ -579,9 +633,23 @@ def main() -> None:
     hasta = pd.Timestamp(args.fecha) if args.fecha else df["first_seen"].max()
     desde = hasta - pd.Timedelta(days=args.dias - 1)
     hist = historial(hasta)
+    df = df.assign(portal="FincaRaíz")
 
-    ev = calificar(df, df[df["first_seen"].between(desde, hasta)], hist)
-    bj = bajadas(df, hist, desde, hasta)
+    # E8.1: también los inmuebles que solo están en Metrocuadrado, comparados con los similares de FincaRaíz
+    avisos, m2 = None, pd.DataFrame()
+    if FUENTE == "http":
+        from src import unificar
+        try:
+            avisos = unificar.unificar(args.ciudad)[0]
+            m2 = solo_metrocuadrado(args.ciudad, avisos)
+        except FileNotFoundError as e:           # sin el estado de Metrocuadrado: la alerta sale sin él
+            print(f"⚠️  Sin Metrocuadrado ({e})")
+    nuevos = df[df["first_seen"].between(desde, hasta)]
+    if len(m2):
+        nuevos = pd.concat([nuevos, m2[m2["first_seen"].between(desde, hasta)]], ignore_index=True)
+    ev = calificar(df, nuevos, hist)
+    bj = pd.concat([bajadas(df, hist, desde, hasta)]
+                   + ([bajadas(m2, hist, desde, hasta, pool=df)] if len(m2) else []), ignore_index=True)
     if ev.empty and bj.empty:
         print("No hay avisos nuevos ni bajadas de precio en el periodo.")
         return
@@ -594,13 +662,6 @@ def main() -> None:
     sel = seleccionar(ev, args.umbral, args.top) if not ev.empty else ev
     sel_bj = seleccionar_bajadas(bj, sel.get("id_inmueble", pd.Index([])), TOP_BAJADAS) \
         if not bj.empty else bj
-    avisos = None
-    if FUENTE == "http" and (len(sel) or len(sel_bj)):
-        from src import unificar
-        try:
-            avisos = unificar.unificar(args.ciudad)[0]
-        except FileNotFoundError as e:           # sin el estado de Metrocuadrado: la alerta sale sin él
-            print(f"⚠️  Sin Metrocuadrado ({e})")
     sel = enriquecer(sel, df, hasta, avisos)
     sel_bj = enriquecer(sel_bj, df, hasta, avisos)
 
@@ -619,7 +680,7 @@ def main() -> None:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     base = OUT_DIR / (f"{args.ciudad.lower()}_{hasta:%Y-%m-%d}" + ("_http" if FUENTE == "http" else ""))
-    cols = ["id_inmueble", "first_seen", "Tipo_propiedad", "barrio_oficial", "Barrio", "Estrato",
+    cols = ["id_inmueble", "portal", "first_seen", "Tipo_propiedad", "barrio_oficial", "Barrio", "Estrato",
             "Area_m2", "Habitaciones", "Precio", "precio_m2", "nivel_comps", "n_comps", "med_comps",
             "descuento", "confianza", "verificar", "motivo_descarte", "n_bajadas", "var_total",
             "al_republicar",

@@ -631,8 +631,8 @@ def informe_html(d: dict) -> str:
               f"({_mill(m['pm2'], 1)}/m²); 8 de cada 10 inmuebles así se piden entre "
               f"{_mill(_redondear(m['p10']), 0)} y {_mill(_redondear(m['p90']), 0)}."]
     if len(comps):
-        portales = f" ({n_fr} de FincaRaíz y {n_m2} solo en Metrocuadrado)" if n_m2 else ""
-        de_fr = f"; los de FincaRaíz llevan" if n_m2 else "; llevan"
+        portales = ""                       # un solo mercado: sin nombrar portales
+        de_fr = "; los que tienen fecha de publicación llevan" if n_m2 else "; llevan"
         bajaron = (f"{n_bajo} de ellos ya bajaron de precio." if n_bajo else "ninguno ha bajado de precio.")
         dias = (f"{de_fr} publicados {comps['dias'].median():.0f} días (mediana) y {bajaron}"
                 if comps["dias"].notna().any() else ".")
@@ -661,7 +661,7 @@ def informe_html(d: dict) -> str:
         f"<td class='num'>{_mill(r['Precio'], 0)}{' <span class=baj>↓</span>' if r['bajo'] is True else ''}</td>"
         f"<td class='num'>{_mill(r['pm2'], 1)}</td>"
         f"<td class='num'>{'' if pd.isna(r['dias']) else f'{r.dias:.0f}'}</td>"
-        f"<td><a href='{html.escape(str(r['URL detalle']))}'>{r['portal']} ↗</a></td></tr>"
+        f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
         for _, r in comps.head(MAX_COMPARABLES).iterrows())
     tabla = (f"""<table class="comps"><thead><tr><th>Barrio</th><th>Ficha</th><th class="num">Parq.</th>
       <th class="num">Piso</th><th class="num">Años</th><th class="num">Admin.</th><th class="num">Precio</th>
@@ -738,8 +738,8 @@ def informe_html(d: dict) -> str:
 <h2>Si se compra para arrendar</h2>
 {rent_txt}
 
-<p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de FincaRaíz y Metrocuadrado
-(modelo y similares, sin repetir los que están en los dos), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
+<p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de portales inmobiliarios
+(modelo y similares, sin repetir los que están en varios), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
 en el RAA. Los precios de cierre suelen ser algo menores que los pedidos. El modelo tiene un error mediano de ~10% en
 apartamentos y ~15% en casas; el rango del 80% lo refleja. {ubic}</p>
 </body></html>"""

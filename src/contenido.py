@@ -108,25 +108,16 @@ BARRIOS_SEMANA = "contenido/barrios_semana.json"    # {ciudad: {"2026-W47": {"co
 # (campo, decimales) de cada barrio
 CAMPOS_BARRIO = [("viviendas", 0), ("precio_m2", 0), ("p25_m2", 0), ("p75_m2", 0), ("precio", 0), ("precio_p25", 0),
                  ("precio_p75", 0), ("area", 0), ("habitaciones", 1), ("apartamentos", 2), ("estrato", 0),
-                 ("en_fincaraiz", 0), ("bajaron_mes", 0), ("dias_publicadas", 0), ("arriendos", 0), ("canon_m2", 0),
+                 ("en_venta_mes", 0), ("bajaron_mes", 0), ("dias_publicadas", 0), ("arriendos", 0), ("canon_m2", 0),
                  ("rentabilidad", 4)]
-
-
-def _bajaron(ids: pd.Series, desde: pd.Timestamp, hasta: pd.Timestamp) -> pd.Series:
-    """Si cada aviso bajó de precio entre `desde` y `hasta`, contado como las bajadas del canal (≥3 %, sin los
-    errores de digitación)."""
-    from src import oportunidades as op
-    ev = op._eventos()
-    b = ev[ev["evento"].isin(["cambio_precio", "republicado"]) & (ev["precio_despues"] < ev["precio_antes"])
-           & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
-    b = b[(1 - b["precio_despues"] / b["precio_antes"]).between(op.BAJA_MIN, 0.5)]
-    return ids.astype(str).isin(set(b["id_inmueble"].astype(str)))
 
 
 def por_barrio(d: dict) -> pd.DataFrame:
     """Una fila por barrio oficial con al menos MIN_BARRIO viviendas en venta (los del mapa del informe), del más
-    caro al más económico por m². Precio, área y tipo: de las viviendas sin repetir de los dos portales; días
-    publicadas y bajadas: de Fincaraíz (la fecha de publicación y el historial de precios son suyos)."""
+    caro al más económico por m². Precio, área y tipo: de las viviendas sin repetir de los dos portales; cuántas
+    bajaron de precio en el último mes: por inmueble en los dos portales (src/movimientos.py; `en_venta_mes`, las que
+    estuvieron en venta todo ese mes); días publicadas: de las que tienen fecha de publicación (FincaRaíz; E8.5)."""
+    from src import movimientos
     from src import informe_semanal as s
     clave = ["comuna", "barrio_oficial"]
     u = d["inmuebles"].dropna(subset=clave)
@@ -140,11 +131,12 @@ def por_barrio(d: dict) -> pd.DataFrame:
         "habitaciones": g["habitaciones"].median(),
         "apartamentos": g["tipo"].agg(lambda x: x.astype(str).str.lower().str.startswith("aparta").mean())})
     t = t[t["viviendas"] >= s.MIN_BARRIO]
-    v = d["venta"].dropna(subset=clave)
-    v = v.assign(_bajo=_bajaron(v["id_inmueble"], d["hasta"] - pd.Timedelta(days=DIAS_BAJADAS - 1), d["hasta"]))
-    gv = v.groupby(clave)
-    t["en_fincaraiz"] = gv.size()
-    t["bajaron_mes"] = gv["_bajo"].sum()
+    mb = movimientos.periodo(d["ciudad"], d["hasta"] - pd.Timedelta(days=DIAS_BAJADAS - 1), d["hasta"],
+                             por="barrio_oficial")
+    nombre = t.index.get_level_values("barrio_oficial")
+    t["en_venta_mes"] = nombre.map(mb["en_venta_todo"]).to_numpy()
+    t["bajaron_mes"] = nombre.map(mb["bajaron"]).to_numpy()
+    gv = d["venta"].dropna(subset=clave).groupby(clave)
     t["dias_publicadas"] = gv["dias_pub"].median()
     t["estrato"] = gv["Estrato"].agg(lambda x: x.mode().iloc[0] if x.notna().any() else np.nan)
     ga = d["arriendos_ok"].dropna(subset=clave).groupby(clave)
@@ -225,7 +217,8 @@ def ficha_barrio(t: pd.DataFrame, comuna: str, barrio: str, d: dict) -> dict:
 # mismas viviendas se movía un −0,01 % (medido el 14-nov). Así que el precio se mide con las MISMAS viviendas (las
 # que estuvieron en venta todo el mes) y, aparte, lo que entra (publicadas), lo que sale (retiradas) y cuántas
 # bajaron o subieron de precio.
-BARRIDO_COMPLETO = pd.Timestamp("2026-10-25")   # desde aquí el barrido ve toda la oferta: antes, el mes no se cuenta
+BARRIDO_COMPLETO = pd.Timestamp("2026-11-01")   # desde aquí se ven enteros los dos portales y el estado unificado
+                                                # (src/movimientos.py): antes, el mes no se cuenta
 MIN_COMUNA_MES = 300            # una comuna entra en el mes con al menos estas viviendas en venta todo el mes (con
                                 # menos, «el 3 % bajó» son 3 o 4 avisos)
 NOMBRES_MES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre",
@@ -243,74 +236,26 @@ def es_semana_del_mes(hasta: pd.Timestamp) -> bool:
     return pd.Timestamp(hasta).day <= 7
 
 
-def _movimientos(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> pd.DataFrame:
-    """Viviendas de Fincaraíz de la ciudad publicadas o retiradas en el periodo (columnas `publicada`, `retirada`),
-    con su comuna. Del estado completo (también las ya retiradas), no solo de lo que sigue en venta."""
-    from src import oportunidades as op, zonas
-    from src.consolidar import rutas
-    r = rutas("venta")
-    a = pd.read_parquet(r.avisos, columns=["id_inmueble", "ciudad", "tipo", "latitud", "longitud", "barrio",
-                                           "estado_aviso", "fecha_publicacion"])
-    aqui = (zonas.en_area(ciudad, a["latitud"], a["longitud"], a["ciudad"]) if ciudad in zonas.AREAS
-            else a["ciudad"].map(zonas.canonica) == ciudad)
-    a = a[aqui & a["tipo"].isin(op.TIPOS)].assign(id_inmueble=lambda x: x["id_inmueble"].astype(str))
-    publicada = pd.to_datetime(a["fecha_publicacion"], errors="coerce").between(desde, hasta)
-    dias = pd.date_range(desde, hasta).strftime("%Y-%m-%d")
-    partes = [pd.read_parquet(p, columns=["id_inmueble", "evento"]) for d in dias
-              if (p := r.historial / f"fecha={d}.parquet").exists()]
-    bajas = set()
-    if partes:
-        h = pd.concat(partes, ignore_index=True)
-        bajas = set(h.loc[h["evento"] == "baja", "id_inmueble"].astype(str))
-    # Como src/informe_semanal._retiradas: una baja que volvió a publicarse no fue una retirada
-    retirada = a["id_inmueble"].isin(bajas) & a["estado_aviso"].eq("retirado")
-    m = a[publicada | retirada].assign(publicada=publicada, retirada=retirada)
-    if zonas.tiene_zonas(ciudad):
-        m = zonas.asignar_zonas(m.rename(columns={"latitud": "Latitud", "longitud": "Longitud", "barrio": "Barrio"}),
-                                ciudad)
-    else:
-        m = m.assign(comuna=None)
-    return m
-
-
-def _mismas(venta: pd.DataFrame, desde: pd.Timestamp, hasta: pd.Timestamp) -> pd.DataFrame:
-    """Las viviendas en venta todo el periodo (publicadas antes y siguen) y cuánto cambió su precio en él
-    (`cambio`: producto de sus cambios de precio menos 1; sin las correcciones de digitación)."""
-    from src import oportunidades as op
-    ev = op._eventos()
-    e = ev[(ev["evento"] == "cambio_precio") & ev["fecha"].between(f"{desde:%Y-%m-%d}", f"{hasta:%Y-%m-%d}")]
-    factor = (e["precio_despues"] / e["precio_antes"]).groupby(e["id_inmueble"].astype(str)).prod()
-    v = venta[venta["first_seen"] <= desde]
-    return v.assign(cambio=v["id_inmueble"].astype(str).map(factor).fillna(1.0) - 1)
-
-
-def _resumen_mes(m: pd.DataFrame, mov: pd.DataFrame) -> dict:
-    """Cuenta como bajada o subida un cambio de al menos BAJA_MIN (3 %), como las bajadas del canal."""
-    from src import oportunidades as op
-    bajo, subio = m["cambio"] <= -op.BAJA_MIN, m["cambio"] >= op.BAJA_MIN
-    return {"en_venta_todo": len(m), "bajaron": int(bajo.sum()), "subieron": int(subio.sum()),
-            "bajada_mediana": _num(-m.loc[bajo, "cambio"].median(), 3) if bajo.any() else None,
-            "cambio_mismas": _num(m["cambio"].mean(), 4) if len(m) else None,
-            "publicadas": int(mov["publicada"].sum()), "retiradas": int(mov["retirada"].sum())}
+def _resumen_mes(x: pd.Series) -> dict:
+    return {"en_venta_todo": int(x["en_venta_todo"]), "bajaron": int(x["bajaron"]), "subieron": int(x["subieron"]),
+            "bajada_mediana": _num(x["bajada_mediana_mismas"], 3), "cambio_mismas": _num(x["cambio_mismas"], 4),
+            "publicadas": int(x["publicadas"]), "retiradas": int(x["retiradas"])}
 
 
 def datos_mes(d: dict, desde: pd.Timestamp, hasta: pd.Timestamp) -> dict:
-    """Un mes (de `desde` a `hasta`) en cifras: lo de la ciudad y, por comuna, lo de las que tienen muestra."""
-    m = _mismas(d["venta"], desde, hasta)
-    mov = _movimientos(d["ciudad"], desde, hasta)
-    comunas = []
-    for c, x in m.dropna(subset=["comuna"]).groupby("comuna"):
-        if len(x) < MIN_COMUNA_MES:
-            continue
-        comunas.append({"codigo": str(c), "nombre": d["nombres"].get(c, c),
-                        **_resumen_mes(x, mov[mov["comuna"] == c])})
+    """Un mes (de `desde` a `hasta`) en cifras, por inmueble en los dos portales (src/movimientos.py): lo de la ciudad
+    y, por comuna, lo de las que tienen muestra."""
+    from src import movimientos
+    total = movimientos.periodo(d["ciudad"], desde, hasta).loc["total"]
+    por = movimientos.periodo(d["ciudad"], desde, hasta, por="comuna")
+    comunas = [{"codigo": str(c), "nombre": d["nombres"].get(c, c), **_resumen_mes(x)}
+               for c, x in por.iterrows() if x["en_venta_todo"] >= MIN_COMUNA_MES]
     return {"mes": f"{desde:%Y-%m}", "nombre": NOMBRES_MES[desde.month - 1], "desde": desde, "hasta": hasta,
-            "completo": bool(desde >= BARRIDO_COMPLETO), **_resumen_mes(m, mov), "comunas": comunas}
+            "completo": bool(desde >= BARRIDO_COMPLETO), **_resumen_mes(total), "comunas": comunas}
 
 
 def mes(d: dict) -> dict:
-    """El último mes completo y, si también se vio entero, el anterior (para comparar). Lo de cada mes se calcula con
-    lo que sigue hoy en venta: las del mes anterior que se vendieron después no cuentan (una aproximación)."""
+    """El último mes completo y, si también se vio entero, el anterior (para comparar)."""
     desde, hasta = mes_anterior(d["hasta"])
     actual = datos_mes(d, desde, hasta)
     a_desde, a_hasta = mes_anterior(desde)
@@ -348,8 +293,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     return _limpio({
         "ciudad": ciudad, "desde": d["desde"], "hasta": d["hasta"], "generado": pd.Timestamp.now(tz="America/Bogota"),
         "mercado": {
-            "viviendas": d["viviendas"], "avisos_fincaraiz": d["avisos_fr"], "avisos_metrocuadrado": d["avisos_m2"],
-            "en_los_dos": d["en_los_dos"], "publicadas": d["publicadas"], "retiradas": d["retiradas"],
+            "viviendas": d["viviendas"], "publicadas": d["publicadas"], "retiradas": d["retiradas"],
             "bajadas": d["bajadas"], "bajada_mediana": d["bajada_mediana"], "precio_m2": d["precio_m2"],
             "arriendos": d["arriendos"], "canon_mediano": d["canon_mediano"], "rentabilidad": d["rentab"],
         },

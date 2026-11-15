@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.consolidar import HISTORIAL, rutas
+from src.consolidar import rutas
 
 ANTIGUEDAD = {1: "menor a 1 año", 2: "1 a 8 años", 3: "9 a 15 años", 4: "16 a 30 años", 5: "más de 30 años"}
 
@@ -60,10 +60,12 @@ def dataset_activo(raiz: str = "venta", retirados: bool = False) -> pd.DataFrame
     }).reset_index(drop=True)
 
 
-def eventos() -> pd.DataFrame:
+def eventos(raices: tuple[str, ...] = ("venta", "m2_venta")) -> pd.DataFrame:
     """Cambios de precio del historial con el formato de la bitácora (src/eventos.py), y las republicaciones
-    (`republicado`: el aviso nuevo, con el precio del viejo en `precio_antes` y su número en `id_viejo`)."""
-    partes = [pd.read_parquet(p) for p in sorted(HISTORIAL.glob("fecha=*.parquet"))]
+    (`republicado`: el aviso nuevo, con el precio del viejo en `precio_antes` y su número en `id_viejo`).
+    De FincaRaíz y de Metrocuadrado (E8.1): sus números de aviso no se cruzan (los de Metrocuadrado llevan «-M»), y
+    quien los usa los cruza con sus propios avisos. Sin el historial de Metrocuadrado en disco, solo FincaRaíz."""
+    partes = [pd.read_parquet(p) for raiz in raices for p in sorted(rutas(raiz).historial.glob("fecha=*.parquet"))]
     h = pd.concat(partes, ignore_index=True) if partes else pd.DataFrame(
         columns=["fecha", "id_inmueble", "evento", "valor_antes", "valor_despues", "texto_antes"])
     c = h[h["evento"].isin(["cambio_precio", "republicado"])].rename(

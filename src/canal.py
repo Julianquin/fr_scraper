@@ -127,18 +127,26 @@ def oportunidades_del_dia(ciudad: str, ya: dict[str, str]) -> pd.DataFrame:
       - «nueva»: publicada en los últimos CRITERIOS['dias'] días y nunca propuesta (sin republicados: no son nuevas);
       - «bajada»: bajó de precio en los últimos CRITERIOS['dias_bajada'] barridos (también al republicar), sea cual
         sea su antigüedad; vuelve a proponerse aunque ya se hubiera propuesto, si la bajada es posterior.
-    `ya`: {id del aviso: fecha en que se propuso}."""
+    De FincaRaíz y de los inmuebles que solo están en Metrocuadrado (E8.1; columna `portal`): las suyas son «nuevas» si
+    aparecieron en los últimos días (el portal no publica la fecha). Todas se comparan con los similares de FincaRaíz,
+    así el descuento se mide igual. `ya`: {id del aviso: fecha en que se propuso}."""
     df, hasta, hist = _preparar(ciudad)
+    df = df.assign(portal="FincaRaíz")
+    m2 = op.solo_metrocuadrado(ciudad)
     candidatas = []
 
-    nuevos = df[(df["first_seen"] > hasta - pd.Timedelta(days=CRITERIOS["dias"])) & ~df["id_inmueble"].isin(list(ya))]
+    reciente = lambda d: d[(d["first_seen"] > hasta - pd.Timedelta(days=CRITERIOS["dias"]))
+                           & ~d["id_inmueble"].isin(list(ya))]
+    nuevos = pd.concat([reciente(df)] + ([reciente(m2)] if len(m2) else []), ignore_index=True)
     ev = _cumplen(op.calificar(df, nuevos, hist)) if len(nuevos) else nuevos.iloc[:0]
     if len(ev):
         ev = op.enriquecer(ev.sort_values("descuento", ascending=False).head(10), df, hasta)
         candidatas.append(ev[ev["rep_precio_antes"].isna()].assign(fuente="nueva"))
 
     ultimo = _ultimo_barrido()
-    bj = op.bajadas(df, hist, ultimo - pd.Timedelta(days=CRITERIOS["dias_bajada"] - 1), ultimo)
+    desde_bj = ultimo - pd.Timedelta(days=CRITERIOS["dias_bajada"] - 1)
+    bj = pd.concat([op.bajadas(df, hist, desde_bj, ultimo)]
+                   + ([op.bajadas(m2, hist, desde_bj, ultimo, pool=df)] if len(m2) else []), ignore_index=True)
     if len(bj):
         bj = bj[[ya.get(i, "") < str(f)[:10] for i, f in zip(bj["id_inmueble"], bj["fecha_baja"])]]   # bajada posterior
         bj = _cumplen(bj)
@@ -188,7 +196,7 @@ def texto_oportunidad(r: pd.Series, pie: str) -> str:
         "Tres de sus similares:",
         comps,
         "",
-        f"🔗 [Ver el aviso]({r['URL detalle']})",
+        f"🔗 [Ver el aviso]({r['URL detalle']})",       # sin nombrar el portal: en lo público, «portales»
         "",
         "_Herramienta para priorizar, no un avalúo: verifica siempre el inmueble y su documentación._",
         pie,
@@ -225,9 +233,14 @@ def texto_pulso(ciudad: str, pie: str) -> str:
 
 
 def texto_bajadas(ciudad: str, pie: str) -> str | None:
-    """Las mayores bajadas de precio de la semana (los jueves), con dónde quedan frente a sus similares."""
+    """Las mayores bajadas de precio de la semana (los jueves), con dónde quedan frente a sus similares. De FincaRaíz y
+    de los inmuebles que solo están en Metrocuadrado (E8.1), comparadas con los similares de FincaRaíz."""
     df, hasta, hist = _preparar(ciudad)
-    bj = op.bajadas(df, hist, hasta - pd.Timedelta(days=6), hasta)
+    df = df.assign(portal="FincaRaíz")
+    m2 = op.solo_metrocuadrado(ciudad)
+    desde = hasta - pd.Timedelta(days=6)
+    bj = pd.concat([op.bajadas(df, hist, desde, hasta)]
+                   + ([op.bajadas(m2, hist, desde, hasta, pool=df)] if len(m2) else []), ignore_index=True)
     bj = op.seleccionar_bajadas(bj, pd.Index([]), TOP_BAJADAS) if len(bj) else bj
     if bj.empty:
         return None
@@ -239,7 +252,7 @@ def texto_bajadas(ciudad: str, pie: str) -> str | None:
             f"📍 {op._zona(r)}",
             f"💰 {op._millones(r['precio_antes'])} → {op._millones(r['Precio'])}",
             f"📊 {op._frente_comps(r).replace('comparables', 'similares')}" if op._frente_comps(r) else None,
-            f"🔗 [Ver el aviso]({r['URL detalle']})",
+            f"🔗 [Ver el aviso]({r['URL detalle']})",       # sin nombrar el portal: en lo público, «portales»
         ] if x))
     bloques += ["_Herramienta para priorizar, no un avalúo._\n" + pie]
     return "\n\n".join(bloques).strip()
