@@ -288,6 +288,36 @@ def _credenciales(canal: bool = True) -> tuple[str, str, str | None]:
     return env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_ADMIN_CHAT_ID"), env("TELEGRAM_CANAL_ID")
 
 
+SUSCRIPTORES = "canal/suscriptores.json"        # {"AAAA-MM-DD": n}: la serie diaria (medición, MARKETING.md §10)
+
+
+def suscriptores(token: str, guardar: bool = True) -> str:
+    """Los suscriptores del canal hoy (getChatMemberCount: el bot es administrador), anotados en la serie diaria; y la
+    línea para la cabecera de las propuestas: «👥 El canal: N suscriptores (+k desde ayer · +m en 7 días)». Vacía si
+    no se puede (sin TELEGRAM_CANAL_ID o si Telegram falla): las propuestas salen igual."""
+    from src.notificar import _api
+    canal = os.environ.get("TELEGRAM_CANAL_ID")
+    if not canal:
+        return ""
+    try:
+        n = int(_api("getChatMemberCount", token, urllib.parse.urlencode({"chat_id": canal}).encode())["result"])
+    except Exception as e:                      # noqa: BLE001 — sin el número, las propuestas salen igual
+        print(f"⚠️  Sin el número de suscriptores ({type(e).__name__})")
+        return ""
+    hoy = ahora_colombia()
+    serie = _leer(SUSCRIPTORES, {})
+    serie[f"{hoy:%Y-%m-%d}"] = n
+    if guardar:
+        _escribir(SUSCRIPTORES, serie)
+
+    def hace(dias: int) -> int | None:
+        antes = [f for f in sorted(serie) if f <= f"{hoy - pd.Timedelta(days=dias):%Y-%m-%d}"]
+        return serie[antes[-1]] if antes else None
+
+    cambios = [f"{n - x:+d} {texto}" for dias, texto in ((1, "desde ayer"), (7, "en 7 días")) if (x := hace(dias)) is not None]
+    return f"👥 El canal: {n} suscriptores" + (f" ({' · '.join(cambios)})" if cambios else "")
+
+
 # ── Comandos ──────────────────────────────────────────────────────────────────────────────────────────────
 def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]:
     """Las publicaciones del día al administrador, con botones. Cada oportunidad se propone una sola vez."""
@@ -313,13 +343,15 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
             print("\n" + "─" * 60 + ("\n" + notas[id_aviso] if id_aviso in notas else "") + "\n" + texto)
         return [(p[0], p[1]) for p in propuestas]
     token, admin, _ = _credenciales(canal=False)
+    linea_suscriptores = suscriptores(token)
     from src.notificar import telegram
     cabecera = (f"*📝 Propuestas para el canal · {hoy.day}-{hoy.month:02d}*\n"
                 + (f"{n_op} oportunidad{'es' if n_op != 1 else ''} del día" if n_op else
                    "Hoy ninguna oportunidad cumple los criterios del canal")
                 + (" · y " + " y ".join(p[0] for p in propuestas if p[0] != "oportunidad") if len(propuestas) > n_op else "")
                 + (f".\nLas que apruebes salen a las 0{HORA_PUBLICAR}:00 de Colombia (si apruebas más tarde, al momento)."
-                   if propuestas else "."))
+                   if propuestas else ".")
+                + (f"\n{linea_suscriptores}" if linea_suscriptores else ""))
     telegram(cabecera, token, admin)
     for tipo, texto, id_aviso, cifras in propuestas:
         if id_aviso in notas:
