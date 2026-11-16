@@ -46,7 +46,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from src import oportunidades as op, rentabilidad, zonas
+from src import oportunidades as op, rentabilidad, tema, zonas
 from src.config import BASE_DIR
 from src.consolidar import rutas
 from src.informe_semanal import _fecha, _mill, _n, _pct, _tile
@@ -690,7 +690,8 @@ def informe_html(d: dict) -> str:
 <html lang="es"><head><meta charset="utf-8"><title>Precio para captar · {html.escape(titulo)}</title>
 <style>
   @page {{ size: A4; margin: 11mm 14mm 12mm;
-    @bottom-left {{ content: "Informe de precio · {html.escape(_donde(d))} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
+    @bottom-left {{ content: "{tema.prefijo()}Informe de precio · {html.escape(_donde(d))} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
+    @bottom-center {{ content: "{tema.contacto_pie()}"; font: 7pt Inter, sans-serif; color: #898781; }}
     @bottom-right {{ content: "Página " counter(page) " de " counter(pages); font: 7pt Inter, sans-serif; color: #898781; }} }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: Inter, "DejaVu Sans", sans-serif; font-size: 8.5pt; line-height: 1.4; color: #0b0b0b; margin: 0; }}
@@ -720,7 +721,9 @@ def informe_html(d: dict) -> str:
   a {{ color: #2a78d6; font-weight: 600; text-decoration: none; }}
   .nota {{ color: #898781; font-size: 6.8pt; line-height: 1.35; margin-top: 8pt; }}
   .vacio {{ color: #52514e; }}
+  {tema.css()}
 </style></head><body>
+{tema.cabecera()}
 <p class="kicker">Informe de precio para captar · {html.escape(_donde(d))} · {_fecha(d['hasta'])}</p>
 <h1>{html.escape(titulo)}</h1>
 <p class="ficha">{html.escape(_ficha_txt(f))}{enlace}</p>
@@ -733,7 +736,7 @@ def informe_html(d: dict) -> str:
 <p class="ley"><i style="background:{GRIS};border-radius:50%"></i>similar en venta<i style="background:{AZUL_CLARO}"></i>rango del modelo (80%)<i style="background:{AZUL};width:2pt"></i>estimado{'<i style="background:#0b0b0b;transform:rotate(45deg);width:6pt;height:6pt"></i>precio pedido hoy' if d['pedido'] else ''}</p>
 
 <h2>Los similares en venta</h2>
-{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}). ↓ = ya bajó de precio. Admin.: cuota mensual.{' Metrocuadrado no publica la fecha ni sabemos si bajó de precio.' if n_m2 else ''}</p>""" if len(comps) else ""}
+{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}). ↓ = ya bajó de precio. Admin.: cuota mensual.{' Días vacío: el portal no da la fecha de publicación (ni si bajó de precio).' if n_m2 else ''}</p>""" if len(comps) else ""}
 {tabla}
 
 <h2>Cuánto tardan en salir</h2>

@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from src.consolidar import AUSENCIAS_PARA_BAJA
-from src import movimientos, oportunidades as op, rentabilidad, unificar, viz_map, zonas
+from src import movimientos, oportunidades as op, rentabilidad, tema, unificar, viz_map, zonas
 from src.config import BASE_DIR
 
 OUT_DIR = BASE_DIR / "reports" / "informe"
@@ -632,7 +632,8 @@ def informe_html(d: dict) -> str:
 <title>Pulso del mercado · {d['ciudad']}</title>
 <style>
   @page {{ size: A4; margin: 12mm 14mm 14mm;
-    @bottom-left {{ content: "Informe semanal · {d['ciudad']} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
+    @bottom-left {{ content: "{tema.prefijo()}Informe semanal · {d['ciudad']} · {_fecha(d['hasta'])}"; font: 7pt Inter, sans-serif; color: #898781; }}
+    @bottom-center {{ content: "{tema.contacto_pie()}"; font: 7pt Inter, sans-serif; color: #898781; }}
     @bottom-right {{ content: "Página " counter(page) " de " counter(pages); font: 7pt Inter, sans-serif; color: #898781; }} }}
   :root {{ --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781; --line:#e1e0d9; --plane:#f9f9f7;
            --blue:#2a78d6; --orange:#eb6834; --good:#006300; --good-bg:#e8f3e8; }}
@@ -687,7 +688,9 @@ def informe_html(d: dict) -> str:
   .mini-tit {{ color: var(--ink-2); font-size: 7.4pt; margin: 0 0 2pt; }}
   table.mini td, table.mini th {{ font-size: 7.6pt; padding: 2.2pt 3pt; }}
   .vacio {{ color: var(--ink-2); }}
+  {tema.css()}
 </style></head><body>
+{tema.cabecera()}
 
 <p class="kicker">Informe semanal · vivienda en venta y arriendo</p>
 <h1>Pulso del mercado · {d['ciudad']}</h1>

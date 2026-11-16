@@ -104,6 +104,8 @@ jobs:
           python -m src.consolidar --raiz arriendo --bajar
           python -m src.consolidar --raiz m2_venta --bajar
           python -m src.almacen traer estado/historial/ --destino data
+          # La presentación de los PDF (src/tema.py): logo, fuente y colores de marca/ en R2; sin ellos, el estilo neutro
+          python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
           python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp
           mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/
           # Los estimados sin ver: para un aviso publicado, el estimado de un modelo que no lo vio (sin ellos, el
