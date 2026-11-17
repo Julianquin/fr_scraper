@@ -59,6 +59,11 @@ AREAS = {
                                                      "La Calera", "Sopó", "Zipaquirá", "Tenjo", "Tabio", "Tocancipá"]),
     "Cali y alrededores": ("Cali", "Valle del Cauca", ["Jamundí", "Yumbo", "Palmira", "Candelaria"]),
 }
+# Municipios que van con la ciudad como un solo mercado (E10, decisión del dueño del 17-nov): sus oportunidades,
+# bajadas y viviendas para captar salen con las de la ciudad; las cifras de la ciudad (pulso, comunas, barrios) siguen
+# siendo solo suyas. Sin barrios oficiales: los del catálogo del portal (oportunidades.barrios_por_avisos).
+EXTENSION = {"Cali": ["Jamundí", "Yumbo"]}
+DE_EXTENSION = {m for ms in EXTENSION.values() for m in ms}
 for _area, (_nucleo, _, _) in AREAS.items():
     CIUDADES[_area] = {"division": "zona", "transporte": CIUDADES[_nucleo]["transporte"],
                        "fuente": CIUDADES[_nucleo]["fuente"] + "; municipios: DANE (MGN, vía HDX)"}

@@ -55,7 +55,8 @@ PAIS = "pais"                                    # el total del país, en la col
 CALI = "76001"
 # La ciudad y su área metropolitana (las que se bajan por municipio; las demás ciudades usan la tasa del país)
 MUNICIPIOS = {"76001": "Cali", "76364": "Jamundí", "76520": "Palmira", "76892": "Yumbo", "76130": "Candelaria"}
-CIUDADES = {"Cali": CALI}                        # ciudad del producto → municipio
+CIUDADES = {"Cali": CALI, "Jamundí": "76364", "Yumbo": "76892"}    # ciudad del producto → municipio (E10: Jamundí
+                                                                    # y Yumbo van con Cali)
 SEMANAS = 4                                      # la ventana de la tasa y del volumen
 MIN_CREDITOS = 30                                # una tasa, con al menos estos créditos en la ventana
 HUECO = 0.50                                     # una semana con hueco: la parte de la ciudad en el país, bajo la mitad

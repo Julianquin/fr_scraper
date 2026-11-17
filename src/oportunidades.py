@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import ast
 import html
+import re
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,52 @@ def cargar(ciudad: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+# ── Jamundí y Yumbo con Cali (E10): sus barrios, por los avisos ───────────────────────────────────────────────
+PREFIJOS_BARRIO = re.compile(r"^(cr|ub|urb|conj|c\.?\s?r|urbanizaci[oó]n|conjunto residencial|parcelaci[oó]n)\.?\s+", re.I)
+MENORES = {"de", "del", "la", "las", "los", "el", "y", "en"}
+MIN_CENTRO = 5          # un barrio del portal tiene punto (para ubicar los avisos de Metrocuadrado) con estos avisos
+RADIO_BARRIO_M = 1500   # un aviso de Metrocuadrado va al barrio del portal más cercano, si está a menos de esto
+
+
+def nombre_barrio(texto) -> str | None:
+    """El barrio del catálogo del portal, limpio: el primero del campo («Alfaguara, Parque Natura» → «Alfaguara»),
+    sin «Cr.», «Ub.»…, con mayúsculas de nombre propio («San isidro» → «San Isidro»)."""
+    if not isinstance(texto, str) or not texto.strip():
+        return None
+    b = PREFIJOS_BARRIO.sub("", texto.split(",")[0].strip()).strip()
+    palabras = b.lower().split()
+    return " ".join(p if (p in MENORES and i) else p[:1].upper() + p[1:] for i, p in enumerate(palabras)) or None
+
+
+def barrios_por_avisos(df: pd.DataFrame, municipio: str, centros: pd.DataFrame | None = None
+                       ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Los avisos de un municipio sin barrios oficiales (Jamundí, Yumbo), con `barrio_oficial` = el barrio del
+    catálogo del portal (en Jamundí, 25 nombres con 15 o más avisos cubren el 81 % de la oferta, 17-nov), `comuna` y
+    `zona_nombre` = el municipio (así los similares son de su municipio y la zona se lee «en Jamundí»).
+    Sin `centros` (FincaRaíz): el nombre de cada aviso, y devuelve los centros de los barrios (mediana de sus
+    puntos). Con `centros` (Metrocuadrado, otro catálogo): el mismo nombre si coincide y, si no, el barrio más
+    cercano a menos de RADIO_BARRIO_M."""
+    df = df.copy()
+    nombre = df["Barrio"].map(nombre_barrio) if "Barrio" in df else pd.Series(None, index=df.index, dtype=object)
+    if centros is not None and len(df):
+        conocidos = {zonas.normalizar(n): n for n in centros.index}
+        nombre = nombre.map(lambda n: conocidos.get(zonas.normalizar(n)) if isinstance(n, str) else None)
+        sin = nombre.isna() & df["Latitud"].notna()
+        if sin.any() and len(centros):
+            lat, lon = df.loc[sin, "Latitud"].to_numpy()[:, None], df.loc[sin, "Longitud"].to_numpy()[:, None]
+            dy = (centros["lat"].to_numpy()[None, :] - lat) * 110_540
+            dx = (centros["lon"].to_numpy()[None, :] - lon) * 111_320 * np.cos(np.radians(lat))
+            d = np.hypot(dx, dy)
+            cerca = d.min(axis=1) <= RADIO_BARRIO_M
+            nombre.loc[sin] = np.where(cerca, centros.index.to_numpy()[d.argmin(axis=1)], None)
+    df["barrio_oficial"], df["comuna"], df["zona_nombre"] = nombre, municipio, municipio
+    if centros is None:
+        g = df.dropna(subset=["barrio_oficial", "Latitud"]).groupby("barrio_oficial")
+        centros = pd.DataFrame({"n": g.size(), "lat": g["Latitud"].median(), "lon": g["Longitud"].median()})
+        centros = centros[centros["n"] >= MIN_CENTRO]
+    return df, centros
+
+
 def historial(hasta: pd.Timestamp) -> pd.DataFrame:
     """Por inmueble, cambios de precio reales hasta `hasta`: bajadas y variación acumulada.
     Las correcciones de digitación (src/eventos.py) no cuentan."""
@@ -118,6 +165,8 @@ def _comparables(c: pd.Series, pool: pd.DataFrame, minimo: int = MIN_COMPS) -> t
         base = base[base["Estrato"] == c["Estrato"]]
 
     en_barrio = base[base["barrio_oficial"] == c["barrio_oficial"]]
+    if pd.notna(c.get("comuna")) and "comuna" in base:      # el mismo nombre en Cali y en Jamundí no es el mismo barrio
+        en_barrio = en_barrio[en_barrio["comuna"] == c["comuna"]]
     if len(en_barrio) >= minimo:
         return en_barrio, "barrio"
     if pd.notna(c["Latitud"]):
@@ -268,6 +317,18 @@ def mercado(ciudad: str, df: pd.DataFrame, avisos: pd.DataFrame | None = None
     df = df.assign(portal="FincaRaíz", _grupo=("fincaraiz:" + df["id_inmueble"].astype(str)).map(grupo))
     m2 = solo_metrocuadrado(ciudad, avisos)
     pool = pd.concat([df, m2], ignore_index=True) if len(m2) else df
+    for municipio in zonas.EXTENSION.get(ciudad, []):        # Jamundí y Yumbo con Cali (E10)
+        try:
+            dfm, centros = barrios_por_avisos(cargar(municipio), municipio)
+            pool_m, dfm, m2m = mercado(municipio, dfm)
+        except (ValueError, FileNotFoundError) as e:        # sin avisos válidos o sin estado: la ciudad sola
+            print(f"⚠️  Sin {municipio} ({e})")
+            continue
+        if len(m2m):
+            m2m, _ = barrios_por_avisos(m2m, municipio, centros)
+        df = pd.concat([df, dfm], ignore_index=True)
+        m2 = pd.concat([m2, m2m], ignore_index=True) if len(m2) else m2m
+        pool = pd.concat([pool, dfm] + ([m2m] if len(m2m) else []), ignore_index=True)
     return pool, df, m2
 
 
@@ -426,7 +487,10 @@ def _ficha(r: pd.Series) -> str:
 
 
 def _zona(r: pd.Series) -> str:
+    """'El Ingenio · estrato 5' o, en Jamundí y Yumbo (E10), 'Alfaguara, Jamundí · estrato 4'."""
     barrio = r["barrio_oficial"] if pd.notna(r["barrio_oficial"]) else r["Barrio"]
+    if r.get("comuna") in zonas.DE_EXTENSION:
+        barrio = f"{barrio}, {r['comuna']}" if pd.notna(barrio) and barrio else r["comuna"]
     estrato = f" · estrato {r['Estrato']:.0f}" if pd.notna(r["Estrato"]) else ""
     return f"{barrio}{estrato}"
 
@@ -468,8 +532,8 @@ def _modelo_txt(r: pd.Series, fmt=None) -> str | None:
 
 def _comp_txt(c: pd.Series) -> str:
     """'El Ingenio · 82 m² · $520 M · 6,3 M/m²'"""
-    barrio = c["barrio_oficial"] if pd.notna(c["barrio_oficial"]) else c["Barrio"]
-    return f"{str(barrio).title()} · {c['Area_m2']:.0f} m² · {_millones(c['Precio'])} · {_m2(c['precio_m2'])} M/m²"
+    barrio = c["barrio_oficial"] if pd.notna(c["barrio_oficial"]) else str(c["Barrio"]).title()   # el oficial, tal cual
+    return f"{barrio} · {c['Area_m2']:.0f} m² · {_millones(c['Precio'])} · {_m2(c['precio_m2'])} M/m²"
 
 
 def _otro_portal_txt(r: pd.Series) -> str | None:

@@ -26,7 +26,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from src import credito
+from src import credito, zonas
 from src.config import BASE_DIR
 
 LOCAL = BASE_DIR / "data" / "contenido"
@@ -420,9 +420,11 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     elegido = elegir_barrio(tb, d["hasta"], d["precio_m2"], {} if vistos is None else vistos)
     barrio_semana = ficha_barrio(tb, *elegido, d) if elegido else None
     cc = d["captar_comunas"]
+    ext = cc[cc.index.isin(zonas.DE_EXTENSION)] if len(cc) else cc     # E10: lo público de captación, solo la ciudad
     captacion = {
         "dias": list(s.CAPTAR_DIAS), "sobre_similares": list(s.CAPTAR_SOBRE),
-        "viejas": d["viejas"], "piden_de_mas": d["captar_n"],
+        "viejas": d["viejas"] - int(ext["viejas"].sum()) if len(ext) else d["viejas"],
+        "piden_de_mas": d["captar_n"] - int(ext["sobre"].sum()) if len(ext) else d["captar_n"],
         "por_comuna": [{"codigo": str(c), "nombre": nombre(c), "viejas": int(x["viejas"]), "piden_de_mas": int(x["sobre"])}
                        for c, x in cc.iterrows()],
     }

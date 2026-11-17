@@ -231,6 +231,10 @@ def texto_pulso(ciudad: str, pie: str) -> str:
                        f"📉 {n(m['bajaron'])} bajaron de precio y {n(m['subieron'])} subieron, de las "
                        f"{n(m['en_venta_todo'])} en venta todo el mes",
                        f"💰 El precio pedido de esas mismas viviendas: {cambio} en el mes"]
+    if ext := d.get("extension"):           # E10: Jamundí y Yumbo van con Cali; sus cifras, aparte
+        lineas += ["", f"*Y en {' y '.join(ext)}*"] + [
+            f"{m}: {n(x['en_venta'])} en venta · {n(x['publicadas'])} publicadas · {n(x['bajadas'])} bajaron"
+            for m, x in ext.items()]
     del_credito = lineas_credito(ciudad, contenido.es_semana_del_mes(d["hasta"]))
     lineas += del_credito
     lineas += ["", "_Precios pedidos en avisos públicos de vivienda en venta"

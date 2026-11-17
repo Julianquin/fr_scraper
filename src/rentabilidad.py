@@ -34,10 +34,10 @@ import re
 import numpy as np
 import pandas as pd
 
-from src import fuente_http
+from src import fuente_http, zonas
 from src.config import BASE_DIR
 from src.consolidar import rutas
-from src.oportunidades import TIPOS, _comparables
+from src.oportunidades import TIPOS, _comparables, barrios_por_avisos
 from src.viz_map import limpiar_ciudad
 
 OUT_DIR = BASE_DIR / "reports" / "rentabilidad"
@@ -64,7 +64,14 @@ def motivo_exclusion(a: pd.DataFrame) -> pd.Series:
 def arriendos(ciudad: str) -> pd.DataFrame:
     """Arriendos de vivienda activos de la ciudad, limpios, con zona oficial y `motivo_exclusion`.
     `precio_m2` es el canon por m²."""
-    a = limpiar_ciudad(fuente_http.dataset_activo("arriendo"), ciudad, precio_min=CANON_MIN)
+    todos = fuente_http.dataset_activo("arriendo")
+    a = limpiar_ciudad(todos, ciudad, precio_min=CANON_MIN)
+    for municipio in zonas.EXTENSION.get(ciudad, []):        # Jamundí y Yumbo con Cali (E10): sus barrios del portal
+        try:
+            a = pd.concat([a, barrios_por_avisos(limpiar_ciudad(todos, municipio, precio_min=CANON_MIN), municipio)[0]],
+                          ignore_index=True)
+        except ValueError:                                  # sin arriendos válidos allí
+            pass
     a = a[a["Tipo_propiedad"].isin(TIPOS)].copy()
     for c in ["Estrato", "Habitaciones"]:
         a[c] = pd.to_numeric(a[c], errors="coerce")

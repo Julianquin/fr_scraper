@@ -161,6 +161,10 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     # están en Metrocuadrado, comparadas con los similares de los dos portales (`pool`, sin gemelos); los movimientos
     # de la semana, por inmueble en los dos portales (src/movimientos.py).
     pool, venta, m2 = op.mercado(ciudad, venta, avisos)
+    # E10: las oportunidades, las bajadas y las de captar, también de Jamundí y Yumbo; las cifras de la ciudad (pulso,
+    # comunas, barrios, arriendos), solo de la ciudad
+    venta["dias_pub"] = (hasta - venta["first_seen"]).dt.days        # también los de Jamundí y Yumbo
+    venta_ciudad = venta[~venta["comuna"].isin(zonas.DE_EXTENSION)]
     nuevos = venta[venta["first_seen"].between(desde, hasta)]
     a_evaluar = pd.concat([nuevos] + ([m2[m2["first_seen"].between(desde, hasta)]] if len(m2) else []),
                           ignore_index=True)
@@ -197,10 +201,10 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
     inm = inm.rename(columns={"latitud": "Latitud", "longitud": "Longitud", "barrio": "Barrio"})
     inm = zonas.asignar_zonas(inm, ciudad) if con_zonas else inm.assign(barrio_oficial=None, comuna=None)
     inm["precio_m2"] = inm["precio_mediano"] / inm["m2"].where(inm["m2"] > 10)
-    lo, hi = venta["precio_m2"].quantile([0.01, 0.99])
+    lo, hi = venta_ciudad["precio_m2"].quantile([0.01, 0.99])
     con_precio = inm[inm["precio_m2"].between(lo, hi) & (inm["precio_mediano"] > 1e7)]
-    arr_ok = arr[arr["motivo_exclusion"].isna()]
-    todas = _por_comuna(con_precio, arr_ok, venta) if con_zonas else pd.DataFrame()      # el mapa: todas
+    arr_ok = arr[arr["motivo_exclusion"].isna() & ~arr["comuna"].isin(zonas.DE_EXTENSION)]
+    todas = _por_comuna(con_precio, arr_ok, venta_ciudad) if con_zonas else pd.DataFrame()      # el mapa: todas
     b = con_precio.dropna(subset=["barrio_oficial"]).groupby(["comuna", "barrio_oficial"])["precio_m2"].agg(["size", "median"])
     barrios = b.loc[b["size"] >= MIN_BARRIO, "median"]                                  # el mapa por barrio
     tabla = todas.nlargest(MAX_FILAS, "viviendas").sort_values("precio_m2", ascending=False) if len(todas) else todas
@@ -228,8 +232,24 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "captar_n": int(cap["n_total"].iloc[0]) if len(cap) else 0, "captar": cap,
         "captar_comunas": captar_comunas, "viejas": len(viejas),
         # Para las cifras por barrio de src/contenido.py
-        "inmuebles": con_precio, "venta": venta, "arriendos_ok": arr_ok,
+        "inmuebles": con_precio, "venta": venta_ciudad, "arriendos_ok": arr_ok,
+        # Jamundí y Yumbo (E10): sus movimientos de la semana, aparte
+        "extension": extension(ciudad, desde, hasta),
     }
+
+
+def extension(ciudad: str, desde: pd.Timestamp, hasta: pd.Timestamp) -> dict:
+    """Los movimientos de la semana de los municipios que van con la ciudad (E10): {municipio: {en_venta,
+    publicadas, retiradas, bajadas}}, por inmueble en los dos portales (src/movimientos.py)."""
+    salida = {}
+    for m in zonas.EXTENSION.get(ciudad, []):
+        try:
+            x = movimientos.periodo(m, desde, hasta).loc["total"]
+        except Exception as e:             # noqa: BLE001 — sin el municipio, el informe sale igual
+            print(f"⚠️  Sin los movimientos de {m}: {type(e).__name__}: {e}")
+            continue
+        salida[m] = {k: int(x[k]) for k in ("en_venta", "publicadas", "retiradas", "bajadas")}
+    return salida
 
 
 # ── Presentación ──────────────────────────────────────────────────────────────
@@ -275,6 +295,8 @@ def _barrio(r: pd.Series, nombres: dict | None = None) -> str:
         partes.append(f"estrato {r['Estrato']:.0f}")
     if nombres and pd.notna(r.get("comuna")) and r["comuna"] in nombres:
         partes.append(nombres[r["comuna"]])
+    elif r.get("comuna") in zonas.DE_EXTENSION:        # Jamundí, Yumbo (E10)
+        partes.append(r["comuna"])
     return " · ".join(partes)
 
 
@@ -386,6 +408,11 @@ def frases(d: dict) -> list[str]:
         f"<b>{_n(d['retiradas'])}</b> y <b>{_n(d['bajadas'])}</b> bajaron de precio"
         + (f" (rebaja mediana del {_pct(d['bajada_mediana'])})." if d["bajada_mediana"] else "."),
     ]
+    if ext := d.get("extension"):           # E10: Jamundí y Yumbo, aparte de las cifras de la ciudad
+        lineas.append("Con " + d["ciudad"] + " van " + " y ".join(ext) + ": "
+                      + "; ".join(f"en {m}, <b>{_n(x['en_venta'])}</b> en venta, {_n(x['publicadas'])} publicadas y "
+                                  f"{_n(x['bajadas'])} bajaron" for m, x in ext.items())
+                      + ". Sus oportunidades, bajadas y viviendas para captar salen con las de " + d["ciudad"] + ".")
     b = d.get("barrio_semana")
     if not d.get("mensual", True) and b:
         lineas.append(f"El barrio de la semana es <b>{html.escape(PREFIJO.sub('', b['barrio']))}</b> "
