@@ -24,8 +24,9 @@ Qué se puede decir y qué no (medido el 17-nov con sep-2023 a nov-2026):
     una parte es cómo reportan los bancos (el Fondo Nacional del Ahorro deja de aparecer en Cali desde agosto). En 8
     semanas al 6-nov: país −22 % frente a hace un año, Cali −44 %. Lo que se compara con el año pasado es la tasa
     (Cali, en pesos: 15,0 % frente a 12,3 %) y el volumen del país.
-  - La cuota de una vivienda es una aproximación con supuestos fijos y a la vista (FINANCIADO, AÑOS, en pesos):
-    no es una oferta de crédito.
+  - La cuota de una vivienda es una aproximación con supuestos fijos y a la vista (FINANCIADO, AÑOS), con las dos
+    opciones: en pesos (fija) y en UVR (la primera cuota, con cuota constante en UVR: luego sube con la inflación;
+    con las tasas del 6-nov, un 33 % más baja al empezar). No es una oferta de crédito.
 
 Uso:
     python -m src.credito actualizar [--historico] [--avisar]   # baja lo nuevo, lo junta con la serie y la sube
@@ -380,24 +381,31 @@ def ingreso(cuota_mes: float) -> float:
 
 @lru_cache(maxsize=8)
 def tasa_actual(ciudad: str = "Cali") -> dict | None:
-    """La tasa para la cuota: la media de compra en pesos de las últimas semanas en la ciudad (o en el país, si la
-    ciudad no se baja o no tiene créditos suficientes). {"tasa", "hasta", "donde"} o None sin serie."""
+    """Las tasas para la cuota: las medias de compra en pesos y en UVR de las últimas semanas en la ciudad (o en el
+    país, si la ciudad no se baja o no tiene créditos suficientes). {"tasa", "tasa_uvr", "hasta", "donde"} o None."""
     serie = leer()
     municipio = CIUDADES.get(ciudad)
     r = resumen(serie, municipio) if municipio else None
-    if r and r["tasa_pesos"]:
-        return {"tasa": r["tasa_pesos"], "hasta": r["hasta"], "donde": r["nombre"]}
-    r = resumen(serie, PAIS)
-    return {"tasa": r["tasa_pesos"], "hasta": r["hasta"], "donde": "Colombia"} if r and r["tasa_pesos"] else None
+    donde = r["nombre"] if r and r["tasa_pesos"] else "Colombia"
+    if not (r and r["tasa_pesos"]):
+        r = resumen(serie, PAIS)
+    if not (r and r["tasa_pesos"]):
+        return None
+    return {"tasa": r["tasa_pesos"], "tasa_uvr": r["tasa_uvr"], "hasta": r["hasta"], "donde": donde}
 
 
 def para_ficha(precio: float | None, ciudad: str = "Cali") -> dict | None:
-    """La cuota de una oportunidad en cifras (la ficha del canal y de las piezas de redes); None sin datos."""
+    """La cuota de una oportunidad en cifras (la ficha del canal y de las piezas de redes), con las dos opciones:
+    en pesos (fija todo el crédito) y en UVR (la primera; luego sube con la inflación: cuota constante en UVR). None
+    sin datos; sin tasa en UVR, solo la de pesos."""
     t = tasa_actual(ciudad or "Cali")
     if not t or precio is None or pd.isna(precio):
         return None
     c = cuota(float(precio), t["tasa"])
+    u = cuota(float(precio), t["tasa_uvr"]) if t.get("tasa_uvr") else None
     return {"cuota": int(round(c)), "ingreso": int(round(ingreso(c))), "tasa": round(t["tasa"], 4),
+            "cuota_uvr": int(round(u)) if u else None, "ingreso_uvr": int(round(ingreso(u))) if u else None,
+            "tasa_uvr": round(t["tasa_uvr"], 4) if u else None,
             "financiado": FINANCIADO, "años": AÑOS, "hasta": t["hasta"], "donde": t["donde"]}
 
 
@@ -416,12 +424,17 @@ def fecha_corta(f: str) -> str:
 
 
 def texto_cuota(precio: float, ciudad: str = "Cali") -> str | None:
-    """'Cuota aproximada: $3,0 M al mes (70 % financiado a 20 años al 14,9 %, la tasa media de Cali)'."""
+    """'Cuota aproximada (70 % a 20 años): $3,5 M al mes en pesos o desde $2,3 M en UVR, que sube con la inflación
+    (tasas medias de Cali: 15,0% y 8,3% + UVR)'."""
     f = para_ficha(precio, ciudad)
     if not f:
         return None
-    return (f"Cuota aproximada: {millones(f['cuota'])} al mes ({f['financiado']:.0%} financiado a {f['años']} años al "
-            f"{pct(f['tasa'])}, la tasa media de {f['donde']})").replace("70%", "70 %")
+    plazo = f"{f['financiado'] * 100:.0f} % a {f['años']} años"
+    if not f["cuota_uvr"]:
+        return (f"Cuota aproximada ({plazo}): {millones(f['cuota'])} al mes en pesos (tasa media de {f['donde']}: "
+                f"{pct(f['tasa'])})")
+    return (f"Cuota aproximada ({plazo}): {millones(f['cuota'])} al mes en pesos o desde {millones(f['cuota_uvr'])} en "
+            f"UVR, que sube con la inflación (tasas medias de {f['donde']}: {pct(f['tasa'])} y {pct(f['tasa_uvr'])} + UVR)")
 
 
 def linea_tasa(ciudad: str = "Cali") -> str | None:

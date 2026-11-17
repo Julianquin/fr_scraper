@@ -122,10 +122,13 @@ def credito_semana(d: dict) -> dict | None:
     aptos = u[u["tipo"].astype(str).str.lower().str.startswith("aparta")]
 
     def ejemplo(x: pd.DataFrame) -> dict:
+        """El apartamento típico y su cuota en pesos (fija) y en UVR (la primera; luego sube con la inflación)."""
         precio = x["precio_mediano"].median()
         c = credito.cuota(precio, tasa)
+        u = credito.cuota(precio, r["tasa_uvr"]) if r["tasa_uvr"] else None
         return {"precio": _num(precio), "area": _num(x["m2"].median()), "apartamentos": len(x), "cuota": _num(c),
-                "ingreso": _num(credito.ingreso(c))}
+                "ingreso": _num(credito.ingreso(c)), "cuota_uvr": _num(u),
+                "ingreso_uvr": _num(credito.ingreso(u)) if u else None}
 
     comunas = [{"codigo": str(c), "nombre": d["nombres"].get(c, c), **ejemplo(x)}
                for c, x in aptos.dropna(subset=["comuna"]).groupby("comuna") if len(x) >= MIN_APTOS_CUOTA]

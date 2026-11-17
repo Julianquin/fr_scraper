@@ -447,7 +447,7 @@ def _credito_html(d: dict) -> str:
   {_tile("Tasa del crédito de vivienda", credito.pct(c['tasa_pesos']), f"en pesos, media de 4 semanas al {al}" + (f" · hace un año {credito.pct(año)}" if año else ""))}
   {_tile("En UVR", credito.pct(c['tasa_uvr']) + " + UVR" if c.get('tasa_uvr') else "—", "la cuota sube con la inflación")}
   {_tile("Créditos para comprar", _n(c['creditos']) if c.get('fiable') else "—", (f"en {d['ciudad']}, 4 semanas" if c.get('fiable') else "esta vez el dato llegó incompleto") + pais)}
-  {_tile("Cuota del apartamento típico", credito.millones(ej['cuota']) + "/mes", f"{_n(ej['area'])} m² a {_mill(ej['precio'], 0)} · {credito.FINANCIADO:.0%} a {credito.AÑOS} años".replace("70%", "70 %"))}
+  {_tile("Cuota del apartamento típico", credito.millones(ej['cuota']) + "/mes", ("en pesos" + (f"; en UVR, desde {credito.millones(ej['cuota_uvr'])}" if ej.get('cuota_uvr') else "") + f" · {_n(ej['area'])} m² a {_mill(ej['precio'], 0)}, {credito.FINANCIADO * 100:.0f} % a {credito.AÑOS} años").replace(" M", "&nbsp;M").replace(" %", "&nbsp;%").replace(" años", "&nbsp;años"))}
 </div>"""
 
 
@@ -787,7 +787,8 @@ def informe_html(d: dict) -> str:
   2013): verifica siempre el inmueble y su documentación. Fuente: avisos públicos de portales inmobiliarios{
   f"; {_plural(div)} y barrios: {d['fuente_zonas']}" if d["con_zonas"] and d["fuente_zonas"] else ""}{
   "; crédito de vivienda: Superintendencia Financiera (créditos de compra en pesos, tasa ponderada por monto; la "
-  "cuota es una aproximación a cuota fija, no una oferta de crédito)" if d.get("credito") else ""}.</p>
+  "cuota es una aproximación, no una oferta de crédito: en pesos, fija; en UVR, la primera, que luego sube con la "
+  "inflación)" if d.get("credito") else ""}.</p>
 </body></html>"""
 
 
