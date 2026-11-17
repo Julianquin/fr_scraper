@@ -7,7 +7,7 @@ Dos productos:
     «publicados» cuando se aprueba: de ahí sale el vídeo de la oportunidad del día.
   - `semana(ciudad)`: el mercado de los últimos 7 días (pulso, precio por m² y rentabilidad por comuna, cifras por
     barrio, el barrio de la semana, mayores bajadas, captación en agregado, el crédito de vivienda y la cuota del
-    apartamento típico de cada comuna). canal.yml lo deja cada día, tras proponer, en
+    apartamento típico de cada comuna, y Cali y su área año a año). canal.yml lo deja cada día, tras proponer, en
         contenido/semana.json              la última semana (siempre la misma clave)
         contenido/semana/<hasta>.json      copia con la fecha del último barrido: el historial para comparar meses
         contenido/barrios_semana.json      los barrios de la semana ya elegidos, para no repetirlos
@@ -100,6 +100,25 @@ def ficha(r: pd.Series) -> dict:
         # La cuota aproximada con la tasa media de las últimas semanas (src/credito.py); None sin la serie
         "cuota": credito.para_ficha(g("Precio"), _texto(g("Ciudad")) or "Cali"),
     }
+
+
+# ── Cali y su área, año a año (E9.5) ──────────────────────────────────────────────────────────────────────
+def area_metropolitana() -> dict | None:
+    """Las compraventas e hipotecas registradas por año en Cali, Jamundí, Palmira, Yumbo y Candelaria
+    (src/transacciones.py, IGAC: 2015–2023) y el crédito de vivienda de cada uno en las últimas 8 semanas
+    (src/credito.py; el número de créditos, solo si es fiable: en los municipios pequeños las semanas con hueco
+    son frecuentes). None sin las transacciones."""
+    from src import transacciones
+    r = transacciones.resumen()
+    if not r:
+        return None
+    serie = credito.leer()
+    for m in r["municipios"]:
+        c = credito.resumen(serie, m["codigo"], semanas=8) if not serie.empty else None
+        m["credito"] = None if not c else {
+            "hasta": c["hasta"], "creditos": c["creditos"] if c["fiable"] else None, "tasa_pesos": c["tasa_pesos"],
+            "parte_vis": c["parte_vis"]}
+    return _limpio(r)
 
 
 # ── El crédito de vivienda ────────────────────────────────────────────────────────────────────────────────
@@ -420,6 +439,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
         "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "mes": mes(d), "bajadas": bajadas,
         "captacion": captacion, "credito": credito_semana(d),
+        "area_metropolitana": area_metropolitana() if ciudad == "Cali" else None,
     })
 
 

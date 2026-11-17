@@ -92,10 +92,23 @@ def slug(ciudad: str) -> str:
     return normalizar(ciudad).replace(" ", "_")
 
 
+def _nombres_conocidos() -> dict[str, str]:
+    """Las ciudades y los municipios de sus áreas, por su nombre sin tildes: Metrocuadrado escribe «Jamundi»,
+    «Zipaquira», «Giron» (2.055 avisos de Jamundí se quedaban fuera al filtrar por municipio, 17-nov)."""
+    nombres = [*CIUDADES, *(m for nucleo, _, otros in AREAS.values() for m in (nucleo, *otros))]
+    return {normalizar(n): n for n in nombres}
+
+
 def canonica(ciudad) -> str:
-    """El nombre de la ciudad igual en los dos portales: Metrocuadrado escribe "Bogotá D.C." y
-    "Cartagena de Indias"; FincaRaíz, "Bogotá" y "Cartagena"."""
-    return CANONICA.get(normalizar(ciudad), ciudad) if isinstance(ciudad, str) else ciudad
+    """El nombre de la ciudad igual en los dos portales: Metrocuadrado escribe "Bogotá D.C.", "Cartagena de
+    Indias" y, sin tildes, "Jamundi"; FincaRaíz, "Bogotá", "Cartagena" y "Jamundí"."""
+    if not isinstance(ciudad, str):
+        return ciudad
+    n = normalizar(ciudad)
+    return CANONICA.get(n) or _NOMBRES.get(n, ciudad)
+
+
+_NOMBRES = _nombres_conocidos()
 
 
 def nucleo(ciudad: str) -> str:

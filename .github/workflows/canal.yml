@@ -95,6 +95,11 @@ jobs:
         timeout-minutes: 10
         continue-on-error: true            # sin él, las cifras de la semana salen sin lo del catastro
         run: python -m src.catastro_cali actualizar --si-viejo 30
+      - name: Compraventas registradas de Cali y su área (IGAC → transacciones/ en R2; se rehace cada 90 días)
+        if: env.ACCION == 'proponer'
+        timeout-minutes: 5
+        continue-on-error: true            # sin ellas, las cifras de la semana salen sin el área metropolitana
+        run: python -m src.transacciones actualizar --si-viejo 90
       - name: Cifras de la semana para las piezas de redes (contenido/semana.json, sin marca)
         if: env.ACCION == 'proponer'
         run: python -m src.contenido semana
