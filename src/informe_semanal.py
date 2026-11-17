@@ -410,10 +410,13 @@ def _fila(nombre: str, r: pd.Series, pmax: float, rmax: float) -> str:
                                  if pd.notna(v) else "")
     canon = _miles(r["canon_m2"]) if pd.notna(r["canon_m2"]) else "—"
     rent = _pct(r["rentab"], 1) if pd.notna(r["rentab"]) else "—"
+    parte = r.get("en_venta_parte")
+    del_total = _pct(parte, 1) if parte is not None and pd.notna(parte) else "—"
     return f"""
       <tr>
         <td class="c-name"><b>{html.escape(nombre)}</b> <span>{html.escape(str(r['barrios']))}</span></td>
         <td class="num">{_n(r['viviendas'])}</td>
+        <td class="num">{del_total}</td>
         <td class="num">{_mill(r['precio_m2'])}</td>
         <td class="bar-cell">{barra(r['precio_m2'], pmax, 'b-precio')}</td>
         <td class="num">{r['dias_pub']:.0f}</td>
@@ -526,11 +529,14 @@ def _por_zona_html(d: dict, periodo: str) -> str:
 <p class="periodo">{periodo} · de la más cara a la más económica por m² · {divs} con al menos {MIN_VIVIENDAS} viviendas en venta</p>
 <table>
   <thead><tr><th>{Div} y barrios con más oferta</th><th class="num">Viviendas<br>en venta</th>
-    <th class="num">Precio mediano<br>por m²</th><th></th><th class="num">Días<br>publicados</th>
+    <th class="num">Del total<br>(catastro)</th><th class="num">Precio mediano<br>por m²</th><th></th><th class="num">Días<br>publicados</th>
     <th class="num">Canon mediano<br>por m²</th><th class="num">Rentabilidad<br>bruta típica</th><th></th></tr></thead>
   <tbody>{filas}</tbody>
 </table>
-<p class="nota">Días publicados: edad mediana de los avisos activos de la {div} (desde su fecha de publicación).
+<p class="nota">Del total: las viviendas en venta frente a las que hay en el catastro de Cali (IDESC); «—» si más
+  de un cuarto de lo que está en venta trae una ubicación genérica (el centro del barrio o de la ciudad). Donde se
+  construye, cuenta también lo nuevo que aún no está en el catastro.
+  Días publicados: edad mediana de los avisos activos de la {div} (desde su fecha de publicación).
   Rentabilidad bruta típica: canon mediano por m² × 12 ÷ precio mediano por m², antes de administración, impuestos y
   vacancia; «—»: menos de {MIN_ARRIENDOS} arriendos.</p>"""
 
@@ -549,6 +555,28 @@ def _signo(x: float, dec: int = 1) -> str:
     """Con signo (+0,4 %, −1,2 %); lo que redondea a cero, sin signo."""
     v = round(x * 100, dec) + 0.0
     return (f"{v:.{dec}f}%" if v == 0 else f"{v:+.{dec}f}%").replace(".", ",").replace("-", "−")
+
+
+def uno_de_cada(parte: float) -> str:
+    """0,203 → '1 de cada 5'."""
+    return f"1 de cada {_n(round(1 / parte))}"
+
+
+def _catastro_barrio(b: dict, ciudad: str) -> str:
+    """Lo que dice el catastro del barrio (src/catastro_cali.py): cuántas viviendas hay, cuántas son apartamentos y
+    en edificios de cuántos pisos, y qué parte está en venta (solo con pocas coordenadas genéricas). Vacío sin él."""
+    if not b.get("viviendas_catastro"):
+        return ""
+    t = f"<b>En el catastro:</b> {_n(b['viviendas_catastro'])} viviendas"
+    if (ap := b.get("apartamentos_parte_catastro")) is not None and ap >= 0.05:
+        t += f", el {_pct(ap)} apartamentos" + (f" en edificios de unos {b['pisos_edificio']} pisos" if b.get("pisos_edificio") else "")
+        t += f" ({_n(b['edificios'])} edificios o conjuntos)" if b.get("edificios") else ""
+    t += "."
+    if b.get("en_venta_parte"):
+        t += (f" Hoy está en venta el equivalente a <b>{uno_de_cada(b['en_venta_parte'])}</b>"
+              + (f" ({ciudad}: {uno_de_cada(b['ciudad_en_venta_parte'])})" if b.get("ciudad_en_venta_parte") else "")
+              + "; donde se construye, cuenta también lo nuevo que aún no está en el catastro.")
+    return f"<p>{t}</p>"
 
 
 def _barrio_html(d: dict) -> str:
@@ -576,6 +604,15 @@ def _barrio_html(d: dict) -> str:
              f'<table class="mini"><thead><tr><th>Barrio</th><th class="num">Viviendas en venta</th>'
              f'<th class="num">Precio mediano por m²</th></tr></thead><tbody>{filas}</tbody></table>'
              if len(b.get("su_comuna") or []) >= 2 else "")
+    conj = b.get("conjuntos") or []
+    if conj:                                # para captar: los conjuntos más grandes (catastro), solo en el informe
+        filas_c = "".join(f"<tr><td>{html.escape(x['direccion'] or '—')}</td><td class='num'>{_n(x['apartamentos'])}</td>"
+                          f"<td class='num'>{x['pisos'] or '—'}</td><td class='num'>{_n(x['area'])} m²</td></tr>"
+                          for x in conj)
+        tabla_c = (f'<p class="mini-tit">Los edificios y conjuntos con más apartamentos (catastro), para buscar captaciones</p>'
+                   f'<table class="mini"><thead><tr><th>Dirección</th><th class="num">Apartamentos</th>'
+                   f'<th class="num">Pisos</th><th class="num">Área típica</th></tr></thead><tbody>{filas_c}</tbody></table>')
+        tabla = f'<div class="dos">{f"<div>{tabla}</div>" if tabla else ""}<div>{tabla_c}</div></div>'
     return f"""<h2>El barrio de la semana: {nom}</h2>
 <p class="sub">{com} · {_n(b['viviendas'])} viviendas en venta · {_puesto(b)} por precio del m²</p>
 <div class="tiles">
@@ -585,6 +622,7 @@ def _barrio_html(d: dict) -> str:
   {_tile("Bajaron de precio", _pct(bajo, 1) if bajo is not None else "—", f"en los últimos {b['dias_bajadas']} días")}
 </div>
 <p>{renta} El estrato más común es el {b.get('estrato') or '—'}; el {_pct(b['apartamentos'])} son apartamentos.</p>
+{_catastro_barrio(b, d['ciudad'])}
 {tabla}
 <p class="nota">Cada semana, un barrio distinto. {aviso}</p>"""
 
@@ -727,6 +765,7 @@ def informe_html(d: dict) -> str:
   td.nw {{ white-space: nowrap; }}
   .mini-tit {{ color: var(--ink-2); font-size: 7.4pt; margin: 0 0 2pt; }}
   table.mini td, table.mini th {{ font-size: 7.6pt; padding: 2.2pt 3pt; }}
+  .dos {{ display: grid; grid-template-columns: 1fr 1.25fr; gap: 12pt; }}
   .vacio {{ color: var(--ink-2); }}
   {tema.css()}
 </style></head><body>
@@ -806,6 +845,8 @@ def edicion(d: dict) -> dict:
     from src import contenido
     d["mensual"] = contenido.es_semana_del_mes(d["hasta"])
     d["mes"] = contenido.mes(d) if d["mensual"] and d["con_zonas"] else None
+    if d["mensual"] and len(d["tabla"]):        # la tabla por comuna, con qué parte del catastro está en venta (E9.2)
+        d["tabla"] = contenido.con_catastro(d["tabla"], d["inmuebles"], ["comuna"])
     d["barrio_semana"] = None
     try:
         d["credito"] = contenido.credito_semana(d)

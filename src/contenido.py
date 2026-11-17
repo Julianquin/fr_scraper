@@ -147,7 +147,11 @@ BARRIOS_SEMANA = "contenido/barrios_semana.json"    # {ciudad: {"2026-W47": {"co
 CAMPOS_BARRIO = [("viviendas", 0), ("precio_m2", 0), ("p25_m2", 0), ("p75_m2", 0), ("precio", 0), ("precio_p25", 0),
                  ("precio_p75", 0), ("area", 0), ("habitaciones", 1), ("apartamentos", 2), ("estrato", 0),
                  ("en_venta_mes", 0), ("bajaron_mes", 0), ("dias_publicadas", 0), ("arriendos", 0), ("canon_m2", 0),
-                 ("rentabilidad", 4)]
+                 ("rentabilidad", 4),
+                 # del catastro (E9.2): viviendas que hay, la parte de apartamentos, pisos y área típicos, cuántos
+                 # edificios o conjuntos, la parte de coordenadas genéricas y qué parte está en venta (o None)
+                 ("viviendas_catastro", 0), ("apartamentos_parte_catastro", 2), ("pisos_edificio", 0),
+                 ("area_apartamento_catastro", 0), ("edificios", 0), ("genericos", 2), ("en_venta_parte", 4)]
 
 
 def por_barrio(d: dict) -> pd.DataFrame:
@@ -182,7 +186,67 @@ def por_barrio(d: dict) -> pd.DataFrame:
     t["canon_m2"] = ga["precio_m2"].median()
     t["canon_m2"] = t["canon_m2"].where(t["arriendos"] >= MIN_ARRIENDOS_BARRIO)
     t["rentabilidad"] = 12 * t["canon_m2"] / t["precio_m2"]
+    t = con_catastro(t, u, clave)
     return t.sort_values("precio_m2", ascending=False)
+
+
+# ── El catastro: cuántas viviendas hay y qué parte está en venta (E9.2) ─────────────────────────────────────
+GENERICO = 5                    # un punto con al menos estos inmuebles en venta es una coordenada genérica (el centro
+                                # de un barrio o de la ciudad), no la del inmueble: el 21,5 % en Cali (17-nov)
+MAX_GENERICOS = 0.25            # «1 de cada N en venta» solo donde menos de esta parte de lo que está en venta tiene
+                                # coordenada genérica (en Pance cabecera, el 97 %: salía un 75 % en venta; con las
+                                # precisas, un 2 %)
+MIN_VIVIENDAS_CATASTRO = 100    # y con al menos estas viviendas en el catastro
+
+
+def genericos(u: pd.DataFrame) -> pd.Series:
+    """Por inmueble: ¿su coordenada es genérica (compartida con GENERICO o más)?"""
+    punto = u["Latitud"].round(5).astype(str) + "," + u["Longitud"].round(5).astype(str)
+    return punto.map(punto.value_counts()) >= GENERICO
+
+
+def con_catastro(t: pd.DataFrame, u: pd.DataFrame, clave: list[str]) -> pd.DataFrame:
+    """Añade a la tabla por zona (índice `clave`) lo del catastro (src/catastro_cali.py): viviendas, la parte de
+    apartamentos, los pisos y el área típicos, y `en_venta_parte`: las que están en venta frente a las del catastro
+    (solo si la zona tiene pocas coordenadas genéricas: MAX_GENERICOS). Sin el catastro, la tabla igual."""
+    from src import catastro_cali
+    cat = catastro_cali.leer("barrios")
+    if cat is None or not len(t):
+        return t
+    if clave[-1] == "comuna":           # por comuna: la suma de sus barrios
+        g = cat.groupby("comuna")
+        cat = pd.DataFrame({"viviendas": g["viviendas"].sum(), "apartamentos": g["apartamentos"].sum(),
+                            "pisos_edificio": g.apply(lambda x: np.average(x["pisos_edificio"].fillna(0),
+                                                                          weights=x["apartamentos"])
+                                                      if x["apartamentos"].sum() else np.nan),
+                            "area_apartamento": g["area_apartamento"].median(), "edificios": g["edificios"].sum()})
+        cat["parte_apartamentos"] = cat["apartamentos"] / cat["viviendas"]
+    else:
+        cat = cat.set_index(clave)
+    cat = cat.reindex(t.index)
+    t = t.copy()
+    t["viviendas_catastro"] = cat["viviendas"]
+    t["apartamentos_parte_catastro"] = cat["parte_apartamentos"]
+    t["pisos_edificio"] = cat["pisos_edificio"]
+    t["area_apartamento_catastro"] = cat["area_apartamento"]
+    t["edificios"] = cat["edificios"]
+    gen = u.assign(_g=genericos(u)).dropna(subset=clave).groupby(clave)["_g"].mean()
+    t["genericos"] = gen.reindex(t.index)
+    t["en_venta_parte"] = (t["viviendas"] / t["viviendas_catastro"]).where(
+        (t["genericos"] < MAX_GENERICOS) & (t["viviendas_catastro"] >= MIN_VIVIENDAS_CATASTRO))
+    return t
+
+
+def conjuntos_barrio(comuna: str, barrio: str, n: int = 5) -> list[dict]:
+    """Los edificios y conjuntos con más apartamentos del barrio, según el catastro (dirección, apartamentos, pisos):
+    para los agentes (informe semanal), nunca en lo público. Vacío sin el catastro."""
+    from src import catastro_cali
+    c = catastro_cali.leer("conjuntos")
+    if c is None:
+        return []
+    c = c[(c["comuna"] == comuna) & (c["barrio_oficial"] == barrio)].head(n)
+    return [{"direccion": x["direccion"], "apartamentos": _num(x["apartamentos"]), "pisos": _num(x["pisos"]),
+             "area": _num(x["area"])} for _, x in c.iterrows()]
 
 
 def candidatos(t: pd.DataFrame) -> pd.DataFrame:
@@ -246,7 +310,20 @@ def ficha_barrio(t: pd.DataFrame, comuna: str, barrio: str, d: dict) -> dict:
         "ciudad_precio_m2": _num(d["precio_m2"]), "ciudad_rentabilidad": _num(d["rentab"], 4),
         "su_comuna": [{"barrio": b, "precio_m2": _num(x["precio_m2"]), "viviendas": _num(x["viviendas"])}
                       for b, x in vecinos.iterrows()],
+        **ciudad_catastro(d),
+        "conjuntos": conjuntos_barrio(comuna, barrio),          # para los agentes (el informe), no para lo público
     }
+
+
+def ciudad_catastro(d: dict) -> dict:
+    """Las viviendas de la ciudad en el catastro y qué parte está en venta (todas: en la ciudad entera las coordenadas
+    genéricas no cambian el total). Vacío sin el catastro."""
+    from src import catastro_cali
+    m = catastro_cali.meta()
+    if not m or d["ciudad"] != "Cali":
+        return {}
+    return {"ciudad_viviendas_catastro": m["viviendas"], "ciudad_en_venta_parte": _num(d["viviendas"] / m["viviendas"], 4),
+            "catastro_bajado": m["bajado"]}
 
 
 # ── El mes ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -310,10 +387,14 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     d = s.datos(ciudad)
     nombre = lambda c: d["nombres"].get(c, c)
     t = d["todas"]
+    if t is not None and len(t):
+        t = con_catastro(t, d["inmuebles"], ["comuna"])
+    cat = lambda x: {k: _num(x.get(k), dec) for k, dec in (("viviendas_catastro", 0), ("apartamentos_parte_catastro", 2),
+                                                           ("pisos_edificio", 0), ("genericos", 2), ("en_venta_parte", 4))}
     comunas = [] if t is None or not len(t) else [
         {"codigo": str(c), "nombre": nombre(c), "viviendas": _num(x["viviendas"]), "precio_m2": _num(x["precio_m2"]),
          "dias_publicadas": _num(x["dias_pub"]), "arriendos": _num(x["arriendos"]), "canon_m2": _num(x["canon_m2"]),
-         "rentabilidad": _num(x["rentab"], 4), "barrios": x["barrios"]}
+         "rentabilidad": _num(x["rentab"], 4), "barrios": x["barrios"], **cat(x)}
         for c, x in t.iterrows()]
     tb = por_barrio(d)
     barrios = [{"comuna": str(c), "barrio": b, **_campos(x)} for (c, b), x in tb.iterrows()]
@@ -334,6 +415,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
             "viviendas": d["viviendas"], "publicadas": d["publicadas"], "retiradas": d["retiradas"],
             "bajadas": d["bajadas"], "bajada_mediana": d["bajada_mediana"], "precio_m2": d["precio_m2"],
             "arriendos": d["arriendos"], "canon_mediano": d["canon_mediano"], "rentabilidad": d["rentab"],
+            **ciudad_catastro(d),
         },
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
         "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "mes": mes(d), "bajadas": bajadas,

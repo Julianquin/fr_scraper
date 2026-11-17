@@ -77,6 +77,10 @@ jobs:
           python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
           # El crédito de vivienda (lo actualiza el canal cada madrugada): la tasa y la cuota de cada oportunidad
           python -m src.almacen traer credito/ --destino data || echo "⚠️  Sin el crédito de vivienda"
+          # El catastro de Cali (lo rehace el canal una vez al mes): viviendas por barrio y conjuntos para captar
+          for f in barrios.parquet conjuntos.parquet meta.json; do
+            python -m src.almacen traer "catastro/$f" --destino data || echo "⚠️  Sin catastro/$f"
+          done
           # Informe: el barrio de la semana que ya eligió el canal esta madrugada (data/contenido/, donde lo busca
           # src/contenido.leer sin claves de R2): así es el mismo del carrusel; sin él, se elige sin anotar
           python -m src.almacen traer contenido/barrios_semana.json --destino data || echo "⚠️  Sin barrios_semana.json"

@@ -90,6 +90,11 @@ jobs:
             aprobar)  python -m src.canal aprobar --mensaje "$MENSAJE" ;;
             publicar) python -m src.canal publicar ;;
           esac
+      - name: Catastro de Cali (IDESC → catastro/ en R2; se rehace si tiene más de 30 días)
+        if: env.ACCION == 'proponer'
+        timeout-minutes: 10
+        continue-on-error: true            # sin él, las cifras de la semana salen sin lo del catastro
+        run: python -m src.catastro_cali actualizar --si-viejo 30
       - name: Cifras de la semana para las piezas de redes (contenido/semana.json, sin marca)
         if: env.ACCION == 'proponer'
         run: python -m src.contenido semana
