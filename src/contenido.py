@@ -6,8 +6,8 @@ Dos productos:
   - `ficha(r)`: una oportunidad en cifras. canal.py la guarda con cada propuesta en canal/estado.json y pasa a
     «publicados» cuando se aprueba: de ahí sale el vídeo de la oportunidad del día.
   - `semana(ciudad)`: el mercado de los últimos 7 días (pulso, precio por m² y rentabilidad por comuna, cifras por
-    barrio, el barrio de la semana, mayores bajadas, captación en agregado). canal.yml lo deja cada día, tras
-    proponer, en
+    barrio, el barrio de la semana, mayores bajadas, captación en agregado, el crédito de vivienda y la cuota del
+    apartamento típico de cada comuna). canal.yml lo deja cada día, tras proponer, en
         contenido/semana.json              la última semana (siempre la misma clave)
         contenido/semana/<hasta>.json      copia con la fecha del último barrido: el historial para comparar meses
         contenido/barrios_semana.json      los barrios de la semana ya elegidos, para no repetirlos
@@ -26,6 +26,7 @@ import os
 import numpy as np
 import pandas as pd
 
+from src import credito
 from src.config import BASE_DIR
 
 LOCAL = BASE_DIR / "data" / "contenido"
@@ -96,7 +97,41 @@ def ficha(r: pd.Series) -> dict:
                    "bajo": _num(g("bajo_modelo"), 3)},
         "bajada": bajada,
         "comparables": comparables,
+        # La cuota aproximada con la tasa media de las últimas semanas (src/credito.py); None sin la serie
+        "cuota": credito.para_ficha(g("Precio"), _texto(g("Ciudad")) or "Cali"),
     }
+
+
+# ── El crédito de vivienda ────────────────────────────────────────────────────────────────────────────────
+MIN_APTOS_CUOTA = 30            # una comuna entra en «¿cuánto hay que ganar?» con al menos estos apartamentos en venta
+
+
+def credito_semana(d: dict) -> dict | None:
+    """El crédito de vivienda de la ciudad en cifras (src/credito.py): la tasa y los créditos de las últimas 4
+    semanas (el volumen, solo si es `fiable`), el último mes completo, la cuota del apartamento típico de la ciudad y
+    de cada comuna, y la serie de 26 semanas para el gráfico. None sin la serie o si la ciudad no se baja.
+    El ejemplo es el APARTAMENTO típico (precio pedido mediano): con las casas, la mediana de Cali sube de 400 a 560
+    millones (17-nov) y el ejemplo deja de parecerse a lo que compra la mayoría."""
+    municipio = credito.CIUDADES.get(d["ciudad"])
+    serie = credito.leer()
+    r = credito.resumen(serie, municipio) if municipio else None
+    if not r or not r["tasa_pesos"]:
+        return None
+    tasa = r["tasa_pesos"]
+    u = d["inmuebles"]
+    aptos = u[u["tipo"].astype(str).str.lower().str.startswith("aparta")]
+
+    def ejemplo(x: pd.DataFrame) -> dict:
+        precio = x["precio_mediano"].median()
+        c = credito.cuota(precio, tasa)
+        return {"precio": _num(precio), "area": _num(x["m2"].median()), "apartamentos": len(x), "cuota": _num(c),
+                "ingreso": _num(credito.ingreso(c))}
+
+    comunas = [{"codigo": str(c), "nombre": d["nombres"].get(c, c), **ejemplo(x)}
+               for c, x in aptos.dropna(subset=["comuna"]).groupby("comuna") if len(x) >= MIN_APTOS_CUOTA]
+    return _limpio({**r, "mes": credito.mes(serie, municipio), "financiado": credito.FINANCIADO, "años": credito.AÑOS,
+                    "cuota_max": credito.CUOTA_MAX, "ciudad_ejemplo": ejemplo(aptos),
+                    "min_apartamentos": MIN_APTOS_CUOTA, "por_comuna": comunas})
 
 
 # ── Por barrio, y el barrio de la semana ──────────────────────────────────────────────────────────────────
@@ -299,7 +334,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
         },
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
         "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "mes": mes(d), "bajadas": bajadas,
-        "captacion": captacion,
+        "captacion": captacion, "credito": credito_semana(d),
     })
 
 
@@ -349,6 +384,10 @@ def main() -> None:
           f"captación {s['captacion']['piden_de_mas']}/{s['captacion']['viejas']} · {len(s['barrios'])} barrios")
     print(f"   barrio de la semana {b['semana']}: {b['barrio']} ({b['viviendas']} viviendas, puesto {b['puesto_m2']} "
           f"de {b['de']} por m²)" if b else "   sin barrio de la semana")
+    c = s["credito"]
+    print(f"   crédito al {c['hasta']}: tasa {credito.pct(c['tasa_pesos'])} · {c['creditos']} créditos "
+          f"({'fiable' if c['fiable'] else 'no fiable'}) · {len(c['por_comuna'])} comunas con cuota" if c else
+          "   sin crédito de vivienda (data/credito/semanas.parquet)")
     if not a.no_subir:
         guardar("contenido/semana.json", s)
         guardar(f"contenido/semana/{s['hasta']}.json", s)

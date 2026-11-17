@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 
 from src.consolidar import AUSENCIAS_PARA_BAJA
-from src import movimientos, oportunidades as op, rentabilidad, tema, unificar, viz_map, zonas
+from src import credito, movimientos, oportunidades as op, rentabilidad, tema, unificar, viz_map, zonas
 from src.config import BASE_DIR
 
 OUT_DIR = BASE_DIR / "reports" / "informe"
@@ -431,6 +431,26 @@ def _frente_modelo(r: pd.Series) -> str:
     return "en línea" if abs(b) < .03 else f"{_pct(abs(b))} {'menos' if b > 0 else 'más'}"
 
 
+def _credito_html(d: dict) -> str:
+    """El crédito de vivienda en la primera página (src/credito.py): la tasa media en pesos y en UVR de las últimas
+    4 semanas, los créditos para comprar vivienda (solo si el volumen es fiable) y la cuota del apartamento típico.
+    Vacío sin la serie."""
+    c = d.get("credito")
+    if not c or not c.get("tasa_pesos"):
+        return ""
+    año = (c.get("hace_un_año") or {}).get("tasa_pesos")
+    ej = c["ciudad_ejemplo"]
+    al = credito.fecha_corta(c["hasta"])
+    cambio = (c.get("pais") or {}).get("cambio_año")
+    pais = (f" · país: {_signo(cambio, 0)} frente a hace un año" if cambio is not None else "")
+    return f"""<div class="tiles">
+  {_tile("Tasa del crédito de vivienda", credito.pct(c['tasa_pesos']), f"en pesos, media de 4 semanas al {al}" + (f" · hace un año {credito.pct(año)}" if año else ""))}
+  {_tile("En UVR", credito.pct(c['tasa_uvr']) + " + UVR" if c.get('tasa_uvr') else "—", "la cuota sube con la inflación")}
+  {_tile("Créditos para comprar", _n(c['creditos']) if c.get('fiable') else "—", (f"en {d['ciudad']}, 4 semanas" if c.get('fiable') else "esta vez el dato llegó incompleto") + pais)}
+  {_tile("Cuota del apartamento típico", credito.millones(ej['cuota']) + "/mes", f"{_n(ej['area'])} m² a {_mill(ej['precio'], 0)} · {credito.FINANCIADO:.0%} a {credito.AÑOS} años".replace("70%", "70 %"))}
+</div>"""
+
+
 def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
     hasta = d["hasta"]
     dias = (hasta - r["first_seen"]).days
@@ -439,6 +459,8 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
     millones = lambda x: _mill(x, 0)
     if modelo := op._modelo_txt(r, millones):
         lineas.append(f"<b>Modelo de precios:</b> {html.escape(modelo.removeprefix('modelo: '))}")
+    if cuota := credito.texto_cuota(r["Precio"], d["ciudad"]):
+        lineas.append(f"<b>{html.escape(cuota.split(':')[0])}:</b>{html.escape(cuota.split(':', 1)[1])}")
     if rep := op._republicado_txt(r, hasta, millones):
         lineas.append(html.escape(op._mayus(rep)))
     if pd.notna(r.get("m2_precio")):
@@ -567,6 +589,23 @@ def _barrio_html(d: dict) -> str:
 <p class="nota">Cada semana, un barrio distinto. {aviso}</p>"""
 
 
+def _credito_mes_html(d: dict) -> str:
+    """El crédito de vivienda del último mes completo: la tasa frente al mes anterior y al mismo mes del año pasado;
+    el volumen, sin comparar (el de la ciudad no se compara con el año pasado: src/credito.py) y solo si es fiable."""
+    m = (d.get("credito") or {}).get("mes")
+    if not m or not m.get("tasa_pesos"):
+        return ""
+    pct = credito.pct
+    comparar = [f"{x['nombre']}{'' if x['año'] == m['año'] else ' de ' + str(x['año'])}: {pct(x['tasa_pesos'])}"
+                for x in (m.get("anterior"), m.get("hace_un_año")) if x and x.get("tasa_pesos")]
+    texto = (f"<b>El crédito de vivienda en {m['nombre']}:</b> tasa media del {pct(m['tasa_pesos'])} en pesos"
+             + (f" ({'; '.join(comparar)})" if comparar else "")
+             + (f" y {pct(m['tasa_uvr'])} + la inflación en UVR" if m.get("tasa_uvr") else ""))
+    if m.get("fiable"):
+        texto += f"; {_n(m['creditos'])} créditos para comprar vivienda en {d['ciudad']}"
+    return f'<p class="sub" style="margin-top:8pt">{texto}.</p>'
+
+
 def _mes_html(d: dict) -> str:
     """La semana del mes: lo que se movió el mes anterior (src/contenido.py: mes)."""
     m, div = d["mes"], d["division"]
@@ -598,6 +637,7 @@ def _mes_html(d: dict) -> str:
   <th class="num">Publicadas</th><th class="num">Retiradas</th><th class="num">Bajaron<br>de precio</th>
   <th class="num">Subieron<br>de precio</th><th class="num">Precio de las<br>mismas viviendas</th></tr></thead>
   <tbody>{filas}</tbody></table>
+{_credito_mes_html(d)}
 <p class="nota">{_plural(div).capitalize()} con al menos {m['min_comuna']} viviendas en venta todo el mes. Bajaron o subieron: un
   cambio de su precio pedido de al menos {_pct(op.BAJA_MIN)}. Precio de las mismas viviendas: el cambio medio del precio
   pedido de las que estuvieron en venta todo el mes. No comparamos la mediana del m² con la del mes anterior: sube o
@@ -707,6 +747,7 @@ def informe_html(d: dict) -> str:
   {_tile("Canon mediano", _mill(d['canon_mediano']), "por mes")}
   {_tile("Rentabilidad bruta típica", _pct(d['rentab'], 1), "antes de gastos e impuestos")}
 </div>
+{_credito_html(d)}
 <div class="resumen"><ul>{"".join(f"<li>{f}</li>" for f in frases(d))}</ul></div>
 
 {por_zona}
@@ -744,7 +785,9 @@ def informe_html(d: dict) -> str:
   en el mismo barrio oficial (o a menos de 1 km, o en la {div}); el descuento compara el precio por m² con la mediana
   de esos similares. Entorno: OpenStreetMap. Es una estimación del precio de mercado, no un avalúo (Ley 1673 de
   2013): verifica siempre el inmueble y su documentación. Fuente: avisos públicos de portales inmobiliarios{
-  f"; {_plural(div)} y barrios: {d['fuente_zonas']}" if d["con_zonas"] and d["fuente_zonas"] else ""}.</p>
+  f"; {_plural(div)} y barrios: {d['fuente_zonas']}" if d["con_zonas"] and d["fuente_zonas"] else ""}{
+  "; crédito de vivienda: Superintendencia Financiera (créditos de compra en pesos, tasa ponderada por monto; la "
+  "cuota es una aproximación a cuota fija, no una oferta de crédito)" if d.get("credito") else ""}.</p>
 </body></html>"""
 
 
@@ -763,6 +806,11 @@ def edicion(d: dict) -> dict:
     d["mensual"] = contenido.es_semana_del_mes(d["hasta"])
     d["mes"] = contenido.mes(d) if d["mensual"] and d["con_zonas"] else None
     d["barrio_semana"] = None
+    try:
+        d["credito"] = contenido.credito_semana(d)
+    except Exception as e:              # noqa: BLE001 — sin el crédito, el informe sale igual
+        d["credito"] = None
+        print(f"⚠️  Sin crédito de vivienda: {type(e).__name__}: {e}")
     if d["con_zonas"]:
         try:
             tb = contenido.por_barrio(d)

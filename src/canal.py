@@ -8,7 +8,9 @@ publicaciones del día, cada una EXACTAMENTE como saldrá en el canal y con dos 
     los 2 últimos barridos) y con eso cumplen los criterios. Lo publicado hace más de una semana que no ha cambiado
     queda fuera: el 14-nov, de 266 avisos activos de Cali que cumplían los criterios, 171 llevaban más de 3 meses y
     86 más de un año sin bajar el precio (abandonados, desactualizados o con algún problema, no oportunidades);
-  - los lunes, el pulso del mercado de la semana; los jueves, las mayores bajadas de precio.
+  - los lunes, el pulso del mercado de la semana (con el crédito de vivienda: src/credito.py); los jueves, las
+    mayores bajadas de precio.
+Cada oportunidad lleva su cuota aproximada con la tasa media del crédito de las últimas semanas en la ciudad.
 Al pulsar un botón, Telegram avisa al Worker de Cloudflare (cloudflare/bot/), que contesta y lanza `aprobar`: la
 publicación queda en cola, o sale ya si son más de las 07:00 de Colombia. A las 07:00 el Worker lanza `publicar`, que
 copia al canal lo aprobado (copyMessage: mismo texto y formato, sin «reenviado de»).
@@ -33,7 +35,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src import contenido
+from src import contenido, credito
 from src import oportunidades as op
 from src.config import BASE_DIR
 
@@ -179,6 +181,7 @@ def bajada_brusca(id_inmueble: str) -> str | None:
 
 def texto_oportunidad(r: pd.Series, pie: str) -> str:
     comps = "\n".join(f"   ↳ {op._comp_txt(c)} · [ver]({c['URL detalle']})" for _, c in r["comps"].iterrows())
+    cuota = credito.texto_cuota(r["Precio"], r.get("Ciudad") or "Cali")
     return "\n".join(x for x in [
         f"*🔎 Oportunidad del día · {r.get('Ciudad') or 'Cali'}*",
         "",
@@ -191,6 +194,7 @@ def texto_oportunidad(r: pd.Series, pie: str) -> str:
         f"📊 *{r['descuento']:.0%} bajo sus {r['n_comps']} similares* {'del barrio' if r['nivel_comps'] == 'barrio' else 'cercanos'} "
         f"(mediana {op._m2(r['med_comps'])} M/m²)",
         f"🤖 *{r['bajo_modelo']:.0%} bajo nuestro modelo de precios* (estima {op._millones(r['modelo_precio'])})",
+        f"🏦 {cuota}" if cuota else None,
         "",
         "Tres de sus similares:",
         comps,
@@ -227,8 +231,38 @@ def texto_pulso(ciudad: str, pie: str) -> str:
                        f"📉 {n(m['bajaron'])} bajaron de precio y {n(m['subieron'])} subieron, de las "
                        f"{n(m['en_venta_todo'])} en venta todo el mes",
                        f"💰 El precio pedido de esas mismas viviendas: {cambio} en el mes"]
-    lineas += ["", "_Precios pedidos en avisos públicos de vivienda en venta._", pie]
+    del_credito = lineas_credito(ciudad, contenido.es_semana_del_mes(d["hasta"]))
+    lineas += del_credito
+    lineas += ["", "_Precios pedidos en avisos públicos de vivienda en venta"
+               + ("; crédito: Superintendencia Financiera._" if del_credito else "._"), pie]
     return "\n".join(lineas).strip()
+
+
+def lineas_credito(ciudad: str, con_mes: bool = False) -> list[str]:
+    """El crédito de vivienda en el pulso: la tasa media de las últimas 4 semanas (en pesos y en UVR) frente a las 4
+    anteriores, y los créditos para comprar vivienda si el volumen es fiable (src/credito.py); el primer lunes del
+    mes, también el mes. Vacío si la ciudad no tiene serie."""
+    municipio = credito.CIUDADES.get(ciudad)
+    serie = credito.leer()
+    r = credito.resumen(serie, municipio) if municipio else None
+    if not r or not r["tasa_pesos"]:
+        return []
+    pct, n = credito.pct, lambda x: f"{x:,.0f}".replace(",", ".")
+    año = (r["hace_un_año"] or {}).get("tasa_pesos")
+    lineas = ["", f"*🏦 El crédito de vivienda* (4 semanas al {credito.fecha_corta(r['hasta'])})",
+              f"Tasa media en pesos: *{pct(r['tasa_pesos'])}*" + (f" (hace un año: {pct(año)})" if año else "")]
+    if r["tasa_uvr"]:
+        lineas.append(f"En UVR: {pct(r['tasa_uvr'])} + la inflación")
+    if r["fiable"]:
+        lineas.append(f"{n(r['creditos'])} créditos para comprar vivienda en {ciudad}")
+    if (cambio := r["pais"]["cambio_año"]) is not None and abs(cambio) >= 0.03:
+        lineas.append(f"En todo el país, un {abs(cambio):.0%} {'menos' if cambio < 0 else 'más'} créditos que hace un año")
+    m = credito.mes(serie, municipio) if con_mes else None
+    if m and m["tasa_pesos"]:
+        a = m.get("anterior") or {}
+        lineas.append(f"En {m['nombre']}: tasa media {pct(m['tasa_pesos'])}"
+                      + (f" ({a['nombre']}: {pct(a['tasa_pesos'])})" if a.get("tasa_pesos") else ""))
+    return lineas
 
 
 def texto_bajadas(ciudad: str, pie: str) -> str | None:

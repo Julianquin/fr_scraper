@@ -3,7 +3,8 @@
 #
 #   proponer  al terminar el barrido de Metrocuadrado (~02:45 Colombia): manda al chat del administrador las
 #             publicaciones del día (oportunidad del día; los lunes el pulso, los jueves las bajadas), cada una
-#             como saldrá en el canal, con «Publicar» y «Descartar».
+#             como saldrá en el canal, con «Publicar» y «Descartar». Antes, actualiza el crédito de vivienda
+#             (src/credito.py: la tasa del pulso y la cuota de cada oportunidad).
 #   aprobar   lo lanza el Worker cloudflare/bot/ al pulsar «Publicar»: a la cola, o al canal ya si son más de
 #             las 07:00 de Colombia.
 #   publicar  lo lanza el mismo Worker a las 07:00 de Colombia: copia al canal lo aprobado.
@@ -75,6 +76,11 @@ jobs:
             { python -m src.almacen traer "modelos/$f" --destino data/_r2tmp && mv "data/_r2tmp/modelos/$f" data/modelos/; } \
               || echo "⚠️  Sin modelos/$f"
           done
+      - name: Crédito de vivienda (Superintendencia Financiera → credito/ en R2; los lunes avisa si algo va mal)
+        if: env.ACCION == 'proponer'
+        timeout-minutes: 10
+        continue-on-error: true            # sin él, las propuestas salen sin la cuota (o con la serie de ayer)
+        run: python -m src.credito actualizar --avisar
       - name: Canal (${{ env.ACCION }})
         env:
           MENSAJE: ${{ github.event.inputs.mensaje }}

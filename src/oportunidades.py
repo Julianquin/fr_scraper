@@ -537,20 +537,23 @@ def _tarjeta(r: pd.Series, i: int, insignia: str, clase: str, precio: str, linea
 
 
 def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
+    from src import credito
     from src.rentabilidad import texto as renta_txt
     comps = lambda r: [f"· {_comp_txt(c)}" for _, c in r["comps"].iterrows()] if "comps" in r else []
+    cuota = lambda r: credito.texto_cuota(r["Precio"], resumen["ciudad"])
     nuevas = [_tarjeta(r, i, f"{r['descuento']:.0%} bajo comparables", "ok",
                        f"<b>{_millones(r['Precio'])}</b> · {_m2(r['precio_m2'])} M/m²",
                        [f"{_comps_txt(r)} · confianza {r['confianza'].lower()}", *comps(r), _modelo_txt(r),
-                        _otro_portal_txt(r), renta_txt(r), _historia_txt(r, hasta)],
+                        _otro_portal_txt(r), renta_txt(r), cuota(r), _historia_txt(r, hasta)],
                        _señales(r))
               for i, (_, r) in enumerate(sel.iterrows(), 1)]
     bajaron = [_tarjeta(r, i, _bajo_txt(r), "baja",
                         f"{_millones(r['precio_antes'])} → <b>{_millones(r['Precio'])}</b> · "
                         f"{_m2(r['precio_m2'])} M/m²",
-                        [_frente_comps(r), _modelo_txt(r), _otro_portal_txt(r), renta_txt(r),
+                        [_frente_comps(r), _modelo_txt(r), _otro_portal_txt(r), renta_txt(r), cuota(r),
                          _historia_txt(r, hasta)], [])
                for i, (_, r) in enumerate(bj.iterrows(), 1)]
+    tasa = credito.linea_tasa(resumen["ciudad"])
     nota_renta = (" Arriendo estimado: mediana del canon/m² de arriendos similares publicados (sin amoblados "
                   "ni por días); la rentabilidad bruta es ese canon × 12 ÷ precio, antes de administración, "
                   "impuestos y vacancia." if resumen.get("con_arriendos") else "")
@@ -586,7 +589,8 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
     <b>{resumen['calificados']}</b> tenían comparables suficientes,
     <b>{resumen['bajo_umbral']}</b> estaban más de un {resumen['umbral']:.0%} bajo sus comparables
     y <b>{resumen['descartados']}</b> de ellos se descartaron como probables errores.
-    Te mostramos los <b>{len(sel)}</b> mejores. Además, <b>{resumen['bajadas']}</b> avisos bajaron de precio.</div>
+    Te mostramos los <b>{len(sel)}</b> mejores. Además, <b>{resumen['bajadas']}</b> avisos bajaron de precio.{
+    f"<br>{html.escape(tasa)}." if tasa else ""}</div>
   <h2>Nuevos bajo sus comparables</h2>
   {''.join(nuevas) or '<p>Esta semana no hubo oportunidades que pasaran los filtros.</p>'}
   {seccion_bajadas}
@@ -605,8 +609,11 @@ def _enlaces(r: pd.Series) -> list[str]:
 
 
 def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.Timestamp) -> str:
+    from src import credito
     from src.rentabilidad import texto as renta_txt
-    lineas = [f"*Oportunidades de la semana — {resumen['ciudad']}*", resumen["periodo"], "",
+    tasa = credito.linea_tasa(resumen["ciudad"])
+    lineas = [f"*Oportunidades de la semana — {resumen['ciudad']}*", resumen["periodo"],
+              *([f"🏦 {tasa}"] if tasa else []), "",
               "*🆕 Nuevos bajo sus comparables*", ""]
     for i, (_, r) in enumerate(sel.iterrows(), 1):
         lineas += [f"*{i}. {r['descuento']:.0%} bajo comparables* — {_ficha(r)}",
@@ -619,6 +626,8 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
             lineas.append(f"🤖 {_mayus(modelo)}")
         if renta := renta_txt(r):
             lineas.append(f"💵 {renta}")
+        if cuota := credito.texto_cuota(r["Precio"], resumen["ciudad"]):
+            lineas.append(f"🏦 {cuota}")
         if historia := _historia_txt(r, hasta):
             lineas.append(f"🕒 {historia}")
         lineas += [f"🏷️ {s}" for s in _señales(r)]
@@ -635,6 +644,8 @@ def mensaje_whatsapp(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: 
                 lineas.append(f"🤖 {_mayus(modelo)}")
             if renta := renta_txt(r):
                 lineas.append(f"💵 {renta}")
+            if cuota := credito.texto_cuota(r["Precio"], resumen["ciudad"]):
+                lineas.append(f"🏦 {cuota}")
             if historia := _historia_txt(r, hasta):
                 lineas.append(f"🕒 {historia}")
             lineas += _enlaces(r) + [""]

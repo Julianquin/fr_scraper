@@ -75,6 +75,8 @@ jobs:
           python -m src.almacen traer osm/ --destino data        # informe: el entorno de cada oportunidad
           # La presentación de los PDF (src/tema.py): logo, fuente y colores de marca/ en R2; sin ellos, el estilo neutro
           python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
+          # El crédito de vivienda (lo actualiza el canal cada madrugada): la tasa y la cuota de cada oportunidad
+          python -m src.almacen traer credito/ --destino data || echo "⚠️  Sin el crédito de vivienda"
           # Informe: el barrio de la semana que ya eligió el canal esta madrugada (data/contenido/, donde lo busca
           # src/contenido.leer sin claves de R2): así es el mismo del carrusel; sin él, se elige sin anotar
           python -m src.almacen traer contenido/barrios_semana.json --destino data || echo "⚠️  Sin barrios_semana.json"
