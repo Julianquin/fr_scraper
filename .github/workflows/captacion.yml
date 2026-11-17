@@ -3,7 +3,9 @@
 #
 #   Actions → "Informe de precio para captar" → Run workflow. Dos formas:
 #     - un aviso publicado: su enlace o id (FincaRaíz o Metrocuadrado) en «aviso»;
-#     - un inmueble sin publicar: ciudad (de la lista), tipo, m², habitaciones, baños, estrato y barrio. Se
+#     - un inmueble sin publicar: ciudad (de la lista), tipo, m², habitaciones, baños, estrato y barrio. En Cali,
+#       en «barrio» puede ir la dirección (con la torre y el apartamento): el punto, el tipo y el área salen del
+#       catastro (src/catastro_cali.py) y el informe avisa si el área no cuadra. Se
 #       aceptan errores de escritura ("El Ingenip"); si el barrio no aparece o puede ser varios ("Pance",
 #       "Santa Barbara" en Bogotá), llega por Telegram la lista de opciones para volver a lanzarlo con una.
 #       La ciudad puede ser un área («Cali y alrededores»: Jamundí, Yumbo, Palmira, Candelaria) y el barrio, uno
@@ -49,7 +51,7 @@ on:
         options: [Apartamento, Casa, Apartaestudio]
         default: Apartamento
       m2:
-        description: "Área en m²"
+        description: "Área en m² (con una dirección de Cali y su apartamento, puede ir vacía: la del catastro)"
         default: ""
       habitaciones:
         description: "Habitaciones"
@@ -61,7 +63,7 @@ on:
         description: "Estrato"
         default: ""
       barrio:
-        description: "Barrio, coordenadas (3.3712, -76.5321) o enlace de Google Maps (si el barrio no aparece o puede ser varios, llega por Telegram la lista para elegir)"
+        description: "Barrio, dirección en Cali (KR 98 B # 48 - 127 TO 3 AP 436), coordenadas (3.3712, -76.5321) o enlace de Google Maps (si no aparece o puede ser varios, llega por Telegram la lista para elegir)"
         default: ""
       parqueaderos:
         description: "Parqueaderos"
@@ -106,6 +108,10 @@ jobs:
           python -m src.almacen traer estado/historial/ --destino data
           # La presentación de los PDF (src/tema.py): logo, fuente y colores de marca/ en R2; sin ellos, el estilo neutro
           python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
+          # El catastro de Cali (E9.3): con una dirección, el punto, el tipo y el área del predio
+          for f in predios.parquet meta.json; do
+            python -m src.almacen traer "catastro/$f" --destino data || echo "⚠️  Sin catastro/$f"
+          done
           python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp
           mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/
           # Los estimados sin ver: para un aviso publicado, el estimado de un modelo que no lo vio (sin ellos, el
@@ -133,7 +139,8 @@ jobs:
           if [ -n "$AVISO" ]; then
             args+=(--aviso "$AVISO")
           else
-            args+=(--ciudad "$CIUDAD" --tipo "$TIPO" --m2 "$M2" --barrio "$BARRIO")
+            args+=(--ciudad "$CIUDAD" --tipo "$TIPO" --barrio "$BARRIO")
+            [ -n "$M2" ] && args+=(--m2 "$M2")
             [ -n "$HABITACIONES" ] && args+=(--habitaciones "$HABITACIONES")
             [ -n "$BANOS" ] && args+=(--banos "$BANOS")
             [ -n "$ESTRATO" ] && args+=(--estrato "$ESTRATO")

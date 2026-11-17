@@ -25,9 +25,15 @@ Salida (R2 `catastro/`, en local data/catastro/):
     conjuntos.parquet    los lotes con apartamentos: dirección, apartamentos, pisos (para los agentes)
     meta.json            cuándo se bajó y cuántos
 
+Direcciones (E9.3, `buscar`): la del catastro y la que escribe el agente se llevan a la misma forma (`canon`):
+«Carrera 98B No. 48-127, Torre 3 Apto 436» y «KR 98 B # 48 - 127 TO 3 AP 436» son la misma. Con la unidad, el
+predio (área construida, pisos, número predial, plano y uso del suelo); sin ella, el edificio (cuántos
+apartamentos, sus áreas). El punto es el de la manzana (para buscar los similares).
+
 Uso:
     python -m src.catastro_cali actualizar [--si-viejo 30]   # baja, resume y sube (solo si lo de R2 tiene > N días)
     python -m src.catastro_cali resumen                       # lo guardado, en pocas líneas
+    python -m src.catastro_cali buscar "KR 98 B # 48-127 AP 436"
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -52,6 +59,8 @@ R2 = "catastro/"
 USOS_VIVIENDA = {1, 2, 3, 4, 5, 12, 13}
 USOS_APARTAMENTO = {1, 2}           # siempre apartamentos
 USOS_PH_MIXTOS = {5, 13}            # apartamentos o casas en conjunto: según la dirección («AP …» / «CA …»)
+VERSION = 2                         # 2: con la dirección normalizada y el punto de la manzana (E9.3); si lo de R2
+                                    # es de otra versión, se rehace aunque sea reciente
 MIN_CONJUNTO = 2                    # un lote es un edificio o conjunto con al menos estos apartamentos
 CLAVE_MANZANA = slice(5, 17)        # en el número predial: zona, sector, comuna, barrio y manzana
 CLAVE_LOTE = slice(5, 21)           # … y el terreno
@@ -112,7 +121,8 @@ def barrio_de_manzanas() -> pd.DataFrame:
     m = zonas.asignar_zonas(pd.DataFrame(filas).assign(Barrio=None), "Cali")
     print(f"   ⬇️  {len(m):,} manzanas")
     return (m.sort_values("area", ascending=False).drop_duplicates("manzana")
-            [["manzana", "barrio_oficial", "comuna"]].reset_index(drop=True))
+            [["manzana", "barrio_oficial", "comuna", "Latitud", "Longitud"]]
+            .rename(columns={"Latitud": "lat", "Longitud": "lon"}).reset_index(drop=True))
 
 
 # ── Clasificar y resumir ─────────────────────────────────────────────────────────────────────────────────
@@ -128,8 +138,138 @@ def clasificar(t: pd.DataFrame, manzanas: pd.DataFrame) -> pd.DataFrame:
     t["direccion"] = t["direpred"].fillna("").str.replace(r"\s+", " ", regex=True).str.strip().str.replace(
         UNIDAD, "", regex=True)
     t["manzana_clave"] = t["npn"].str[CLAVE_MANZANA]
+    partes = [canon(x) for x in t["direpred"].fillna("")]
+    t["dir_base"] = [p[0] for p in partes]
+    t["dir_unidad"] = [";".join(f"{k}={v}" for k, v in p[1].items()) for p in partes]
     t = t.drop(columns=["comuna", "barrio"]).rename(columns={"nom_barrio": "barrio_catastro"})
     return t.merge(manzanas.rename(columns={"manzana": "manzana_clave"}), on="manzana_clave", how="left")
+
+
+# ── Las direcciones (E9.3): la misma forma para la del catastro y la que escribe el agente ─────────────────
+VIAS = {"CALLE": "CL", "CLL": "CL", "CL": "CL", "C": "CL", "CALL": "CL",
+        "CARRERA": "KR", "CRA": "KR", "KRA": "KR", "KR": "KR", "K": "KR", "CR": "KR", "CARR": "KR", "CRR": "KR",
+        "AVENIDA": "AV", "AV": "AV", "AVE": "AV", "AVDA": "AV", "A": "AV",
+        "DIAGONAL": "DG", "DG": "DG", "DIAG": "DG", "TRANSVERSAL": "TV", "TV": "TV", "TR": "TV", "TRANSV": "TV",
+        "TRV": "TV"}
+PUNTOS = {"NORTE": "N", "OESTE": "O", "W": "O", "SUR": "S", "ESTE": "E"}
+# Torre, bloque, edificio e interior son lo mismo: el catastro los mezcla en un mismo conjunto («TO 1 AP 102» y
+# «BLQ 1 AP 103»)
+UNIDADES = {"APARTAMENTO": "AP", "APTO": "AP", "APT": "AP", "AP": "AP", "TORRE": "TO", "TO": "TO",
+            "BLOQUE": "TO", "BLQ": "TO", "BL": "TO", "BLOQ": "TO", "EDIFICIO": "TO", "ED": "TO", "EDIF": "TO",
+            "CASA": "CA", "CA": "CA", "INTERIOR": "TO", "INT": "TO", "IN": "TO", "ETAPA": "ET", "ET": "ET",
+            "LOCAL": "LC", "LC": "LC", "OFICINA": "OF", "OF": "OF", "MANZANA": "MZ", "MZ": "MZ", "LOTE": "LT",
+            "LT": "LT", "PISO": "PISO"}
+
+
+def _tokens(texto: str) -> list[str]:
+    t = unicodedata.normalize("NFKD", str(texto).upper()).encode("ascii", "ignore").decode()
+    t = re.sub(r"\b(N[O°º]|NRO|NUM|NUMERO)\b\.?", " # ", t)                # «No. 48», «No. AV 2A» → «#»
+    t = t.replace("#", " # ").replace("-", " - ")
+    t = re.sub(r"[^A-Z0-9#\- ]", " ", t)
+    t = re.sub(r"(\d)([A-Z])", r"\1 \2", t)
+    t = re.sub(r"([A-Z])(\d)", r"\1 \2", t)
+    return t.split()
+
+
+def canon(texto: str) -> tuple[str | None, dict]:
+    """La dirección en una forma única: (base, unidad). 'Carrera 98B No. 48-127, Torre 3 Apto 436' y
+    'KR 98 B # 48 - 127 TO 3 AP 436' → ('KR 98 B # 48 127', {'TO': '3', 'AP': '436'}). None si no empieza
+    por una vía (calle, carrera, avenida, diagonal, transversal)."""
+    tk = _tokens(texto)
+    if len(tk) < 3 or tk[0] not in VIAS or not any(x.isdigit() for x in tk[1:3]):
+        return None, {}
+    tk = [VIAS[tk[0]]] + [PUNTOS.get(x, x) for x in tk[1:]]
+    if "#" in tk and "-" in tk[tk.index("#"):]:
+        i = tk.index("-", tk.index("#"))
+        base, resto = tk[:i + 2], tk[i + 2:]
+    else:                                       # sin «-»: hasta la primera palabra de unidad
+        j = next((k for k, x in enumerate(tk) if k > 1 and x in UNIDADES), len(tk))
+        base, resto = tk[:j], tk[j:]
+    unidad, clave = {}, None
+    for x in resto:
+        if x in UNIDADES:
+            clave = UNIDADES[x]
+            if unidad.get(clave):               # «ED 3 TO 2»: los dos, separados
+                unidad[clave] += "/"
+            unidad.setdefault(clave, "")
+        elif clave:
+            unidad[clave] += x
+    unidad = {k: v.lstrip("0") or v for k, v in unidad.items() if v and k != "PISO"}
+    return " ".join(x for x in base if x != "-"), unidad        # sin el guion: hay direcciones que no lo llevan
+
+
+def es_direccion(texto: str | None) -> bool:
+    """¿Parece una dirección («KR 98 B # 48 - 127») y no un barrio o unas coordenadas?"""
+    return bool(texto) and "#" in _tokens(texto) and canon(texto)[0] is not None
+
+
+def _unidad(s: str) -> dict:
+    return dict(p.split("=", 1) for p in s.split(";") if "=" in p) if s else {}
+
+
+def enlaces(predio: dict) -> dict:
+    """El plano del predio (planoteca de la IDESC) y la consulta de su uso del suelo (Alcaldía)."""
+    return {"plano": f"https://idesc.cali.gov.co/servicios/planoteca/planos.php?id_predio={predio['id_predio']}",
+            "uso_suelo": f"https://www.cali.gov.co/tramites/uso-de-suelo/consulta/{predio['npn']}"}
+
+
+def _predio(r: pd.Series) -> dict:
+    p = {"id_predio": str(r["id_predio"]), "npn": r["npn"], "direccion": r["direpred"], "tipo": r["tipo"],
+         "area": None if pd.isna(r["area_cons1"]) else float(r["area_cons1"]),
+         "pisos": None if pd.isna(r["total_pis1"]) else int(r["total_pis1"]), "uso": r["uso_princi"],
+         "destino": r["destinacio"], "editado": str(r["last_edite"])[:10]}
+    return {**p, **enlaces(p)}
+
+
+def buscar(texto: str, predios: pd.DataFrame | None = None) -> dict:
+    """El predio de una dirección de Cali en el catastro. `estado`:
+      unidad      un predio (el apartamento o la casa): `predio`, y el `edificio` si es uno
+      edificio    la dirección es la de un edificio o conjunto y no se dijo cuál unidad (o no se encontró): el
+                  `edificio` (apartamentos, pisos, áreas) y algunas `opciones`
+      casas       varias casas con la misma dirección (el lote y una mejora, o pisos registrados aparte): `casas`
+      varias      la unidad que se dijo puede ser varias («AP 101» en varias torres): `opciones`
+      no          no está: `sugerencias` (direcciones parecidas de la misma vía)
+    Siempre que se encuentra: `barrio_oficial`, `comuna`, `lat`, `lon` (el punto de la manzana)."""
+    import difflib
+    base, unidad = canon(texto)
+    if base is None:
+        return {"estado": "no", "sugerencias": [], "motivo": "no parece una dirección"}
+    p = predios if predios is not None else leer("predios")
+    en = p[p["dir_base"] == base]
+    if en.empty:
+        via = " ".join(base.split("#")[0].split())                     # «KR 98 B»
+        mismas = p.loc[p["dir_base"].fillna("").str.startswith(via + " #"), "dir_base"].dropna().unique()
+        if not len(mismas):
+            mismas = p.loc[p["dir_base"].fillna("").str.startswith(base.split()[0] + " "), "dir_base"].dropna().unique()
+        cerca = difflib.get_close_matches(base, list(mismas), n=6, cutoff=0.6)
+        como_se_escribe = p[p["dir_base"].isin(cerca)].groupby("dir_base")["direccion"].agg(lambda x: x.mode().iloc[0])
+        return {"estado": "no", "base": base, "sugerencias": [como_se_escribe.get(b, b) for b in cerca]}
+    viv = en[en["tipo"].notna()]
+    aptos = viv[viv["tipo"] == "apartamento"]
+    fila = (viv if len(viv) else en).iloc[0]
+    comun = {"base": base, "direccion": fila["direccion"], "barrio_oficial": fila["barrio_oficial"],
+             "comuna": fila["comuna"], "lat": fila["lat"], "lon": fila["lon"]}
+    edificio = None
+    if len(aptos) >= MIN_CONJUNTO:
+        a = aptos["area_cons1"]
+        edificio = {"apartamentos": len(aptos), "casas": int((viv["tipo"] == "casa").sum()),
+                    "pisos": int(aptos["total_pis1"].median()) if aptos["total_pis1"].notna().any() else None,
+                    "area_p10": float(a.quantile(.1)), "area_mediana": float(a.median()), "area_p90": float(a.quantile(.9))}
+    if unidad:
+        casan = viv[[all(_unidad(u).get(k) == v for k, v in unidad.items()) for u in viv["dir_unidad"]]]
+        if len(casan) == 1:
+            return {"estado": "unidad", **comun, "predio": _predio(casan.iloc[0]), "edificio": edificio}
+        if len(casan) > 1:
+            return {"estado": "varias", **comun, "edificio": edificio,
+                    "opciones": casan["direpred"].head(8).tolist()}
+    if len(viv) == 1:                           # una casa (o un solo predio de vivienda en la dirección)
+        return {"estado": "unidad", **comun, "predio": _predio(viv.iloc[0]), "edificio": None}
+    if edificio is None and len(viv) > 1:       # varias casas con la misma dirección (el lote y una mejora, pisos…)
+        return {"estado": "casas", **comun, "edificio": None,
+                "casas": [{"area": float(r["area_cons1"]), "pisos": None if pd.isna(r["total_pis1"]) else int(r["total_pis1"])}
+                          for _, r in viv.sort_values("area_cons1").iterrows()]}
+    return {"estado": "edificio", **comun, "edificio": edificio,
+            "opciones": viv["direpred"].head(6).tolist(), "unidad_buscada": unidad or None}
 
 
 def conjuntos(t: pd.DataFrame) -> pd.DataFrame:
@@ -196,7 +336,7 @@ def actualizar(si_viejo: int | None = None) -> None:
     resúmenes de R2. Si la IDESC falla, también: se usan los de la vez anterior."""
     if si_viejo is not None and _con_r2() and (meta := _meta_r2()):
         dias = (pd.Timestamp.now() - pd.Timestamp(meta["bajado"])).days
-        if dias <= si_viejo:
+        if dias <= si_viejo and meta.get("version") == VERSION:
             print(f"✅ Catastro de hace {dias} días (se rehace a los {si_viejo}): se bajan sus resúmenes")
             traer_resumen()
             return
@@ -219,13 +359,14 @@ def _rehacer() -> None:
     t = clasificar(bajar_predios(), barrio_de_manzanas())
     b, c = barrios(t), conjuntos(t)
     v = t[t["tipo"].notna()]
-    meta = {"bajado": f"{pd.Timestamp.now():%Y-%m-%d}", "editado_hasta": str(t["last_edite"].max())[:10],
+    meta = {"version": VERSION, "bajado": f"{pd.Timestamp.now():%Y-%m-%d}", "editado_hasta": str(t["last_edite"].max())[:10],
             "predios": len(t), "viviendas": len(v), "apartamentos": int((v["tipo"] == "apartamento").sum()),
             "casas": int((v["tipo"] == "casa").sum()), "con_barrio": round(float(v["barrio_oficial"].notna().mean()), 4),
             "barrios": len(b), "conjuntos": len(c)}
     CARPETA.mkdir(parents=True, exist_ok=True)
-    columnas = ["id_predio", "npn", "lote", "direccion", "direpred", "tipo", "destinacio", "uso_id1", "uso_princi",
-                "condicion", "total_pis1", "area_cons1", "barrio_catastro", "barrio_oficial", "comuna", "last_edite"]
+    columnas = ["id_predio", "npn", "lote", "direccion", "direpred", "dir_base", "dir_unidad", "tipo", "destinacio",
+                "uso_id1", "uso_princi", "condicion", "total_pis1", "area_cons1", "barrio_catastro", "barrio_oficial",
+                "comuna", "lat", "lon", "last_edite"]
     t[columnas].to_parquet(CARPETA / "predios.parquet", index=False, compression="zstd")
     b.to_parquet(CARPETA / "barrios.parquet", index=False, compression="zstd")
     c.to_parquet(CARPETA / "conjuntos.parquet", index=False, compression="zstd")
@@ -251,7 +392,8 @@ def meta() -> dict | None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("accion", choices=["actualizar", "resumen"])
+    p.add_argument("accion", choices=["actualizar", "resumen", "buscar"])
+    p.add_argument("direccion", nargs="?", help="(buscar) una dirección de Cali")
     p.add_argument("--si-viejo", type=int, help="solo si lo de R2 tiene más de estos días")
     a = p.parse_args()
     try:                                    # en local, las claves vienen de .env
@@ -261,6 +403,8 @@ def main() -> None:
         pass
     if a.accion == "actualizar":
         actualizar(a.si_viejo)
+    elif a.accion == "buscar":
+        print(json.dumps(buscar(a.direccion or ""), ensure_ascii=False, indent=1, default=str))
     else:
         print(meta())
         b = leer()

@@ -15,7 +15,10 @@ le muestre al propietario a qué precio salir al mercado.
   - Un rango de salida: donde se cruzan el rango del modelo y la mitad central de los comparables.
 
 El inmueble puede ser un aviso ya publicado (FincaRaíz o Metrocuadrado: por su enlace o su id; se compara
-además su precio pedido) o uno que todavía no está publicado (su ficha a mano). Los comparables son de los dos
+además su precio pedido) o uno que todavía no está publicado (su ficha a mano). En Cali, también por su dirección
+(E9.3, src/catastro_cali.py): el punto, el tipo y (con la torre y el apartamento) el área salen del catastro; el
+informe lleva el número predial, los enlaces al plano y al uso del suelo, y avisa si el área que se indica difiere
+más de un 20 % de la del catastro. Los comparables son de los dos
 portales, sin repetidos: de Metrocuadrado solo los que no están también en FincaRaíz (registro único,
 src/unificar.py), y nunca el propio inmueble en el otro portal. Metrocuadrado no da la fecha de publicación ni
 tenemos sus bajadas de precio: los días publicados y "bajó de precio" son de los de FincaRaíz.
@@ -32,6 +35,8 @@ Uso:
     python -m src.informe_captacion --ciudad Cali --tipo Apartamento --m2 85 --habitaciones 3 --banos 2 \\
         --estrato 5 --barrio "El Ingenio" [--parqueaderos 1] [--piso 4] [--antiguedad 3] [--administracion 350000]
     … --barrio "3.3712, -76.5321"            # o un enlace de Google Maps (también maps.app.goo.gl/…)
+    python -m src.informe_captacion --direccion "KR 98 B # 48 - 127 TO 3 AP 436" --habitaciones 3 --banos 2 \\
+        --estrato 4                         # Cali, por su dirección: punto, tipo y área del catastro (E9.3)
     python -m src.informe_captacion --ciudad "Cali y alrededores" --tipo Casa --m2 200 --barrio Alfaguara
     python -m src.informe_captacion --ciudad Otra --tipo Casa --m2 200 --barrio "https://maps.app.goo.gl/…"
     … [--enviar admin]                       # por Telegram al administrador (o a los agentes)
@@ -113,6 +118,66 @@ class UbicacionInvalida(BarrioNoEncontrado):
         consejo = ("Pega el enlace de Google Maps del punto o sus coordenadas («3.3712, -76.5321»)." if self.ciudad == OTRA
                    else "Escribe el barrio, las coordenadas como «3.3712, -76.5321» o pega el enlace de Google Maps del punto.")
         return f"❓ Informe de precio: {self.motivo} («{self.texto[:120]}»).\n{consejo}"
+
+
+class DireccionNoEncontrada(BarrioNoEncontrado):
+    """Una dirección de Cali que no está en el catastro, o que puede ser varias unidades, o la de un edificio sin
+    decir cuál apartamento ni el área (src/catastro_cali.buscar): trae las opciones."""
+
+    def __init__(self, direccion: str, r: dict):
+        self.direccion, self.r = direccion, r
+        super().__init__(direccion, "Cali", [])
+
+    def mensaje(self) -> str:
+        r, d = self.r, self.direccion
+        if r.get("motivo"):
+            return f"❓ Informe de precio: «{d}» {r['motivo']}. Escribe la dirección como «KR 98 B # 48 - 127 AP 436»."
+        lista = lambda xs: "\n".join(f"• {x}" for x in xs)
+        if r["estado"] == "no":
+            return (f"❓ Informe de precio: no encontré «{d}» en el catastro de Cali."
+                    + (f" ¿Es alguna de estas?\n{lista(r['sugerencias'])}\n" if r["sugerencias"] else "\n")
+                    + "Vuelve a lanzarlo con la dirección como sale en el recibo del predial, o con el barrio.")
+        if r["estado"] == "casas":
+            areas = " y ".join(f"{c['area']:.0f} m²" for c in r["casas"][:4])
+            return (f"❓ Informe de precio: en «{d}» el catastro tiene {len(r['casas'])} casas o construcciones ({areas}). "
+                    f"Vuelve a lanzarlo con el área en m² de la que se quiere vender.")
+        e = r.get("edificio") or {}
+        cuantos = f" ({e['apartamentos']} apartamentos de {e['area_p10']:.0f}–{e['area_p90']:.0f} m²)" if e else ""
+        que = ("esa unidad puede ser varias" if r["estado"] == "varias" else "es un edificio o conjunto")
+        return (f"❓ Informe de precio: «{d}» {que}{cuantos}. Vuelve a lanzarlo con la torre y el apartamento, como "
+                f"estos:\n{lista(r.get('opciones') or [])}\n… o con el área en m².")
+
+
+def ficha_por_direccion(direccion: str, tipo: str | None, m2: float | None, habitaciones: float | None = None,
+                        banos: float | None = None, estrato: float | None = None, parqueaderos: float | None = None,
+                        piso: float | None = None, antiguedad: int | None = None, administracion: float | None = None,
+                        descripcion: str = "") -> pd.Series:
+    """La ficha de un inmueble de Cali por su dirección (E9.3): el catastro da el punto (el de su manzana), el tipo
+    y, si se dice la unidad, el área construida; lo que escribe el agente manda, salvo el tipo si el catastro dice
+    otro (una casa no se compara con apartamentos). Sin la unidad, hace falta el área."""
+    from src import catastro_cali
+    predios = catastro_cali.leer("predios")
+    if predios is None or "dir_base" not in predios:
+        raise SystemExit("❌ Falta el catastro con direcciones (data/catastro/predios.parquet, versión "
+                         f"{catastro_cali.VERSION}): el canal lo rehace de madrugada, o python -m src.catastro_cali actualizar")
+    r = catastro_cali.buscar(direccion, predios)
+    predio = r.get("predio")
+    if r["estado"] in ("no", "varias") or (r["estado"] in ("edificio", "casas") and not m2):
+        raise DireccionNoEncontrada(direccion, r)
+    notas = []
+    del_catastro = ({"apartamento": "Apartamento", "casa": "Casa"}.get(predio["tipo"]) if predio
+                    else "Casa" if r["estado"] == "casas" else None)
+    if del_catastro and tipo and (del_catastro == "Casa") != (tipo == "Casa"):
+        notas.append(f"El catastro dice {del_catastro.lower()}, no {tipo.lower()}: se usó {del_catastro.lower()}.")
+        tipo = del_catastro
+    tipo = tipo or del_catastro or "Apartamento"
+    if not m2:
+        m2 = predio["area"]
+    f = ficha_manual("Cali", tipo, m2, habitaciones, banos, estrato, None, r["lat"], r["lon"], parqueaderos, piso,
+                     antiguedad, administracion, descripcion)
+    f["catastro"], f["direccion"] = r, (predio or {}).get("direccion") or r["direccion"]
+    f["nota_catastro"] = " ".join(notas)
+    return f
 
 
 # Coordenadas escritas ("3.3712, -76.5321") o en un enlace de Google Maps: el pin (!3d…!4d…), ?q=/ll=/query= o @
@@ -514,9 +579,58 @@ def grafico(d: dict, w: float = 500, h: float = 100) -> str:
 # ── El HTML ─────────────────────────────────────────────────────────────────────────────────────────────
 
 
+DIF_AREA = 0.20             # el área que se indica y la del catastro difieren más que esto: se avisa (el catastro
+                            # suele dar el área privada; los avisos, a veces, la construida total)
+
+
+def aviso_area(f: pd.Series) -> str | None:
+    """'El área que se indicó (120 m²) es un 26 % mayor que la del catastro (95 m²): …'; None si cuadra o no hay
+    con qué comparar. Con el edificio y sin la unidad, frente a las áreas de sus apartamentos."""
+    cat = f.get("catastro")
+    m2 = pd.to_numeric(f.get("m2"), errors="coerce")
+    if not isinstance(cat, dict) or pd.isna(m2):
+        return None
+    if (p := cat.get("predio")) and p.get("area"):
+        dif = m2 / p["area"] - 1
+        if abs(dif) <= DIF_AREA:
+            return None
+        return (f"El área que se indicó ({m2:.0f} m²) es un {abs(dif):.0%} {'mayor' if dif > 0 else 'menor'} que la del "
+                f"catastro ({p['area']:.0f} m²): confírmala con la escritura o el certificado catastral; el precio "
+                f"por m² depende de ella.").replace("%", " %")
+    if (e := cat.get("edificio")) and not (e["area_p10"] * (1 - DIF_AREA) <= m2 <= e["area_p90"] * (1 + DIF_AREA)):
+        return (f"Los apartamentos de este edificio tienen entre {e['area_p10']:.0f} y {e['area_p90']:.0f} m² en el "
+                f"catastro y se indicaron {m2:.0f} m²: revisa el área o di el número del apartamento.")
+    return None
+
+
+def _catastro_txt(f: pd.Series) -> str | None:
+    """La línea del catastro (src/catastro_cali.py): el predio, su edificio, el número predial y los enlaces."""
+    cat = f.get("catastro")
+    if not isinstance(cat, dict):
+        return None
+    e, p = cat.get("edificio"), cat.get("predio")
+    edificio = (f" en un conjunto de {e['pisos']} pisos y {_n(e['apartamentos'])} apartamentos"
+                if e and e.get("pisos") else "")
+    if p:
+        enlaces = (f' · <a href="{html.escape(p["uso_suelo"])}">uso del suelo ↗</a> · '
+                   f'<a href="{html.escape(p["plano"])}">plano ↗</a>')
+        area = f" de {p['area']:.0f} m² construidos" if p.get("area") else ""
+        return f"<b>Catastro:</b> {p['tipo']}{area}{edificio}; predio {p['npn']}{enlaces}."
+    if cat.get("casas"):
+        areas = " y ".join(f"{c['area']:.0f} m²" for c in cat["casas"][:4])
+        return (f"<b>Catastro:</b> en {html.escape(cat['direccion'])} hay {len(cat['casas'])} casas o construcciones "
+                f"({areas}): el informe usa el área que se indicó.")
+    if not e:
+        return None
+    pisos = f" ({e['pisos']} pisos)" if e.get("pisos") else ""
+    return (f"<b>Catastro:</b> en {html.escape(cat['direccion'])} hay {_n(e['apartamentos'])} apartamentos de "
+            f"{e['area_p10']:.0f}–{e['area_p90']:.0f} m²{pisos}; con el número del apartamento, el informe toma su "
+            f"área y su número predial.")
+
+
 def _ficha_txt(f: pd.Series) -> str:
     n = lambda c: pd.to_numeric(f.get(c), errors="coerce")
-    partes = [f"{n('m2'):.0f} m²"]
+    partes = ([str(f["direccion"])] if f.get("direccion") else []) + [f"{n('m2'):.0f} m²"]
     for c, s, p in (("habitaciones", "habitación", "habitaciones"), ("banos", "baño", "baños"),
                     ("parqueaderos", "parqueadero", "parqueaderos")):
         if pd.notna(n(c)) and n(c) > 0:
@@ -634,6 +748,11 @@ def informe_html(d: dict) -> str:
     puntos = [f"Con su ficha, el modelo estima <b>{_mill(_redondear(m['estimado']), 0)}</b> "
               f"({_mill(m['pm2'], 1)}/m²); 8 de cada 10 inmuebles así se piden entre "
               f"{_mill(_redondear(m['p10']), 0)} y {_mill(_redondear(m['p90']), 0)}."]
+    if catastro := _catastro_txt(f):        # con la dirección (E9.3): el predio del catastro y si el área cuadra
+        puntos.append(catastro)
+    if area := aviso_area(f):
+        puntos.append(f"<b>Ojo con el área.</b> {html.escape(area)}")
+    max_comps = MAX_COMPARABLES - (1 if catastro else 0) - (1 if area else 0)     # que siga cabiendo en una hoja
     if len(comps):
         portales = ""                       # un solo mercado: sin nombrar portales
         de_fr = "; los que tienen fecha de publicación llevan" if n_m2 else "; llevan"
@@ -666,7 +785,7 @@ def informe_html(d: dict) -> str:
         f"<td class='num'>{_mill(r['pm2'], 1)}</td>"
         f"<td class='num'>{'' if pd.isna(r['dias']) else f'{r.dias:.0f}'}</td>"
         f"<td><a href='{html.escape(str(r['URL detalle']))}'>ver ↗</a></td></tr>"
-        for _, r in comps.head(MAX_COMPARABLES).iterrows())
+        for _, r in comps.head(max_comps).iterrows())
     tabla = (f"""<table class="comps"><thead><tr><th>Barrio</th><th>Ficha</th><th class="num">Parq.</th>
       <th class="num">Piso</th><th class="num">Años</th><th class="num">Admin.</th><th class="num">Precio</th>
       <th class="num">Por m²</th><th class="num">Días</th><th></th></tr></thead><tbody>{filas}</tbody></table>"""
@@ -736,7 +855,7 @@ def informe_html(d: dict) -> str:
 <p class="ley"><i style="background:{GRIS};border-radius:50%"></i>similar en venta<i style="background:{AZUL_CLARO}"></i>rango del modelo (80%)<i style="background:{AZUL};width:2pt"></i>estimado{'<i style="background:#0b0b0b;transform:rotate(45deg);width:6pt;height:6pt"></i>precio pedido hoy' if d['pedido'] else ''}</p>
 
 <h2>Los similares en venta</h2>
-{f"""<p class="sub">Los {min(len(comps), MAX_COMPARABLES)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}). ↓ = ya bajó de precio. Admin.: cuota mensual.{' Días vacío: el portal no da la fecha de publicación (ni si bajó de precio).' if n_m2 else ''}</p>""" if len(comps) else ""}
+{f"""<p class="sub">Los {min(len(comps), max_comps)} más parecidos de {len(comps)} (mismo tipo{' y estrato' if pd.notna(c['Estrato']) else ''}, área ±30%, ±1 habitación, {donde}). ↓ = ya bajó de precio. Admin.: cuota mensual.{' Días vacío: el portal no da la fecha de publicación (ni si bajó de precio).' if n_m2 else ''}</p>""" if len(comps) else ""}
 {tabla}
 
 <h2>Cuánto tardan en salir</h2>
@@ -776,8 +895,11 @@ def enviar(pdf: str, d: dict, a_quien: str) -> None:
     if not (token and chats):
         raise SystemExit("❌ Falta TELEGRAM_BOT_TOKEN o el chat de destino")
     pie = f"Informe de precio · {d['f']['tipo']} de {pd.to_numeric(d['f']['m2']):.0f} m² · {_donde(d)}"
-    if nota := _nota_barrio(d["f"]):          # para el agente, no para el propietario: va en el mensaje, no en el PDF
-        pie += f"\n{nota}"
+    if d["f"].get("direccion"):
+        pie += f"\n{d['f']['direccion']}"
+    for nota in (_nota_barrio(d["f"]), d["f"].get("nota_catastro"), aviso_area(d["f"])):
+        if nota:                              # para el agente, no para el propietario: va en el mensaje, no en el PDF
+            pie += f"\n{nota}"
     if fallos := documento_a_todos(pdf, token, chats, pie):
         raise SystemExit("❌ Fallaron algunos envíos del PDF:\n  " + "\n  ".join(fallos))
     print(f"✅ Enviado ({a_quien})")
@@ -793,7 +915,10 @@ if __name__ == "__main__":
     p.add_argument("--habitaciones", type=float)
     p.add_argument("--banos", type=float)
     p.add_argument("--estrato", type=float)
-    p.add_argument("--barrio", help="nombre del barrio, o sus coordenadas («3.3712, -76.5321»), o un enlace de Google Maps")
+    p.add_argument("--barrio", help="nombre del barrio, o sus coordenadas («3.3712, -76.5321»), o un enlace de Google "
+                                    "Maps, o (en Cali) la dirección")
+    p.add_argument("--direccion", help="(Cali) la dirección, con la torre y el apartamento si es un edificio: "
+                                       "«KR 98 B # 48 - 127 TO 3 AP 436»; el punto, el tipo y el área salen del catastro")
     p.add_argument("--lat", type=float)
     p.add_argument("--lon", type=float)
     p.add_argument("--parqueaderos", type=float)
@@ -803,13 +928,24 @@ if __name__ == "__main__":
     p.add_argument("--descripcion", default="", help="texto como el de un aviso (opcional)")
     p.add_argument("--enviar", choices=["admin", "agentes"], help="lo envía por Telegram")
     a = p.parse_args()
+    from src import catastro_cali
+    if not a.direccion and a.barrio and catastro_cali.es_direccion(a.barrio):   # el formulario tiene un solo campo
+        a.direccion = a.barrio
     if a.aviso:
         ficha = ficha_de_aviso(a.aviso)
-    elif a.tipo and a.m2:
+    elif a.direccion or (a.tipo and a.m2):
         try:
             ciudad = None if a.ciudad.startswith(OTRA) else zonas.canonica(a.ciudad)
-            ficha = ficha_manual(ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
-                                 a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion, a.descripcion)
+            if a.direccion and ciudad not in ("Cali", "Cali y alrededores"):
+                raise UbicacionInvalida(a.direccion, ciudad or OTRA, "la dirección solo se busca en el catastro de Cali")
+            if a.direccion:
+                ficha = ficha_por_direccion(a.direccion, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato,
+                                            a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion,
+                                            a.descripcion)
+            else:
+                ficha = ficha_manual(ciudad, a.tipo, a.m2, a.habitaciones, a.banos, a.estrato, a.barrio, a.lat, a.lon,
+                                     a.parqueaderos, a.piso, ANTIGUEDAD.get(a.antiguedad), a.administracion,
+                                     a.descripcion)
         except BarrioNoEncontrado as e:            # mejor preguntar que adivinar: las sugerencias, por Telegram
             print(e.mensaje())
             if a.enviar:
@@ -821,7 +957,8 @@ if __name__ == "__main__":
                     raise SystemExit(0)            # respondido: no hace falta el aviso genérico de fallo
             raise SystemExit(1)
     else:
-        raise SystemExit("❌ Usa --aviso, o --tipo y --m2 (con --barrio o --lat/--lon) para un inmueble sin publicar")
+        raise SystemExit("❌ Usa --aviso, --direccion (Cali), o --tipo y --m2 (con --barrio o --lat/--lon) para un "
+                         "inmueble sin publicar")
     pdf, d = generar(ficha)
     if a.enviar:
         enviar(pdf, d, a.enviar)
