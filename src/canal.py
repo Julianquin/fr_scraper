@@ -403,38 +403,60 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     return [(p[0], p[1]) for p in propuestas]
 
 
-def aprobar(mensaje: int) -> None:
-    """«Publicar» pulsado: a la cola, o al canal ya si son más de las HORA_PUBLICAR de Colombia."""
+def _recoger(e: dict, mensaje: int | None = None) -> tuple[list[int], list[int]]:
+    """(nuevas, anotadas): las aprobaciones anotadas en src/aprobaciones.py (y `mensaje`, por si no se pudo
+    anotar) que aún no están en la cola ni publicadas. Recoge TODAS, no solo la propia: si GitHub canceló una
+    ejecución en espera (19-nov, Ciudad Jardín), la siguiente se lleva su aprobación."""
+    from src import aprobaciones
+    anotadas = aprobaciones.pendientes()
+    hechas = {p["mensaje"] for p in e["publicados"]} | set(e["cola"])
+    todas = sorted(set(anotadas) | ({int(mensaje)} if mensaje else set()))
+    return [m for m in todas if m not in hechas], anotadas
+
+
+def _publicar_ya(e: dict, mensajes: list[int]) -> None:
+    token, admin, canal = _credenciales()
+    for m in sorted(mensajes):
+        copiar_al_canal(m, token, admin, canal)
+        e["publicados"].append({"mensaje": m, "fecha": f"{ahora_colombia():%Y-%m-%d}", **e["propuestas"].get(str(m), {})})
+
+
+def aprobar(mensaje: int | None = None) -> None:
+    """«Publicar» pulsado: lo aprobado (las anotadas y `mensaje`) a la cola, o al canal ya si son más de las
+    HORA_PUBLICAR de Colombia. El estado se guarda antes de borrar las anotaciones: si algo falla entre medias, se
+    vuelven a recoger y no se duplican (las que ya están no cuentan)."""
+    from src import aprobaciones
     e = estado()
-    if any(p["mensaje"] == mensaje for p in e["publicados"]) or mensaje in e["cola"]:
+    nuevas, anotadas = _recoger(e, mensaje)
+    if not nuevas:
         print("Ya estaba aprobada")
-        return
-    if ahora_colombia().hour >= HORA_PUBLICAR:
-        token, admin, canal = _credenciales()
-        copiar_al_canal(mensaje, token, admin, canal)
-        e["publicados"].append({"mensaje": mensaje, "fecha": f"{ahora_colombia():%Y-%m-%d}",
-                                **e["propuestas"].get(str(mensaje), {})})
-        print("✅ Publicada ya (pasadas las 07:00 de Colombia)")
+    elif ahora_colombia().hour >= HORA_PUBLICAR:
+        _publicar_ya(e, nuevas)
+        print(f"✅ {len(nuevas)} publicada(s) ya (pasadas las 07:00 de Colombia): {nuevas}")
     else:
-        e["cola"].append(mensaje)
-        print(f"✅ En cola para las 0{HORA_PUBLICAR}:00 de Colombia")
-    guardar_estado(e)
+        e["cola"].extend(nuevas)
+        print(f"✅ {len(nuevas)} en cola para las 0{HORA_PUBLICAR}:00 de Colombia: {nuevas}")
+    if nuevas:
+        guardar_estado(e)
+    aprobaciones.borrar(anotadas)
 
 
 def publicar() -> None:
-    """Las 07:00 de Colombia: copia al canal lo aprobado, en el orden en que se propuso."""
+    """Las 07:00 de Colombia: copia al canal lo aprobado, en el orden en que se propuso; también lo anotado que no
+    llegó a la cola (una ejecución de aprobar cancelada)."""
+    from src import aprobaciones
     e = estado()
-    if not e["cola"]:
+    nuevas, anotadas = _recoger(e)
+    pendientes = sorted(set(e["cola"]) | set(nuevas))
+    if not pendientes:
         print("Nada en cola")
+        aprobaciones.borrar(anotadas)
         return
-    token, admin, canal = _credenciales()
-    for mensaje in sorted(e["cola"]):
-        copiar_al_canal(mensaje, token, admin, canal)
-        e["publicados"].append({"mensaje": mensaje, "fecha": f"{ahora_colombia():%Y-%m-%d}",
-                                **e["propuestas"].get(str(mensaje), {})})
-    print(f"✅ {len(e['cola'])} publicadas")
+    _publicar_ya(e, pendientes)
+    print(f"✅ {len(pendientes)} publicadas" + (f" (de ellas, {len(nuevas)} anotadas fuera de la cola)" if nuevas else ""))
     e["cola"] = []
     guardar_estado(e)
+    aprobaciones.borrar(anotadas)
 
 
 def main() -> None:
@@ -446,7 +468,7 @@ def main() -> None:
     pr.add_argument("--dias", type=int, help=f"ventana de publicación (por defecto {CRITERIOS['dias']}; para pruebas)")
     pr.add_argument("--maximo", type=int, help=f"oportunidades como mucho (por defecto {CRITERIOS['maximo']})")
     ap = sub.add_parser("aprobar")
-    ap.add_argument("--mensaje", type=int, required=True)
+    ap.add_argument("--mensaje", type=int, help="la propuesta pulsada; sin él, solo las anotadas (src/aprobaciones.py)")
     sub.add_parser("publicar")
     a = p.parse_args()
     if a.accion == "proponer":
