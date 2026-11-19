@@ -734,7 +734,7 @@ def informe_html(d: dict) -> str:
     tiles = [_tile("Precio estimado", _mill(_redondear(m["estimado"]), 0), f"confianza {m['confianza'].lower()}"),
              _tile("Rango de salida sugerido", f"{_mill(bajo, 0)} – {_mill(alto, 0)}".replace(" M –", " –"),
                    "donde coinciden el modelo y los similares"),
-             _tile("Similares en venta", _n(len(comps)), f"{donde}; piden {_mill(q[.5], 1)}/m² (mediana)"
+             _tile("Similares en venta", _n(len(comps)), f"{donde}; piden {_mill(q[.5], 1)}/m² (promedio)"
                    if len(comps) else "sin similares cerca")]
     if d["rent"] is not None:
         r = d["rent"]
@@ -743,7 +743,7 @@ def informe_html(d: dict) -> str:
                            + (" (aprox.)" if r.get("metodo_arr") == "tipica" else "")))
     else:
         tiles.append(_tile("Días publicados", f"{comps['dias'].median():.0f}" if comps["dias"].notna().any() else "—",
-                           "mediana de los similares en venta"))
+                           "promedio de los similares en venta"))
 
     puntos = [f"Con su ficha, el modelo estima <b>{_mill(_redondear(m['estimado']), 0)}</b> "
               f"({_mill(m['pm2'], 1)}/m²); 8 de cada 10 inmuebles así se piden entre "
@@ -757,7 +757,7 @@ def informe_html(d: dict) -> str:
         portales = ""                       # un solo mercado: sin nombrar portales
         de_fr = "; los que tienen fecha de publicación llevan" if n_m2 else "; llevan"
         bajaron = (f"{n_bajo} de ellos ya bajaron de precio." if n_bajo else "ninguno ha bajado de precio.")
-        dias = (f"{de_fr} publicados {comps['dias'].median():.0f} días (mediana) y {bajaron}"
+        dias = (f"{de_fr} publicados {comps['dias'].median():.0f} días en promedio y {bajaron}"
                 if comps["dias"].notna().any() else ".")
         puntos.append(f"Los <b>{len(comps)} similares</b> {donde}{portales} piden entre {_mill(q[.25] * m2, 0)} y "
                       f"{_mill(q[.75] * m2, 0)} la mitad central (a su área){dias}")
@@ -793,7 +793,7 @@ def informe_html(d: dict) -> str:
 
     if len(ret) >= MIN_RETIRADOS:
         r_txt = (f"<p>{len(ret)} viviendas parecidas se retiraron del portal desde el {_fecha(pd.Timestamp(INICIO_BAJAS))}: "
-                 f"llevaban publicadas <b>{ret['dias'].median():.0f} días</b> (mediana; la cuarta parte más rápida, "
+                 f"llevaban publicadas <b>{ret['dias'].median():.0f} días</b> (promedio; la cuarta parte más rápida, "
                  f"{ret['dias'].quantile(.25):.0f} días o menos). Retirarse no siempre es venderse: puede ser que el dueño "
                  f"desistió o cambió de inmobiliaria.</p>")
     else:
@@ -866,8 +866,8 @@ def informe_html(d: dict) -> str:
 
 <p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de portales inmobiliarios
 (modelo y similares, sin repetir los que están en varios), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
-en el RAA. Los precios de cierre suelen ser algo menores que los pedidos. El modelo tiene un error mediano de ~10% en
-apartamentos y ~15% en casas; el rango del 80% lo refleja. {ubic}</p>
+en el RAA. Los precios de cierre suelen ser algo menores que los pedidos. El modelo tiene un error promedio de ~10% en
+apartamentos y ~15% en casas; el rango del 80% lo refleja. Promedio: el valor del medio (la mediana), que no se deja llevar por los avisos con precios extremos. {ubic}</p>
 </body></html>"""
 
 

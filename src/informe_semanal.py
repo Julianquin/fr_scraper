@@ -406,7 +406,7 @@ def frases(d: dict) -> list[str]:
         f"avisos en total).",
         f"Esta semana se publicaron <b>{_n(d['publicadas'])}</b> viviendas, se confirmó el retiro de "
         f"<b>{_n(d['retiradas'])}</b> y <b>{_n(d['bajadas'])}</b> bajaron de precio"
-        + (f" (rebaja mediana del {_pct(d['bajada_mediana'])})." if d["bajada_mediana"] else "."),
+        + (f" (rebaja promedio del {_pct(d['bajada_mediana'])})." if d["bajada_mediana"] else "."),
     ]
     if ext := d.get("extension"):           # E10: Jamundí y Yumbo, aparte de las cifras de la ciudad
         lineas.append("Con " + d["ciudad"] + " van " + " y ".join(ext) + ": "
@@ -474,8 +474,8 @@ def _credito_html(d: dict) -> str:
     cambio = (c.get("pais") or {}).get("cambio_año")
     pais = (f" · país: {_signo(cambio, 0)} frente a hace un año" if cambio is not None else "")
     return f"""<div class="tiles">
-  {_tile("Tasa del crédito de vivienda", credito.pct(c['tasa_pesos']), f"en pesos, media de 4 semanas al {al}" + (f" · hace un año {credito.pct(año)}" if año else ""))}
-  {_tile("En UVR", credito.pct(c['tasa_uvr']) + " + UVR" if c.get('tasa_uvr') else "—", "la cuota sube con la inflación")}
+  {_tile("Tasa del crédito de vivienda", credito.pct(c['tasa_pesos']), f"efectiva anual (E.A.), en pesos; promedio de 4 semanas al {al}" + (f" · hace un año {credito.pct(año)}" if año else ""))}
+  {_tile("En UVR", credito.pct(c['tasa_uvr']) + " + UVR" if c.get('tasa_uvr') else "—", "E.A.; la cuota sube con la inflación")}
   {_tile("Créditos para comprar", _n(c['creditos']) if c.get('fiable') else "—", (f"en {d['ciudad']}, 4 semanas" if c.get('fiable') else "esta vez el dato llegó incompleto") + pais)}
   {_tile("Cuota del apartamento típico", credito.millones(ej['cuota']) + "/mes", ("en pesos" + (f"; en UVR, desde {credito.millones(ej['cuota_uvr'])}" if ej.get('cuota_uvr') else "") + f" · {_n(ej['area'])} m² a {_mill(ej['precio'], 0)}, {credito.FINANCIADO * 100:.0f} % a {credito.AÑOS} años").replace(" M", "&nbsp;M").replace(" %", "&nbsp;%").replace(" años", "&nbsp;años"))}
 </div>"""
@@ -485,7 +485,7 @@ def _oportunidad(r: pd.Series, i: int, d: dict) -> str:
     hasta = d["hasta"]
     dias = (hasta - r["first_seen"]).days
     lineas = [f"<b>{r['n_comps']} similares</b> {'en el barrio' if r['nivel_comps'] == 'barrio' else 'en la zona'}, "
-              f"mediana {_mill(r['med_comps'])}/m² · confianza {r['confianza'].lower()}"]
+              f"promedio {_mill(r['med_comps'])}/m² · confianza {r['confianza'].lower()}"]
     millones = lambda x: _mill(x, 0)
     if modelo := op._modelo_txt(r, millones):
         lineas.append(f"<b>Modelo de precios:</b> {html.escape(modelo.removeprefix('modelo: '))}")
@@ -556,15 +556,15 @@ def _por_zona_html(d: dict, periodo: str) -> str:
 <p class="periodo">{periodo} · de la más cara a la más económica por m² · {divs} con al menos {MIN_VIVIENDAS} viviendas en venta</p>
 <table>
   <thead><tr><th>{Div} y barrios con más oferta</th><th class="num">Viviendas<br>en venta</th>
-    <th class="num">Del total<br>(catastro)</th><th class="num">Precio mediano<br>por m²</th><th></th><th class="num">Días<br>publicados</th>
-    <th class="num">Canon mediano<br>por m²</th><th class="num">Rentabilidad<br>bruta típica</th><th></th></tr></thead>
+    <th class="num">Del total<br>(catastro)</th><th class="num">Precio promedio<br>por m²</th><th></th><th class="num">Días<br>publicados</th>
+    <th class="num">Canon promedio<br>por m²</th><th class="num">Rentabilidad<br>bruta típica</th><th></th></tr></thead>
   <tbody>{filas}</tbody>
 </table>
 <p class="nota">Del total: las viviendas en venta frente a las que hay en el catastro de Cali (IDESC); «—» si más
   de un cuarto de lo que está en venta trae una ubicación genérica (el centro del barrio o de la ciudad). Donde se
   construye, cuenta también lo nuevo que aún no está en el catastro.
-  Días publicados: edad mediana de los avisos activos de la {div} (desde su fecha de publicación).
-  Rentabilidad bruta típica: canon mediano por m² × 12 ÷ precio mediano por m², antes de administración, impuestos y
+  Días publicados: edad promedio de los avisos activos de la {div} (desde su fecha de publicación).
+  Rentabilidad bruta típica: canon promedio por m² × 12 ÷ precio promedio por m², antes de administración, impuestos y
   vacancia; «—»: menos de {MIN_ARRIENDOS} arriendos.</p>"""
 
 
@@ -618,7 +618,7 @@ def _barrio_html(d: dict) -> str:
     h = b.get("habitaciones")
     hab = "" if h is None else (f"{h:.0f}" if float(h).is_integer() else f"{int(h)}–{int(h) + 1}") + " habitaciones · "
     bajo = b["bajaron_mes"] / b["en_venta_mes"] if b.get("en_venta_mes") else None
-    renta = (f"Rentabilidad bruta típica: <b>{_pct(b['rentabilidad'], 1)}</b> (canon mediano {_miles(b['canon_m2'])}/m² "
+    renta = (f"Rentabilidad bruta típica: <b>{_pct(b['rentabilidad'], 1)}</b> (canon promedio {_miles(b['canon_m2'])}/m² "
              f"con {_n(b['arriendos'])} arriendos; {d['ciudad']}: {_pct(b['ciudad_rentabilidad'], 1)})."
              if b.get("rentabilidad") else
              f"Hay menos de 15 arriendos publicados en el barrio: sin rentabilidad propia"
@@ -629,7 +629,7 @@ def _barrio_html(d: dict) -> str:
         f"<td class='num'>{_mill(x['precio_m2'])}</td></tr>" for x in b.get("su_comuna") or [])
     tabla = (f'<p class="mini-tit">Los barrios de la {com} con al menos 15 viviendas en venta</p>'
              f'<table class="mini"><thead><tr><th>Barrio</th><th class="num">Viviendas en venta</th>'
-             f'<th class="num">Precio mediano por m²</th></tr></thead><tbody>{filas}</tbody></table>'
+             f'<th class="num">Precio promedio por m²</th></tr></thead><tbody>{filas}</tbody></table>'
              if len(b.get("su_comuna") or []) >= 2 else "")
     conj = b.get("conjuntos") or []
     if conj:                                # para captar: los conjuntos más grandes (catastro), solo en el informe
@@ -643,9 +643,9 @@ def _barrio_html(d: dict) -> str:
     return f"""<h2>El barrio de la semana: {nom}</h2>
 <p class="sub">{com} · {_n(b['viviendas'])} viviendas en venta · {_puesto(b)} por precio del m²</p>
 <div class="tiles">
-  {_tile("Precio mediano por m²", _mill(b['precio_m2']), f"{com}: {_mill(b['comuna_precio_m2']) if b.get('comuna_precio_m2') else '—'} · {d['ciudad']}: {_mill(b['ciudad_precio_m2'])}")}
+  {_tile("Precio promedio por m²", _mill(b['precio_m2']), f"{com}: {_mill(b['comuna_precio_m2']) if b.get('comuna_precio_m2') else '—'} · {d['ciudad']}: {_mill(b['ciudad_precio_m2'])}")}
   {_tile("Vivienda típica", f"{_n(b['area'])} m²", f"{hab}{_mill(b['precio'])} · la mitad entre {_mill(b['precio_p25'])} y {_mill(b['precio_p75'])}")}
-  {_tile("Llevan publicadas", f"{_n(b['dias_publicadas'])} días" if b.get('dias_publicadas') is not None else "—", "mediana de las que están en venta")}
+  {_tile("Llevan publicadas", f"{_n(b['dias_publicadas'])} días" if b.get('dias_publicadas') is not None else "—", "promedio de las que están en venta")}
   {_tile("Bajaron de precio", _pct(bajo, 1) if bajo is not None else "—", f"en los últimos {b['dias_bajadas']} días")}
 </div>
 <p>{renta} El estrato más común es el {b.get('estrato') or '—'}; el {_pct(b['apartamentos'])} son apartamentos.</p>
@@ -663,9 +663,9 @@ def _credito_mes_html(d: dict) -> str:
     pct = credito.pct
     comparar = [f"{x['nombre']}{'' if x['año'] == m['año'] else ' de ' + str(x['año'])}: {pct(x['tasa_pesos'])}"
                 for x in (m.get("anterior"), m.get("hace_un_año")) if x and x.get("tasa_pesos")]
-    texto = (f"<b>El crédito de vivienda en {m['nombre']}:</b> tasa media del {pct(m['tasa_pesos'])} en pesos"
+    texto = (f"<b>El crédito de vivienda en {m['nombre']}:</b> tasa promedio del {pct(m['tasa_pesos'])} E.A. en pesos"
              + (f" ({'; '.join(comparar)})" if comparar else "")
-             + (f" y {pct(m['tasa_uvr'])} + la inflación en UVR" if m.get("tasa_uvr") else ""))
+             + (f" y {pct(m['tasa_uvr'])} E.A. + la inflación en UVR" if m.get("tasa_uvr") else ""))
     if m.get("fiable"):
         texto += f"; {_n(m['creditos'])} créditos para comprar vivienda en {d['ciudad']}"
     return f'<p class="sub" style="margin-top:8pt">{texto}.</p>'
@@ -696,7 +696,7 @@ def _mes_html(d: dict) -> str:
   {_tile("Publicadas", _n(m['publicadas']), "viviendas nuevas, sin repetidos" + antes('publicadas'))}
   {_tile("Retiradas", _n(m['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse" + antes('retiradas'))}
   {_tile("Bajaron de precio", _n(m['bajaron']), f"{_pct(m['bajaron'] / m['en_venta_todo'], 1)} de las {_n(m['en_venta_todo'])} en venta todo el mes" + antes('bajaron'))}
-  {_tile("Precio de las mismas viviendas", _signo(m['cambio_mismas']), f"{_n(m['subieron'])} subieron" + (f" · bajada mediana {_pct(m['bajada_mediana'], 1)}" if m.get('bajada_mediana') else "") + antes('cambio_mismas', _signo))}
+  {_tile("Precio de las mismas viviendas", _signo(m['cambio_mismas']), f"{_n(m['subieron'])} subieron" + (f" · bajada promedio {_pct(m['bajada_mediana'], 1)}" if m.get('bajada_mediana') else "") + antes('cambio_mismas', _signo))}
 </div>
 <table class="mini"><thead><tr><th>{div.capitalize()}</th><th class="num">En venta<br>todo el mes</th>
   <th class="num">Publicadas</th><th class="num">Retiradas</th><th class="num">Bajaron<br>de precio</th>
@@ -704,8 +704,8 @@ def _mes_html(d: dict) -> str:
   <tbody>{filas}</tbody></table>
 {_credito_mes_html(d)}
 <p class="nota">{_plural(div).capitalize()} con al menos {m['min_comuna']} viviendas en venta todo el mes. Bajaron o subieron: un
-  cambio de su precio pedido de al menos {_pct(op.BAJA_MIN)}. Precio de las mismas viviendas: el cambio medio del precio
-  pedido de las que estuvieron en venta todo el mes. No comparamos la mediana del m² con la del mes anterior: sube o
+  cambio de su precio pedido de al menos {_pct(op.BAJA_MIN)}. Precio de las mismas viviendas: el cambio promedio del precio
+  pedido de las que estuvieron en venta todo el mes. No comparamos el promedio del m² con el del mes anterior: sube o
   baja sobre todo según qué viviendas entran y salen (en tres semanas de noviembre, un 15–20 % de las {_plural(div)} y
   barrios cambió más de un 3 % así, mientras el precio de las mismas viviendas no se movía).</p>"""
 
@@ -805,12 +805,12 @@ def informe_html(d: dict) -> str:
   {_tile("Viviendas en venta", _n(d['viviendas']), f"sin repetidos · {_n(d['avisos_fr'] + d['avisos_m2'])} avisos")}
   {_tile("Publicadas esta semana", _n(d['publicadas']), "viviendas nuevas, sin repetidos")}
   {_tile("Retiradas esta semana", _n(d['retiradas']), f"confirmadas tras {AUSENCIAS_PARA_BAJA} días sin verse")}
-  {_tile("Bajaron de precio", _n(d['bajadas']), f"rebaja mediana del {_pct(d['bajada_mediana'])}" if d['bajada_mediana'] else "")}
+  {_tile("Bajaron de precio", _n(d['bajadas']), f"rebaja promedio del {_pct(d['bajada_mediana'])}" if d['bajada_mediana'] else "")}
 </div>
 <div class="tiles">
-  {_tile("Precio mediano por m²", _mill(d['precio_m2']), "vivienda en venta, toda la ciudad")}
+  {_tile("Precio promedio por m²", _mill(d['precio_m2']), "vivienda en venta, toda la ciudad")}
   {_tile("Arriendos de vivienda", _n(d['arriendos']), "sin amoblados ni por días")}
-  {_tile("Canon mediano", _mill(d['canon_mediano']), "por mes")}
+  {_tile("Canon promedio", _mill(d['canon_mediano']), "por mes")}
   {_tile("Rentabilidad bruta típica", _pct(d['rentab'], 1), "antes de gastos e impuestos")}
 </div>
 {_credito_html(d)}
@@ -848,8 +848,8 @@ def informe_html(d: dict) -> str:
 <p class="nota">Viviendas: apartamentos, apartaestudios y casas. Sin repetidos: un inmueble publicado en varios
   portales o por varias inmobiliarias cuenta una vez, también en los movimientos de la semana (publicadas, retiradas,
   bajadas); retirada: ya no está publicada en ningún portal. Arriendos: sin amoblados ni por días. Similares: mismo tipo y estrato, área ±30% y ±1 habitación,
-  en el mismo barrio oficial (o a menos de 1 km, o en la {div}); el descuento compara el precio por m² con la mediana
-  de esos similares. Entorno: OpenStreetMap. Es una estimación del precio de mercado, no un avalúo (Ley 1673 de
+  en el mismo barrio oficial (o a menos de 1 km, o en la {div}); el descuento compara el precio por m² con el promedio
+  de esos similares. Promedio: el valor del medio (la mediana), que no se deja llevar por los avisos con precios extremos. Entorno: OpenStreetMap. Es una estimación del precio de mercado, no un avalúo (Ley 1673 de
   2013): verifica siempre el inmueble y su documentación. Fuente: avisos públicos de portales inmobiliarios{
   f"; {_plural(div)} y barrios: {d['fuente_zonas']}" if d["con_zonas"] and d["fuente_zonas"] else ""}{
   "; crédito de vivienda: Superintendencia Financiera (créditos de compra en pesos, tasa ponderada por monto; la "

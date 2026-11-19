@@ -426,27 +426,29 @@ def fecha_corta(f: str) -> str:
 
 def texto_cuota(precio: float, ciudad: str = "Cali") -> str | None:
     """'Cuota aproximada (70 % a 20 años): $3,5 M al mes en pesos o desde $2,3 M en UVR, que sube con la inflación
-    (tasas medias de Cali: 15,0% y 8,3% + UVR)'."""
+    (tasas promedio de Cali: 15,0% E.A. y 8,3% E.A. + UVR)'. E.A.: efectiva anual, como la publica la
+    Superintendencia (la cuota la pasa a mensual)."""
     f = para_ficha(precio, ciudad)
     if not f:
         return None
     plazo = f"{f['financiado'] * 100:.0f} % a {f['años']} años"
     if not f["cuota_uvr"]:
-        return (f"Cuota aproximada ({plazo}): {millones(f['cuota'])} al mes en pesos (tasa media de {f['donde']}: "
-                f"{pct(f['tasa'])})")
+        return (f"Cuota aproximada ({plazo}): {millones(f['cuota'])} al mes en pesos (tasa promedio de {f['donde']}: "
+                f"{pct(f['tasa'])} E.A.)")
     return (f"Cuota aproximada ({plazo}): {millones(f['cuota'])} al mes en pesos o desde {millones(f['cuota_uvr'])} en "
-            f"UVR, que sube con la inflación (tasas medias de {f['donde']}: {pct(f['tasa'])} y {pct(f['tasa_uvr'])} + UVR)")
+            f"UVR, que sube con la inflación (tasas promedio de {f['donde']}: {pct(f['tasa'])} E.A. y {pct(f['tasa_uvr'])} E.A. + UVR)")
 
 
 def linea_tasa(ciudad: str = "Cali") -> str | None:
-    """'Crédito de vivienda en Cali: tasa media 15,0% en pesos y 8,3% + la inflación en UVR (4 semanas al 6 nov)';
+    """'Crédito de vivienda en Cali: tasa promedio 15,0% E.A. en pesos y 8,3% E.A. + la inflación en UVR (4 semanas
+    al 6 nov)';
     None si la ciudad no tiene serie."""
     municipio = CIUDADES.get(ciudad)
     r = resumen(leer(), municipio) if municipio else None
     if not r or not r["tasa_pesos"]:
         return None
-    uvr = f" y {pct(r['tasa_uvr'])} + la inflación en UVR" if r["tasa_uvr"] else ""
-    return (f"Crédito de vivienda en {ciudad}: tasa media {pct(r['tasa_pesos'])} en pesos{uvr} "
+    uvr = f" y {pct(r['tasa_uvr'])} E.A. + la inflación en UVR" if r["tasa_uvr"] else ""
+    return (f"Crédito de vivienda en {ciudad}: tasa promedio {pct(r['tasa_pesos'])} E.A. en pesos{uvr} "
             f"({r['semanas']} semanas al {fecha_corta(r['hasta'])}, Superintendencia Financiera)")
 
 

@@ -10,7 +10,7 @@ publicaciones del día, cada una EXACTAMENTE como saldrá en el canal y con dos 
     86 más de un año sin bajar el precio (abandonados, desactualizados o con algún problema, no oportunidades);
   - los lunes, el pulso del mercado de la semana (con el crédito de vivienda: src/credito.py); los jueves, las
     mayores bajadas de precio.
-Cada oportunidad lleva su cuota aproximada con la tasa media del crédito de las últimas semanas en la ciudad.
+Cada oportunidad lleva su cuota aproximada con la tasa promedio del crédito de las últimas semanas en la ciudad.
 Al pulsar un botón, Telegram avisa al Worker de Cloudflare (cloudflare/bot/), que contesta y lanza `aprobar`: la
 publicación queda en cola, o sale ya si son más de las 07:00 de Colombia. A las 07:00 el Worker lanza `publicar`, que
 copia al canal lo aprobado (copyMessage: mismo texto y formato, sin «reenviado de»).
@@ -192,7 +192,7 @@ def texto_oportunidad(r: pd.Series, pie: str) -> str:
          f"(antes {op._millones(r['precio_antes'])})") if r.get("fuente") == "bajada" else None,
         "",
         f"📊 *{r['descuento']:.0%} bajo sus {r['n_comps']} similares* {'del barrio' if r['nivel_comps'] == 'barrio' else 'cercanos'} "
-        f"(mediana {op._m2(r['med_comps'])} M/m²)",
+        f"(promedio {op._m2(r['med_comps'])} M/m²)",
         f"🤖 *{r['bajo_modelo']:.0%} bajo nuestro modelo de precios* (estima {op._millones(r['modelo_precio'])})",
         f"🏦 {cuota}" if cuota else None,
         "",
@@ -218,8 +218,8 @@ def texto_pulso(ciudad: str, pie: str) -> str:
     lineas = [f"*📈 El mercado de la semana · {ciudad}* ({periodo})", "",
               f"🏠 {n(d['viviendas'])} viviendas en venta",
               f"🆕 {n(d['publicadas'])} publicadas · ❌ {n(d['retiradas'])} retiradas",
-              f"📉 {n(d['bajadas'])} bajaron de precio" + (f" (mediana −{d['bajada_mediana']:.0%})" if d.get("bajada_mediana") else ""),
-              f"💰 Precio pedido mediano: {op._m2(d['precio_m2'])} M/m²",
+              f"📉 {n(d['bajadas'])} bajaron de precio" + (f" (en promedio, −{d['bajada_mediana']:.0%})" if d.get("bajada_mediana") else ""),
+              f"💰 Precio pedido promedio: {op._m2(d['precio_m2'])} M/m²",
               f"💵 Rentabilidad bruta típica: {d['rentab']:.1%}".replace(".", ",")]
     if contenido.es_semana_del_mes(d["hasta"]) and d["con_zonas"]:       # la primera semana del mes: el mes anterior
         m = contenido.mes(d)
@@ -254,9 +254,9 @@ def lineas_credito(ciudad: str, con_mes: bool = False) -> list[str]:
     pct, n = credito.pct, lambda x: f"{x:,.0f}".replace(",", ".")
     año = (r["hace_un_año"] or {}).get("tasa_pesos")
     lineas = ["", f"*🏦 El crédito de vivienda* (4 semanas al {credito.fecha_corta(r['hasta'])})",
-              f"Tasa media en pesos: *{pct(r['tasa_pesos'])}*" + (f" (hace un año: {pct(año)})" if año else "")]
+              f"Tasa promedio en pesos: *{pct(r['tasa_pesos'])} E.A.*" + (f" (hace un año: {pct(año)})" if año else "")]
     if r["tasa_uvr"]:
-        lineas.append(f"En UVR: {pct(r['tasa_uvr'])} + la inflación")
+        lineas.append(f"En UVR: {pct(r['tasa_uvr'])} E.A. + la inflación")
     if r["fiable"]:
         lineas.append(f"{n(r['creditos'])} créditos para comprar vivienda en {ciudad}")
     if (cambio := r["pais"]["cambio_año"]) is not None and abs(cambio) >= 0.03:
@@ -264,7 +264,7 @@ def lineas_credito(ciudad: str, con_mes: bool = False) -> list[str]:
     m = credito.mes(serie, municipio) if con_mes else None
     if m and m["tasa_pesos"]:
         a = m.get("anterior") or {}
-        lineas.append(f"En {m['nombre']}: tasa media {pct(m['tasa_pesos'])}"
+        lineas.append(f"En {m['nombre']}: tasa promedio {pct(m['tasa_pesos'])} E.A."
                       + (f" ({a['nombre']}: {pct(a['tasa_pesos'])})" if a.get("tasa_pesos") else ""))
     return lineas
 

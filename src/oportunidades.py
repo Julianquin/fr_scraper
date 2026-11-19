@@ -505,7 +505,7 @@ def _en_zona(r: pd.Series) -> str:
 
 def _comps_txt(r: pd.Series) -> str:
     donde = {"barrio": "en el barrio", "1 km": "a menos de 1 km", "comuna": _en_zona(r)}[r["nivel_comps"]]
-    return (f"{r['n_comps']} similares {donde}: mediana {_m2(r['med_comps'])} M/m² "
+    return (f"{r['n_comps']} similares {donde}: promedio {_m2(r['med_comps'])} M/m² "
             f"(rango {_m2(r['p25_comps'])}–{_m2(r['p75_comps'])})")
 
 
@@ -618,7 +618,7 @@ def informe_html(sel: pd.DataFrame, bj: pd.DataFrame, resumen: dict, hasta: pd.T
                          _historia_txt(r, hasta)], [])
                for i, (_, r) in enumerate(bj.iterrows(), 1)]
     tasa = credito.linea_tasa(resumen["ciudad"])
-    nota_renta = (" Arriendo estimado: mediana del canon/m² de arriendos similares publicados (sin amoblados "
+    nota_renta = (" Arriendo estimado: promedio del canon/m² de arriendos similares publicados (sin amoblados "
                   "ni por días); la rentabilidad bruta es ese canon × 12 ÷ precio, antes de administración, "
                   "impuestos y vacancia." if resumen.get("con_arriendos") else "")
     seccion_bajadas = (f"""

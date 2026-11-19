@@ -283,7 +283,7 @@ const capas = {};
 const estilo = f => ({color: "#ffffff", weight: 1, fillOpacity: f.properties.c >= 0 ? .45 : .15,
                       fillColor: f.properties.c >= 0 ? C.rampa[f.properties.c] : "#c3c2b7"});
 const info = f => `<b>${f.properties.nombre}</b>${f.properties.zona ? " · " + f.properties.zona : ""}<br>` +
-  (f.properties.m ? `${f.properties.n.toLocaleString("es-CO")} viviendas · mediana <b>${f.properties.m.toLocaleString("es-CO")} M/m²</b>`
+  (f.properties.m ? `${f.properties.n.toLocaleString("es-CO")} viviendas · promedio <b>${f.properties.m.toLocaleString("es-CO")} M/m²</b>`
                   : `pocas viviendas para dar un precio`);
 function zonas(nivel) {
   return fetch(`datos/${C.slug}_${nivel}.geojson`).then(r => r.json()).then(gj => {
@@ -311,7 +311,7 @@ if (C.vecinos) fetch(`datos/${C.slug}_vecinos.geojson`).then(r => r.json()).then
 // Leyenda del color de las zonas
 const lims = C.cortes;
 document.getElementById("leyenda").innerHTML = lims.length ?
-  `<b>Precio mediano por m² de la vivienda</b>` + C.rampa.map((c, i) =>
+  `<b>Precio promedio por m² de la vivienda</b>` + C.rampa.map((c, i) =>
     `<span><i style="background:${c}"></i>${i === 0 ? "< " + lims[0] : i === 4 ? "> " + lims[3] : lims[i - 1] + "–" + lims[i]} M</span>`).join("") +
   `<br><span>Al acercarse: barrios. Toque una zona o un punto para ver el detalle.</span>` : "";
 
