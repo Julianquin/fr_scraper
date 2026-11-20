@@ -121,6 +121,11 @@ def entender(texto: str) -> Consulta:
     return Consulta("incompleta" if falta else "descripcion", campos, falta)
 
 
+class YaAvisado(Exception):
+    """Falló, pero el agente ya recibió un mensaje que se lo explica: no se le manda el genérico. El texto no lleva
+    nada del agente (va al registro público)."""
+
+
 def _respuesta_de_error(texto: str) -> str:
     """Los mensajes del informe dicen «vuelve a lanzarlo» (el formulario de GitHub): en el bot, «escríbelo»."""
     return (texto.replace("Vuelve a lanzarlo", "Escríbemelo de nuevo").replace("vuelve a lanzarlo", "escríbemelo de nuevo")
@@ -146,8 +151,13 @@ def atender(texto: str, chat: str) -> str:
         if c.modo == "aviso":
             ficha = ic.ficha_de_aviso(k["aviso"])
         elif c.modo == "direccion":
-            ficha = ic.ficha_por_direccion(k["direccion"], k.get("tipo"), k.get("m2"), k.get("habitaciones"),
-                                           k.get("banos"), k.get("estrato"), k.get("parqueaderos"))
+            try:
+                ficha = ic.ficha_por_direccion(k["direccion"], k.get("tipo"), k.get("m2"), k.get("habitaciones"),
+                                               k.get("banos"), k.get("estrato"), k.get("parqueaderos"))
+            except SystemExit as e:    # sin el catastro con direcciones: que pueda seguir con la descripción
+                telegram("⚠️ Ahora mismo no puedo buscar por dirección. Mientras lo arreglo, escríbeme el tipo, el "
+                         "área y el barrio:\n  apto 80 m², 3 hab, 2 baños, estrato 4, Ciudad Jardín", token, chat)
+                raise YaAvisado("sin el catastro con direcciones (data/catastro/predios.parquet)") from e
         else:
             ficha = ic.ficha_manual(zonas.canonica(k["ciudad"]), k["tipo"], k["m2"], k.get("habitaciones"),
                                     k.get("banos"), k.get("estrato"), k["barrio"], None, None, k.get("parqueaderos"))
@@ -206,13 +216,16 @@ def main() -> None:
     try:
         with silencio:
             resultado = atender(texto, chat)
-    except Exception as e:  # noqa: BLE001 — al agente, un aviso; al administrador, el fallo (consulta.yml)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — al agente, un aviso; al administrador, el fallo
+        # (consulta.yml). También SystemExit: el informe sale así cuando le falta algo (el catastro)
         from src.notificar import telegram
-        telegram("⚠️ No pude preparar el informe esta vez. Ya avisé para revisarlo; prueba de nuevo en un rato.",
-                 os.environ["TELEGRAM_BOT_TOKEN"], chat)
+        if not isinstance(e, YaAvisado):
+            telegram("⚠️ No pude preparar el informe esta vez. Ya avisé para revisarlo; prueba de nuevo en un rato.",
+                     os.environ["TELEGRAM_BOT_TOKEN"], chat)
         if a.id:                       # solo el tipo de error y dónde: el mensaje puede llevar la dirección
-            print(f"❌ {type(e).__name__} en " + " ← ".join(f"{f.name}:{f.lineno}"
-                                                          for f in traceback.extract_tb(e.__traceback__)[-4:]))
+            motivo = f" ({e})" if isinstance(e, YaAvisado) else ""          # el de YaAvisado lo escribimos aquí
+            print(f"❌ {type(e).__name__}{motivo} en " + " ← ".join(
+                f"{f.name}:{f.lineno}" for f in traceback.extract_tb(e.__traceback__)[-4:]))
             raise SystemExit(1) from None
         raise
     finally:

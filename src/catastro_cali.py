@@ -344,14 +344,20 @@ def actualizar(si_viejo: int | None = None) -> None:
     try:
         _rehacer()
     except Exception as e:
+        print(f"⚠️  No se pudo rehacer el catastro ({type(e).__name__})")
         if _con_r2():
-            print("⚠️  No se pudo rehacer el catastro: se usan los resúmenes de la vez anterior")
-            traer_resumen()
-            if pd.Timestamp.now(tz="America/Bogota").weekday() == 0:      # los lunes, al administrador
+            hay = _meta_r2() is not None
+            if hay:
+                print("   se usan los resúmenes de la vez anterior")
+                traer_resumen()
+            # Sin ninguno en R2, cada día (las direcciones del bot y de la captación no funcionan); si no, los lunes
+            if not hay or pd.Timestamp.now(tz="America/Bogota").weekday() == 0:
                 from src import monitor
-                monitor.enviar(f"*⚠️ Catastro de Cali*\nNo se pudo rehacer desde GitHub ({type(e).__name__}): las cifras "
-                               f"van con el de la vez anterior (o sin él). Se puede rehacer desde el PC con "
-                               f"`python -m src.catastro_cali actualizar`.")
+                monitor.enviar(f"*⚠️ Catastro de Cali*\nNo se pudo rehacer desde GitHub ({type(e).__name__}). " + (
+                    "Las cifras van con el de la vez anterior." if hay else
+                    "*No hay ninguno en R2*: el bot y la captación no encuentran direcciones y las cifras salen sin "
+                    "el catastro.") + " Se rehace desde el PC (con las claves de R2 cargadas) con "
+                    "`python -m src.catastro_cali actualizar`.")
         raise
 
 
