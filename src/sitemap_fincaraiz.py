@@ -42,6 +42,12 @@ _URL = re.compile(r"<url>(.*?)</url>", re.S)
 _LOC = re.compile(r"<loc>(.*?)</loc>")
 _LASTMOD = re.compile(r"<lastmod>(.*?)</lastmod>")
 _ID = re.compile(r"/(\d{6,})/?$")
+# Los tipos del portal, como van en sus URLs (los mismos 15 que los archivos del sitemap). La cobertura se mide
+# frente a la SUMA de lo que declara cada tipo: el contador general (`venta`, 185.611 el 20-nov) cuenta ~3.000 más que
+# esa suma (182.591), entradas que no son avisos sueltos (probablemente unidades de proyectos). Medido el 20-nov: el
+# sitemap trae el 100 % de la suma por tipos (182.570).
+TIPOS = ["apartamentos", "apartaestudios", "bodegas", "cabanas", "casas", "casas-campestres", "casas-lotes",
+         "consultorios", "edificios", "fincas", "habitaciones", "locales", "lotes", "oficinas", "parqueaderos"]
 
 
 class Bloqueado(RuntimeError):
@@ -74,20 +80,43 @@ def _get(sesion: requests.Session, url: str, reintentos: int = 3) -> requests.Re
 def sitemaps(raiz: str, pausa: float, sesion: requests.Session | None = None) -> pd.DataFrame:
     """(id_inmueble, url, lastmod en UTC, archivo) de cada aviso del sitemap de `raiz`."""
     sesion = sesion or requests.Session()
-    indice = _get(sesion, INDICE).text
-    archivos = [u for u in _LOC.findall(indice) if OPERACION[raiz] in u]
-    filas = []
-    for k, archivo in enumerate(archivos, 1):
-        r = _get(sesion, archivo)
+    indice = _get(sesion, INDICE)
+    if indice is None:
+        raise RuntimeError(f"No se pudo leer el índice del sitemap ({INDICE})")
+    archivos = [u for u in _LOC.findall(indice.text) if OPERACION[raiz] in u]
+    filas, fallidos = [], []
+
+    def leer(archivo: str) -> bool:
+        try:
+            r = _get(sesion, archivo)
+        except Bloqueado:
+            raise
+        except Exception:  # noqa: BLE001
+            r = None
+        if r is None or "<urlset" not in r.text:
+            return False
         nombre = archivo.rsplit("cde-sitemap-listings-", 1)[-1].removesuffix(".xml")
-        for bloque in _URL.findall(r.text if r is not None else ""):
+        for bloque in _URL.findall(r.text):
             loc, lm = _LOC.search(bloque), _LASTMOD.search(bloque)
             m = _ID.search(loc.group(1)) if loc else None
             if m:
                 filas.append((m.group(1), loc.group(1), lm.group(1) if lm else None, nombre))
+        return True
+
+    for k, archivo in enumerate(archivos, 1):
+        if not leer(archivo):
+            fallidos.append(archivo)
         if k % 25 == 0:
             print(f"   sitemap {k}/{len(archivos)} · {len(filas):,} avisos", flush=True)
         time.sleep(pausa)
+    # Un archivo que falta haría contar una ausencia a todos sus avisos (y, cinco días así, darlos de baja sin serlo):
+    # se reintenta al final y, si sigue sin bajar, el barrido para. Mejor un día sin datos que bajas falsas.
+    if fallidos:
+        time.sleep(30)
+        fallidos = [a for a in fallidos if not leer(a)]
+    if fallidos:
+        raise RuntimeError(f"{len(fallidos)} archivos del sitemap no se pudieron leer (p. ej. {fallidos[0]}): "
+                           "no se sigue para no contar ausencias falsas")
     df = pd.DataFrame(filas, columns=["id_inmueble", "url", "lastmod", "archivo"])
     df["lastmod"] = pd.to_datetime(df["lastmod"], utc=True, errors="coerce", format="ISO8601")
     print(f"Sitemap de {raiz}: {len(archivos)} archivos · {len(df):,} avisos · {df['id_inmueble'].nunique():,} únicos")
@@ -192,7 +221,15 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFra
     if errores:
         informe.loc[0, "errores"] = errores
 
-    nacional = int(pedir(sesion, raiz, 1)[1].get("total") or 0)      # la página 1 no pide el desafío
+    por_tipo = {}                                                     # la página 1 no pide el desafío
+    for tipo in TIPOS:
+        try:
+            por_tipo[tipo] = int(pedir(sesion, f"{raiz}/{tipo}", 1)[1].get("total") or 0)
+        except Exception:  # noqa: BLE001 — un tipo sin avisos en esa raíz (la ruta no existe) cuenta 0
+            por_tipo[tipo] = 0
+        time.sleep(pausa)
+    nacional = sum(por_tipo.values())
+    general = int(pedir(sesion, raiz, 1)[1].get("total") or 0)
     trabajo.mkdir(parents=True, exist_ok=True)
     for viejo in trabajo.glob("barrido_*.parquet"):                   # que juntar no mezcle otro barrido
         viejo.unlink()
@@ -201,9 +238,11 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFra
     guardar_parquet(df, trabajo / "barrido_0.parquet")
     informe[["segmento", "declarado", "paginas", "avisos", "unicos", "errores"]].to_csv(trabajo / "informe_0.csv",
                                                                                         index=False)
-    (trabajo / "nacional.json").write_text(json.dumps({"total_nacional": nacional, "fecha": hoy(), "fuente": "sitemap"}))
+    (trabajo / "nacional.json").write_text(json.dumps({"total_nacional": nacional, "por_tipo": por_tipo,
+                                                       "contador_general": general, "fecha": hoy(), "fuente": "sitemap"}))
     print(f"Sitemap {raiz}: {len(df):,} avisos ({len(filas):,} leídos, {len(igual):,} del estado) · {idos:,} ya no "
-          f"publicados · {errores} errores · total declarado {nacional:,} · {(time.time() - t0) / 60:.1f} min")
+          f"publicados · {errores} errores · declarado por tipos {nacional:,} (contador general {general:,}) · "
+          f"{(time.time() - t0) / 60:.1f} min")
     return df
 
 
