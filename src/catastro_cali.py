@@ -320,7 +320,8 @@ def _meta_r2() -> dict | None:
         return None
 
 
-RESUMEN = ("barrios.parquet", "conjuntos.parquet", "meta.json")     # lo que leen el canal y el informe (~250 KB)
+RESUMEN = ("barrios.parquet", "conjuntos.parquet", "meta.json",    # lo que leen el canal y el informe (~250 KB)
+           "avaluos_barrios.parquet")                                # y el avalúo por barrio (src/avaluos.py, E9.4)
 
 
 def traer_resumen() -> None:
@@ -377,6 +378,11 @@ def _rehacer() -> None:
         from src import almacen
         for f in ("predios.parquet", "barrios.parquet", "conjuntos.parquet", "meta.json"):
             almacen.subir_archivo(CARPETA / f, R2 + f)
+    try:                                    # el avalúo por barrio, con los barrios de este catastro (E9.4)
+        from src import avaluos
+        avaluos.actualizar(t[columnas])
+    except Exception as e:  # noqa: BLE001 — sin el avalúo, el catastro sale igual
+        print(f"⚠️  Avalúos sin rehacer: {type(e).__name__}: {e}")
 
 
 def leer(cual: str = "barrios") -> pd.DataFrame | None:

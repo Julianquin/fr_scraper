@@ -603,8 +603,20 @@ def aviso_area(f: pd.Series) -> str | None:
     return None
 
 
-def _catastro_txt(f: pd.Series) -> str | None:
-    """La línea del catastro (src/catastro_cali.py): el predio, su edificio, el número predial y los enlaces."""
+def _avaluo_txt(predio: dict, estimado: float | None) -> str:
+    """El avalúo catastral del predio (src/avaluos.py, E9.4) y cuántas veces es el estimado. Vacío sin él."""
+    from src import avaluos
+    a = avaluos.del_predio(predio.get("id_predio", ""))
+    if not a or not a["avaluo"]:
+        return ""
+    veces = (f"; el estimado es {estimado / a['avaluo']:.1f} veces el avalúo".replace(".", ",")
+             if estimado else "")
+    return f" Avalúo catastral {a['vigencia'] or ''}: <b>{_mill(a['avaluo'], 0)}</b>{veces}."
+
+
+def _catastro_txt(f: pd.Series, estimado: float | None = None) -> str | None:
+    """La línea del catastro (src/catastro_cali.py): el predio, su edificio, el número predial, los enlaces y, con
+    E9.4, el avalúo catastral del predio."""
     cat = f.get("catastro")
     if not isinstance(cat, dict):
         return None
@@ -615,7 +627,7 @@ def _catastro_txt(f: pd.Series) -> str | None:
         enlaces = (f' · <a href="{html.escape(p["uso_suelo"])}">uso del suelo ↗</a> · '
                    f'<a href="{html.escape(p["plano"])}">plano ↗</a>')
         area = f" de {p['area']:.0f} m² construidos" if p.get("area") else ""
-        return f"<b>Catastro:</b> {p['tipo']}{area}{edificio}; predio {p['npn']}{enlaces}."
+        return f"<b>Catastro:</b> {p['tipo']}{area}{edificio}; predio {p['npn']}{enlaces}.{_avaluo_txt(p, estimado)}"
     if cat.get("casas"):
         areas = " y ".join(f"{c['area']:.0f} m²" for c in cat["casas"][:4])
         return (f"<b>Catastro:</b> en {html.escape(cat['direccion'])} hay {len(cat['casas'])} casas o construcciones "
@@ -748,7 +760,7 @@ def informe_html(d: dict) -> str:
     puntos = [f"Con su ficha, el modelo estima <b>{_mill(_redondear(m['estimado']), 0)}</b> "
               f"({_mill(m['pm2'], 1)}/m²); 8 de cada 10 inmuebles así se piden entre "
               f"{_mill(_redondear(m['p10']), 0)} y {_mill(_redondear(m['p90']), 0)}."]
-    if catastro := _catastro_txt(f):        # con la dirección (E9.3): el predio del catastro y si el área cuadra
+    if catastro := _catastro_txt(f, m["estimado"]):   # con la dirección (E9.3): el predio, su avalúo y si el área cuadra
         puntos.append(catastro)
     if area := aviso_area(f):
         puntos.append(f"<b>Ojo con el área.</b> {html.escape(area)}")

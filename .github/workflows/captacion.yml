@@ -109,7 +109,7 @@ jobs:
           # La presentación de los PDF (src/tema.py): logo, fuente y colores de marca/ en R2; sin ellos, el estilo neutro
           python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
           # El catastro de Cali (E9.3): con una dirección, el punto, el tipo y el área del predio
-          for f in predios.parquet meta.json; do
+          for f in predios.parquet meta.json avaluos.parquet; do     # + el avalúo del predio (E9.4)
             python -m src.almacen traer "catastro/$f" --destino data || echo "⚠️  Sin catastro/$f"
           done
           python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp

@@ -170,7 +170,11 @@ CAMPOS_BARRIO = [("viviendas", 0), ("precio_m2", 0), ("p25_m2", 0), ("p75_m2", 0
                  # del catastro (E9.2): viviendas que hay, la parte de apartamentos, pisos y área típicos, cuántos
                  # edificios o conjuntos, la parte de coordenadas genéricas y qué parte está en venta (o None)
                  ("viviendas_catastro", 0), ("apartamentos_parte_catastro", 2), ("pisos_edificio", 0),
-                 ("area_apartamento_catastro", 0), ("edificios", 0), ("genericos", 2), ("en_venta_parte", 4)]
+                 ("area_apartamento_catastro", 0), ("edificios", 0), ("genericos", 2), ("en_venta_parte", 4),
+                 # del avalúo catastral (E9.4): el avalúo por m² construido de sus apartamentos y casas, y cuántas veces
+                 # se pide (precio pedido por m² ÷ avalúo por m², el mismo tipo)
+                 ("avaluo_m2_apartamento", 0), ("veces_avaluo_apartamento", 2), ("avaluo_m2_casa", 0),
+                 ("veces_avaluo_casa", 2)]
 
 
 def por_barrio(d: dict) -> pd.DataFrame:
@@ -253,7 +257,56 @@ def con_catastro(t: pd.DataFrame, u: pd.DataFrame, clave: list[str]) -> pd.DataF
     t["genericos"] = gen.reindex(t.index)
     t["en_venta_parte"] = (t["viviendas"] / t["viviendas_catastro"]).where(
         (t["genericos"] < MAX_GENERICOS) & (t["viviendas_catastro"] >= MIN_VIVIENDAS_CATASTRO))
+    return con_avaluo(t, u, clave)
+
+
+# ── El avalúo catastral: cuántas veces el avalúo se pide (E9.4) ──────────────────────────────────────────────
+MIN_TIPO_ZONA = 10              # viviendas en venta de un tipo en la zona para comparar su precio con el avalúo
+
+
+def tipo_simple(tipo: pd.Series) -> pd.Series:
+    """«apartamento» (también apartaestudios), «casa» (también campestres) o vacío: los dos tipos del avalúo."""
+    t = tipo.astype(str).str.lower()
+    return pd.Series(pd.NA, index=tipo.index, dtype="object").mask(t.str.startswith("aparta"), "apartamento").mask(
+        t.str.startswith("casa"), "casa")
+
+
+def con_avaluo(t: pd.DataFrame, u: pd.DataFrame, clave: list[str]) -> pd.DataFrame:
+    """Añade el avalúo por m² construido de apartamentos y casas de cada zona (src/avaluos.py) y `veces_avaluo_…`:
+    el precio pedido por m² de ese tipo en la zona ÷ su avalúo por m² (con al menos MIN_TIPO_ZONA en venta). Medido
+    el 20-nov: en apartamentos, ~2,8 veces en Cali. Sin el resumen de avalúos, la tabla igual."""
+    from src import avaluos
+    a = avaluos.por_barrio()
+    if a is None or not len(t):
+        return t
+    nivel = "comuna" if clave[-1] == "comuna" and len(clave) == 1 else "barrio"
+    a = a[a["nivel"] == nivel]
+    u = u.dropna(subset=clave).assign(_tipo=lambda x: tipo_simple(x["tipo"]))
+    t = t.copy()
+    for tipo in avaluos.TIPOS:
+        ped = u[u["_tipo"] == tipo].groupby(clave)["precio_m2"].agg(["median", "size"])
+        av = a[a["tipo"] == tipo].set_index(clave)["avaluo_m2"]
+        av.index = av.index if len(clave) > 1 else av.index.astype(str)
+        t[f"avaluo_m2_{tipo}"] = av.reindex(t.index)
+        veces = (ped["median"] / av.reindex(ped.index)).where(ped["size"] >= MIN_TIPO_ZONA)
+        t[f"veces_avaluo_{tipo}"] = veces.reindex(t.index)
     return t
+
+
+def ciudad_avaluo(d: dict) -> dict:
+    """El avalúo por m² de los apartamentos de la ciudad y cuántas veces se pide (para comparar el barrio). Vacío sin
+    el resumen de avalúos."""
+    from src import avaluos
+    a = avaluos.por_barrio()
+    if a is None or d["ciudad"] != "Cali":
+        return {}
+    c = a[(a["nivel"] == "ciudad") & (a["tipo"] == "apartamento")]
+    u = d["inmuebles"]
+    ped = u.loc[tipo_simple(u["tipo"]) == "apartamento", "precio_m2"].median()
+    if c.empty or not ped:
+        return {}
+    av = float(c["avaluo_m2"].iloc[0])
+    return {"ciudad_avaluo_m2_apartamento": _num(av), "ciudad_veces_avaluo_apartamento": _num(ped / av, 2)}
 
 
 def conjuntos_barrio(comuna: str, barrio: str, n: int = 5) -> list[dict]:
@@ -329,7 +382,7 @@ def ficha_barrio(t: pd.DataFrame, comuna: str, barrio: str, d: dict) -> dict:
         "ciudad_precio_m2": _num(d["precio_m2"]), "ciudad_rentabilidad": _num(d["rentab"], 4),
         "su_comuna": [{"barrio": b, "precio_m2": _num(x["precio_m2"]), "viviendas": _num(x["viviendas"])}
                       for b, x in vecinos.iterrows()],
-        **ciudad_catastro(d),
+        **ciudad_catastro(d), **ciudad_avaluo(d),
         "conjuntos": conjuntos_barrio(comuna, barrio),          # para los agentes (el informe), no para lo público
     }
 
@@ -409,7 +462,9 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     if t is not None and len(t):
         t = con_catastro(t, d["inmuebles"], ["comuna"])
     cat = lambda x: {k: _num(x.get(k), dec) for k, dec in (("viviendas_catastro", 0), ("apartamentos_parte_catastro", 2),
-                                                           ("pisos_edificio", 0), ("genericos", 2), ("en_venta_parte", 4))}
+                                                           ("pisos_edificio", 0), ("genericos", 2), ("en_venta_parte", 4),
+                                                           ("avaluo_m2_apartamento", 0), ("veces_avaluo_apartamento", 2),
+                                                           ("avaluo_m2_casa", 0), ("veces_avaluo_casa", 2))}
     comunas = [] if t is None or not len(t) else [
         {"codigo": str(c), "nombre": nombre(c), "viviendas": _num(x["viviendas"]), "precio_m2": _num(x["precio_m2"]),
          "dias_publicadas": _num(x["dias_pub"]), "arriendos": _num(x["arriendos"]), "canon_m2": _num(x["canon_m2"]),

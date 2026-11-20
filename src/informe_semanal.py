@@ -603,6 +603,13 @@ def _catastro_barrio(b: dict, ciudad: str) -> str:
         t += (f" Hoy está en venta el equivalente a <b>{uno_de_cada(b['en_venta_parte'])}</b>"
               + (f" ({ciudad}: {uno_de_cada(b['ciudad_en_venta_parte'])})" if b.get("ciudad_en_venta_parte") else "")
               + "; donde se construye, cuenta también lo nuevo que aún no está en el catastro.")
+    for tipo, plural in (("apartamento", "apartamentos"), ("casa", "casas")):      # E9.4: el avalúo catastral
+        if b.get(f"avaluo_m2_{tipo}") and b.get(f"veces_avaluo_{tipo}"):
+            cali = b.get(f"ciudad_veces_avaluo_{tipo}")
+            t += (f" <b>Avalúo catastral:</b> {_mill(b[f'avaluo_m2_{tipo}'], 2)}/m² construido en sus {plural}; se piden "
+                  f"<b>{str(b[f'veces_avaluo_{tipo}']).replace('.', ',')} veces</b> su avalúo"
+                  + (f" ({ciudad}: {str(cali).replace('.', ',')})" if cali else "") + ".")
+            break
     return f"<p>{t}</p>"
 
 
