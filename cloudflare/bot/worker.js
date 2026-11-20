@@ -5,6 +5,8 @@
 //              X-Telegram-Bot-Api-Secret-Token y que el clic venga del chat del administrador. «Publicar» →
 //              GitHub lanza canal.yml con accion=aprobar y el id del mensaje (queda en cola o sale ya);
 //              «Descartar» → nada más. En los dos casos el botón cambia para que se vea que ya se pulsó.
+//              Y los mensajes de los agentes (bot de consulta, src/consulta.py): la consulta va a R2 y se lanza
+//              consulta.yml con su id; quien no tiene acceso recibe un aviso y el administrador, su número de chat.
 //   scheduled  "0 12 * * *" todos los días 12:00 UTC = 07:00 Colombia → canal.yml con accion=publicar.
 //
 // Va aparte del disparador (cloudflare/disparador/) para que un fallo aquí no toque el barrido.
@@ -13,8 +15,13 @@
 //   Variables: REPO, RAMA ("main")
 //   Secretos:  GITHUB_TOKEN (el mismo tipo de token que el disparador: SOLO este repo, "Actions: Read and
 //              write"), TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET (una clave al azar; la misma
-//              que se le da a Telegram con setWebhook)
+//              que se le da a Telegram con setWebhook), AGENTES (los chats de los agentes con acceso al bot de
+//              consulta, separados por coma; el administrador siempre lo tiene)
+//   Bindings:  R2 bucket «fr-scraper-datos» con el nombre DATOS (las consultas pendientes)
 //   Domains & Routes: la URL workers.dev activada (Telegram necesita una dirección a la que llamar).
+//
+// El webhook recibe callback_query (los botones) y message (las consultas): setWebhook con
+// allowed_updates=["callback_query","message"].
 //
 // Ojo: con el webhook activo, el bot ya no sirve para getUpdates (averiguar el id de un chat nuevo): antes
 // hay que quitarlo (deleteWebhook) y volver a ponerlo después.
@@ -28,8 +35,9 @@ export default {
       return new Response("no", { status: 403 });
     }
     const u = await peticion.json();
+    if (u.message) return consulta(u.message, env, ctx);              // un agente escribe al bot (src/consulta.py)
     const clic = u.callback_query;
-    if (!clic || !clic.message) return new Response("ok");             // otros mensajes al bot: se ignoran
+    if (!clic || !clic.message) return new Response("ok");             // otros avisos de Telegram: se ignoran
     const chat = String(clic.message.chat.id);
     if (chat !== String(env.TELEGRAM_ADMIN_CHAT_ID)) {
       ctx.waitUntil(telegram(env, "answerCallbackQuery", { callback_query_id: clic.id, text: "No autorizado" }));
@@ -65,10 +73,57 @@ export default {
   },
 };
 
-async function lanzar(env, inputs) {
+// ── El bot de consulta: un agente escribe una dirección, un enlace o «apto 80 m², 3 hab, Ciudad Jardín» ───────────
+// El texto y el chat se guardan en R2 (consultas/pendientes/<id>.json) y consulta.yml recibe solo el id: el
+// repositorio es público y sus registros también, y la dirección del cliente de un agente no puede quedar en ellos.
+const AYUDA = [                                        // la misma que src/consulta.py (AYUDA)
+  "Escríbeme una de estas tres cosas y te mando el informe de precio para captar (en unos minutos):",
+  "",
+  "• La dirección (en Cali), con la torre y el apartamento si es un edificio:",
+  "  KR 98 B # 48-127 TO 3 AP 436",
+  "• El enlace de un aviso publicado.",
+  "• Una descripción con el tipo, el área y el barrio (y si quieres, habitaciones, baños y estrato):",
+  "  apto 80 m², 3 hab, 2 baños, estrato 4, Ciudad Jardín",
+  "",
+  "Es una estimación del precio de mercado pedido, no un avalúo.",
+].join("\n");
+
+async function consulta(m, env, ctx) {
+  if (m.chat?.type !== "private" || !m.text) return new Response("ok");      // solo chats privados y con texto
+  const chat = String(m.chat.id);
+  const autorizados = new Set([String(env.TELEGRAM_ADMIN_CHAT_ID),
+    ...String(env.AGENTES || "").split(",").map((x) => x.trim()).filter(Boolean)]);
+  const responder = (texto) => telegram(env, "sendMessage", { chat_id: chat, text: texto });
+  if (!autorizados.has(chat)) {
+    // Al administrador, quién fue: así, para dar de alta a un agente basta con que escriba al bot
+    const quien = [m.from?.first_name, m.from?.last_name].filter(Boolean).join(" ") || "(sin nombre)";
+    ctx.waitUntil(Promise.all([
+      responder("Este servicio es solo para los agentes del piloto. Si quieres probarlo, escríbenos."),
+      telegram(env, "sendMessage", { chat_id: env.TELEGRAM_ADMIN_CHAT_ID,
+        text: `🔒 Escribió al bot alguien sin acceso: ${quien}${m.from?.username ? " (@" + m.from.username + ")" : ""} · ` +
+              `chat ${chat}. Para darle acceso, añade ese número a AGENTES en el Worker.` }),
+    ]));
+    return new Response("ok");
+  }
+  if (/^\/(start|ayuda|help)\b/i.test(m.text.trim())) {
+    ctx.waitUntil(responder(AYUDA));
+    return new Response("ok");
+  }
+  const id = crypto.randomUUID();
+  ctx.waitUntil((async () => {
+    await env.DATOS.put(`consultas/pendientes/${id}.json`, JSON.stringify({
+      chat, texto: m.text.slice(0, 500), recibido: new Date().toISOString(),
+    }), { httpMetadata: { contentType: "application/json" } });
+    await responder("⏳ Recibido. En unos minutos te llega el informe.");
+    await lanzar(env, { id }, "consulta.yml");
+  })().catch(() => responder("⚠️ No pude recibir la consulta. Prueba de nuevo en un rato.")));
+  return new Response("ok");
+}
+
+async function lanzar(env, inputs, workflow = WORKFLOW) {
   let detalle;
   try {
-    const r = await fetch(`https://api.github.com/repos/${env.REPO}/actions/workflows/${WORKFLOW}/dispatches`, {
+    const r = await fetch(`https://api.github.com/repos/${env.REPO}/actions/workflows/${workflow}/dispatches`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -85,7 +140,7 @@ async function lanzar(env, inputs) {
   }
   await telegram(env, "sendMessage", {
     chat_id: env.TELEGRAM_ADMIN_CHAT_ID,
-    text: `⚠️ No pude lanzar ${WORKFLOW} (${inputs.accion})\n${detalle}`,
+    text: `⚠️ No pude lanzar ${workflow} (${inputs.accion || "consulta"})\n${detalle}`,
   });
   throw new Error(detalle);
 }

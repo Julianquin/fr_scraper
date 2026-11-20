@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot de consulta por Telegram (src/consulta.py): un agente escribe al bot una dirección de Cali, el enlace de un
+# aviso o «apto 80 m², 3 hab, Ciudad Jardín», y le llega el informe de precio para captar (el de captacion.yml).
+#
+# Lo lanza el Worker del bot (cloudflare/bot/worker.js) con un solo dato, el id de la consulta: el texto y el chat
+# los guarda el Worker en R2 (consultas/pendientes/<id>.json), porque el repositorio es público y sus registros
+# también. Aquí no se imprime ni la dirección ni el chat: solo el id y el resultado.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Bot de consulta
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: "id de la consulta (la deja el Worker del bot en R2)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consulta-${{ inputs.id }}
+  cancel-in-progress: false
+
+jobs:
+  informe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar dependencias (modelo y PDF)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-inter libpango-1.0-0 libpangoft2-1.0-0 \
+            || echo "⚠️  Sin la fuente Inter: el PDF sale con DejaVu Sans"
+          python -m pip install --upgrade pip
+          pip install -r requirements-entrenamiento.txt -r requirements-informe.txt
+      - name: Bajar de R2 lo que usa el informe (los mismos datos que captacion.yml)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          python -m src.consolidar --bajar
+          python -m src.consolidar --raiz arriendo --bajar
+          python -m src.consolidar --raiz m2_venta --bajar
+          python -m src.almacen traer estado/historial/ --destino data
+          python -m src.almacen traer marca/ --destino data || echo "⚠️  Sin la presentación de los informes"
+          for f in predios.parquet meta.json avaluos.parquet; do
+            python -m src.almacen traer "catastro/$f" --destino data || echo "⚠️  Sin catastro/$f"
+          done
+          python -m src.almacen traer modelos/precio_vivienda.joblib --destino data/_r2tmp
+          mkdir -p data/modelos && mv data/_r2tmp/modelos/precio_vivienda.joblib data/modelos/
+          { python -m src.almacen traer modelos/estimados_sin_ver.parquet --destino data/_r2tmp \
+            && mv data/_r2tmp/modelos/estimados_sin_ver.parquet data/modelos/; } || echo "⚠️  Sin los estimados sin ver"
+      - name: Atender la consulta
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ID: ${{ inputs.id }}
+        run: python -m src.consulta --id "$ID"
+      - name: Avisar al administrador si algo falló
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: >-
+          python -m src.monitor fallo "Una consulta del bot falló (el agente ya recibió un aviso)"
+          --url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

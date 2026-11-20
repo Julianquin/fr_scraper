@@ -1,6 +1,6 @@
 # Configuración del Worker de los botones del canal (worker.js) por si se publica con la CLI
 # (`npx wrangler deploy`) en vez de pegarlo en el panel. Los secretos NO van aquí:
-#   npx wrangler secret put GITHUB_TOKEN   (y TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET)
+#   npx wrangler secret put GITHUB_TOKEN   (y TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET, AGENTES)
 name = "bot-canal"
 main = "worker.js"
 compatibility_date = "2026-10-01"
@@ -12,3 +12,8 @@ crons = ["0 12 * * *"]         # todos los días 12:00 UTC = 07:00 Colombia: pub
 [vars]
 REPO = "Julianquin/fr_scraper"
 RAMA = "main"
+
+# Las consultas del bot (src/consulta.py) se guardan en R2 hasta que consulta.yml las atiende
+[[r2_buckets]]
+binding = "DATOS"
+bucket_name = "fr-scraper-datos"

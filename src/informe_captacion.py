@@ -902,9 +902,16 @@ def generar(f: pd.Series) -> tuple[str, dict]:
 def enviar(pdf: str, d: dict, a_quien: str) -> None:
     """Por Telegram: 'admin' (TELEGRAM_ADMIN_CHAT_ID) o 'agentes' (TELEGRAM_CHAT_ID, separados por coma)."""
     import os
+    enviar_a(pdf, d, os.environ.get("TELEGRAM_ADMIN_CHAT_ID" if a_quien == "admin" else "TELEGRAM_CHAT_ID", ""))
+    print(f"✅ Enviado ({a_quien})")
+
+
+def enviar_a(pdf: str, d: dict, chats: str) -> None:
+    """El PDF a `chats` (uno o varios, separados por coma), con el pie para el agente: lo que se pidió y las notas
+    (el barrio, el catastro, el área). También lo usa el bot de consulta (src/consulta.py)."""
+    import os
     from src.notificar import documento_a_todos
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chats = os.environ.get("TELEGRAM_ADMIN_CHAT_ID" if a_quien == "admin" else "TELEGRAM_CHAT_ID", "")
     if not (token and chats):
         raise SystemExit("❌ Falta TELEGRAM_BOT_TOKEN o el chat de destino")
     pie = f"Informe de precio · {d['f']['tipo']} de {pd.to_numeric(d['f']['m2']):.0f} m² · {_donde(d)}"
@@ -915,7 +922,6 @@ def enviar(pdf: str, d: dict, a_quien: str) -> None:
             pie += f"\n{nota}"
     if fallos := documento_a_todos(pdf, token, chats, pie):
         raise SystemExit("❌ Fallaron algunos envíos del PDF:\n  " + "\n  ".join(fallos))
-    print(f"✅ Enviado ({a_quien})")
 
 
 if __name__ == "__main__":
