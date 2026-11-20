@@ -494,7 +494,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
             **ciudad_catastro(d),
         },
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
-        "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "mes": mes(d), "bajadas": bajadas,
+        "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "avaluo": ciudad_avaluo(d), "mes": mes(d), "bajadas": bajadas,
         "captacion": captacion, "credito": credito_semana(d),
         "area_metropolitana": area_metropolitana() if ciudad == "Cali" else None,
     })

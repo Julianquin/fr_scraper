@@ -764,7 +764,8 @@ def informe_html(d: dict) -> str:
         puntos.append(catastro)
     if area := aviso_area(f):
         puntos.append(f"<b>Ojo con el área.</b> {html.escape(area)}")
-    max_comps = MAX_COMPARABLES - (1 if catastro else 0) - (1 if area else 0)     # que siga cabiendo en una hoja
+    max_comps = (MAX_COMPARABLES - (1 if catastro else 0) - (1 if area else 0)    # que siga cabiendo en una hoja
+                 - (1 if catastro and "Avalúo catastral" in catastro else 0))   # el avalúo alarga la línea
     if len(comps):
         portales = ""                       # un solo mercado: sin nombrar portales
         de_fr = "; los que tienen fecha de publicación llevan" if n_m2 else "; llevan"
@@ -879,7 +880,7 @@ def informe_html(d: dict) -> str:
 <p class="nota">Estimación del precio de mercado <b>pedido</b> con avisos públicos de portales inmobiliarios
 (modelo y similares, sin repetir los que están en varios), al {_fecha(d['hasta'])}. No es un avalúo (Ley 1673 de 2013): no reemplaza el de un avaluador inscrito
 en el RAA. Los precios de cierre suelen ser algo menores que los pedidos. El modelo tiene un error promedio de ~10% en
-apartamentos y ~15% en casas; el rango del 80% lo refleja. Promedio: el valor del medio (la mediana), que no se deja llevar por los avisos con precios extremos. {ubic}</p>
+apartamentos y ~15% en casas; el rango del 80% lo refleja. Promedio: la mediana (el valor del medio). {ubic}</p>
 </body></html>"""
 
 
