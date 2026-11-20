@@ -46,7 +46,8 @@ CRITERIOS = {
     "bajo_similares": 0.20,     # ≥ 20% bajo sus similares…
     "bajo_modelo": 0.10,        # …y ≥ 10% bajo el modelo (estimado sin ver): las dos medidas coinciden
     "confianza": "Alta",        # similares en el barrio, 15 o más
-    "maximo": 2,                # oportunidades por día
+    "maximo": 1,                # oportunidades por día (decisión del dueño, 20-nov: una; antes 2), aunque `proponer`
+                                # corra dos veces el mismo día (p. ej. al relanzar Metrocuadrado a mano)
 }
 TOP_BAJADAS = 3
 BAJADA_BRUSCA = 0.25            # una bajada así en 14 días puede ser un error de digitación (285 → 190 M): se avisa
@@ -128,7 +129,8 @@ def oportunidades_del_dia(ciudad: str, ya: dict[str, str]) -> pd.DataFrame:
     (columna `fuente`):
       - «nueva»: publicada en los últimos CRITERIOS['dias'] días y nunca propuesta (sin republicados: no son nuevas);
       - «bajada»: bajó de precio en los últimos CRITERIOS['dias_bajada'] barridos (también al republicar), sea cual
-        sea su antigüedad; vuelve a proponerse aunque ya se hubiera propuesto, si la bajada es posterior.
+        sea su antigüedad.
+    Ninguna vivienda se propone dos veces (decisión del dueño, 20-nov: antes una bajada posterior la volvía a proponer).
     Un solo mercado (E8.1–E8.3): FincaRaíz y los inmuebles que solo están en Metrocuadrado (las suyas son «nuevas» si
     aparecieron en los últimos días: el portal no publica la fecha), comparados con los similares de los dos portales.
     `ya`: {id del aviso: fecha en que se propuso}."""
@@ -149,7 +151,7 @@ def oportunidades_del_dia(ciudad: str, ya: dict[str, str]) -> pd.DataFrame:
     bj = pd.concat([op.bajadas(df, hist, desde_bj, ultimo, pool=pool)]
                    + ([op.bajadas(m2, hist, desde_bj, ultimo, pool=pool)] if len(m2) else []), ignore_index=True)
     if len(bj):
-        bj = bj[[ya.get(i, "") < str(f)[:10] for i, f in zip(bj["id_inmueble"], bj["fecha_baja"])]]   # bajada posterior
+        bj = bj[~bj["id_inmueble"].astype(str).isin(set(ya))]                  # nunca dos veces la misma vivienda
         bj = _cumplen(bj)
         if len(bj):
             candidatas.append(op.enriquecer(bj.sort_values("descuento", ascending=False).head(10), pool, hasta)
@@ -364,18 +366,24 @@ def proponer(ciudad: str = "Cali", enviar: bool = True) -> list[tuple[str, str]]
     hoy = ahora_colombia()
     propuestas: list[tuple[str, str, str | None, dict | None]] = []     # (tipo, texto, id del aviso, ficha)
     notas = {}                                                   # id del aviso → aviso solo para el administrador
-    for _, r in oportunidades_del_dia(ciudad, e["propuestos"]).iterrows():
+    # Lo ya propuesto hoy no se repite: `proponer` puede correr dos veces el mismo día (al relanzar un barrido)
+    ya_hoy = {p.get("tipo") for p in e["propuestas"].values() if p.get("fecha") == f"{hoy:%Y-%m-%d}"}
+    hoy_op = oportunidades_del_dia(ciudad, e["propuestos"]) if "oportunidad" not in ya_hoy else None
+    for _, r in (hoy_op.iterrows() if hoy_op is not None else []):
         nota = bajada_brusca(r["id_inmueble"])
         propuestas.append(("oportunidad", texto_oportunidad(r, pie), str(r["id_inmueble"]),
                            {**contenido.ficha(r), "bajada_brusca": nota is not None}))
         if nota:
             notas[str(r["id_inmueble"])] = nota
-    if hoy.day_of_week == 0:
+    if hoy.day_of_week == 0 and "pulso" not in ya_hoy:
         propuestas.append(("pulso", texto_pulso(ciudad, pie), None, None))
-    if hoy.day_of_week == 3 and (t := texto_bajadas(ciudad, pie)):
+    if hoy.day_of_week == 3 and "bajadas" not in ya_hoy and (t := texto_bajadas(ciudad, pie)):
         propuestas.append(("bajadas", t, None, None))
     n_op = sum(p[0] == "oportunidad" for p in propuestas)
     print(f"{hoy:%Y-%m-%d}: {n_op} oportunidades · {len(propuestas) - n_op} más ({[p[0] for p in propuestas]})")
+    if ya_hoy and not propuestas:
+        print(f"   Ya se propuso hoy {sorted(ya_hoy)}: nada nuevo, no se manda nada")
+        return []
     if not enviar:
         for _, texto, id_aviso, _ in propuestas:
             print("\n" + "─" * 60 + ("\n" + notas[id_aviso] if id_aviso in notas else "") + "\n" + texto)
