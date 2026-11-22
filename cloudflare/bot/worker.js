@@ -7,6 +7,9 @@
 //              «Descartar» → nada más. En los dos casos el botón cambia para que se vea que ya se pulsó.
 //              Y los mensajes de los agentes (bot de consulta, src/consulta.py): la consulta va a R2 y se lanza
 //              consulta.yml con su id; quien no tiene acceso recibe un aviso y el administrador, su número de chat.
+//              Y «📲 Publicar en Instagram» (callback ig:<pieza>) en las piezas de la fábrica de contenido: lanza
+//              instagram.yml en el repositorio privado de la fábrica (REPO_MARCA) con la pieza y el id del mensaje;
+//              el botón pasa a «⏳ Publicando…» y ese flujo lo deja en «✅ Publicado» (o «🔁 Reintentar»).
 //   scheduled  "0 12 * * *" todos los días 12:00 UTC = 07:00 Colombia → canal.yml con accion=publicar.
 //
 // Va aparte del disparador (cloudflare/disparador/) para que un fallo aquí no toque el barrido.
@@ -16,7 +19,9 @@
 //   Secretos:  GITHUB_TOKEN (el mismo tipo de token que el disparador: SOLO este repo, "Actions: Read and
 //              write"), TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET (una clave al azar; la misma
 //              que se le da a Telegram con setWebhook), AGENTES (los chats de los agentes con acceso al bot de
-//              consulta, separados por coma; el administrador siempre lo tiene)
+//              consulta, separados por coma; el administrador siempre lo tiene), REPO_MARCA y
+//              GITHUB_TOKEN_MARCA (el repositorio privado de la fábrica, «usuario/nombre», y un token SOLO de ese
+//              repo con "Actions: Read and write"; secretos y no variables porque este repositorio es público)
 //   Bindings:  R2 bucket «fr-scraper-datos» con el nombre DATOS (las consultas pendientes)
 //   Domains & Routes: la URL workers.dev activada (Telegram necesita una dirección a la que llamar).
 //
@@ -54,6 +59,8 @@ export default {
     } else if (clic.data === "des") {
       etiqueta = "✖️ Descartada";
       aviso = "Descartada";
+    } else if (/^ig:[\w-]{1,60}$/.test(clic.data || "")) {
+      return instagram(clic, chat, mensaje, env, ctx);
     } else {                                                            // un botón ya pulsado
       ctx.waitUntil(telegram(env, "answerCallbackQuery", { callback_query_id: clic.id }));
       return new Response("ok");
@@ -120,13 +127,36 @@ async function consulta(m, env, ctx) {
   return new Response("ok");
 }
 
-async function lanzar(env, inputs, workflow = WORKFLOW) {
+// ── «📲 Publicar en Instagram»: una pieza de la fábrica de contenido (callback ig:<pieza>) ─────────────────────────
+// La publica instagram.yml del repositorio privado de la fábrica, que al terminar cambia el botón otra vez. Aquí
+// solo se lanza y se marca el botón como en marcha (así un segundo clic no hace nada).
+function instagram(clic, chat, mensaje, env, ctx) {
+  const botones = (texto, data) => telegram(env, "editMessageReplyMarkup", {
+    chat_id: chat, message_id: mensaje, reply_markup: { inline_keyboard: [[{ text: texto, callback_data: data }]] },
+  });
+  ctx.waitUntil((async () => {
+    await Promise.all([
+      telegram(env, "answerCallbackQuery", { callback_query_id: clic.id, text: "Publicando en Instagram…" }),
+      botones("⏳ Publicando en Instagram…", "hecho"),
+    ]);
+    try {
+      await lanzar(env, { accion: "publicar", pieza: clic.data.slice(3), mensaje: String(mensaje) },
+                   "instagram.yml", env.REPO_MARCA, env.GITHUB_TOKEN_MARCA);
+    } catch {
+      await botones("🔁 Reintentar publicar en Instagram", clic.data);   // lanzar() ya avisó del motivo
+    }
+  })());
+  return new Response("ok");
+}
+
+async function lanzar(env, inputs, workflow = WORKFLOW, repo = env.REPO, token = env.GITHUB_TOKEN) {
   let detalle;
   try {
-    const r = await fetch(`https://api.github.com/repos/${env.REPO}/actions/workflows/${workflow}/dispatches`, {
+    if (!repo || !token) throw new Error("falta el repositorio o su token en la configuración del Worker");
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "bot-canal",                   // GitHub rechaza llamadas sin User-Agent

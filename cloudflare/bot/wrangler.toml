@@ -1,6 +1,6 @@
 # Configuración del Worker de los botones del canal (worker.js) por si se publica con la CLI
 # (`npx wrangler deploy`) en vez de pegarlo en el panel. Los secretos NO van aquí:
-#   npx wrangler secret put GITHUB_TOKEN   (y TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET, AGENTES)
+#   npx wrangler secret put GITHUB_TOKEN   (y TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID, WEBHOOK_SECRET, AGENTES, REPO_MARCA, GITHUB_TOKEN_MARCA)
 name = "bot-canal"
 main = "worker.js"
 compatibility_date = "2026-10-01"
