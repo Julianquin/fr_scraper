@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 45            # ~15 mapas, unos 10–15 min
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy2.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,13 +60,30 @@ jobs:
         run: python -m src.mapa_ciudad --todas
       - name: Configurar Pages
         uses: actions/configure-pages@v5
+      # Un nombre de paquete por intento: con el de siempre («github-pages»), un «Re-run» encuentra también el del
+      # intento anterior y falla con «Multiple artifacts» (7 y 22-nov)
       - name: Empaquetar docs/ como artifact de Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs
+          name: github-pages-${{ github.run_attempt }}
+      # A veces GitHub aún no ve el paquete recién subido («No artifacts named … were found», 7 y 22-nov): se espera
+      # un minuto y se reintenta una vez; el aviso de fallo solo sale si falla también el segundo
       - name: Deploy a GitHub Pages
         id: deploy
+        continue-on-error: true
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+      - name: Esperar antes de reintentar el deploy
+        if: steps.deploy.outcome == 'failure'
+        run: sleep 60
+      - name: Deploy a GitHub Pages (segundo intento)
+        id: deploy2
+        if: steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
       - name: Avisar al administrador si algo falló
         if: failure()
         env:
