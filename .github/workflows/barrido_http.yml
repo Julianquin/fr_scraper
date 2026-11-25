@@ -52,7 +52,8 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.sitemap_fincaraiz --pausa 0.3 barrer
+        # Tope de 240 min (el job tiene 300): lo que no dé tiempo, del estado de ayer y pendiente para mañana (25-nov)
+        run: python -m src.sitemap_fincaraiz --pausa 0.3 barrer --minutos 240 --guardar-pendientes
       - uses: actions/upload-artifact@v4
         with:
           name: http-sitemap
@@ -119,7 +120,8 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.sitemap_fincaraiz --raiz arriendo --pausa 0.3 barrer
+        # Tope de 180 min (el job tiene 240)
+        run: python -m src.sitemap_fincaraiz --raiz arriendo --pausa 0.3 barrer --minutos 180 --guardar-pendientes
       - uses: actions/upload-artifact@v4
         with:
           name: arriendo-sitemap

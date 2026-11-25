@@ -17,8 +17,15 @@ De ahí sale:
 El resultado tiene la forma del barrido (barrido_0.parquet, informe_0.csv y nacional.json en data/http[_arriendo]/),
 así que `scraper_http juntar` y `consolidar` siguen igual.
 
+Con tope de tiempo (`--minutos`, desde el 25-nov): la noche del 24-nov el portal movió el lastmod de ~28.800 avisos de
+venta en dos horas (lo normal son 2.000–5.600 al día), hubo que leer 41.000 y el barrido agotó sus 5 h sin guardar
+nada. Ahora se lee por orden de prioridad (los nuevos, los que vuelven tras una baja, los del Valle del Cauca —Cali,
+Jamundí y Yumbo: la alerta, el canal y la fábrica— y el resto, el cambio más antiguo primero) hasta el tope; lo que
+no da tiempo a leer se toma del estado de ayer (no cuenta como ausente) y queda en `sitemap_pendientes.json`, junto
+al estado en R2, para leerse primero la noche siguiente (`--guardar-pendientes`, solo en el CI).
+
     python -m src.sitemap_fincaraiz [--raiz arriendo] medir                  # cuántos hay que leer, sin leerlos
-    python -m src.sitemap_fincaraiz [--raiz arriendo] barrer [--pausa 0.4]   # el barrido del día
+    python -m src.sitemap_fincaraiz [--raiz arriendo] barrer [--pausa 0.4] [--minutos 240] [--guardar-pendientes]
 """
 from __future__ import annotations
 
@@ -38,6 +45,7 @@ from src.scraper_http import carpetas, hoy
 INDICE = f"{BASE}/cde-sitemap-listings-index.xml"
 OPERACION = {"venta": "-en-venta-", "arriendo": "-en-alquiler-"}
 ESTADO = {"venta": "estado/avisos.parquet", "arriendo": "estado_arriendo/avisos.parquet"}
+PRIORITARIO = "-valle-del-cauca"     # los archivos del sitemap de Cali y su área (…-en-venta-valle-del-cauca)
 _URL = re.compile(r"<url>(.*?)</url>", re.S)
 _LOC = re.compile(r"<loc>(.*?)</loc>")
 _LASTMOD = re.compile(r"<lastmod>(.*?)</lastmod>")
@@ -153,13 +161,59 @@ def repartir(sm: pd.DataFrame, estado: pd.DataFrame) -> dict[str, pd.DataFrame]:
             "ausentes": estado[estado["id_inmueble"].isin(set(activos) - set(sm["id_inmueble"]))]}
 
 
+# ── Pendientes: lo que un barrido con tope no llegó a leer ────────────────────
+def _clave_pendientes(raiz: str) -> str:
+    return ESTADO[raiz].rsplit("/", 1)[0] + "/sitemap_pendientes.json"
+
+
+def pendientes(raiz: str) -> set[str]:
+    from src import almacen
+    s3, bucket = almacen._cliente()
+    try:
+        return set(json.loads(s3.get_object(Bucket=bucket, Key=_clave_pendientes(raiz))["Body"].read())["ids"])
+    except s3.exceptions.NoSuchKey:
+        return set()
+
+
+def guardar_pendientes(raiz: str, ids: set[str]) -> None:
+    from src import almacen
+    s3, bucket = almacen._cliente()
+    s3.put_object(Bucket=bucket, Key=_clave_pendientes(raiz), ContentType="application/json",
+                  Body=json.dumps({"fecha": hoy(), "ids": sorted(ids)}).encode())
+
+
+def ordenar(partes: dict[str, pd.DataFrame], estado: pd.DataFrame, pend: set[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(leer, igual), con `leer` por prioridad: 0 nuevos, 1 vuelven tras una baja, 2 del Valle del Cauca, 3 el resto,
+    y dentro de cada una el cambio más antiguo primero (nada se queda atrás para siempre). Los pendientes de otros días
+    vuelven a `leer` aunque su lastmod ya sea anterior a la última vez que se vieron (se copiaron del estado)."""
+    igual = partes["igual"]
+    atras = igual["id_inmueble"].isin(pend)
+    leer = pd.concat([partes["leer"], igual[atras]], ignore_index=True)
+    e = estado.set_index("id_inmueble")
+    en_estado = leer["id_inmueble"].isin(e.index)
+    activo = leer["id_inmueble"].map(e["estado_aviso"]).eq("activo")
+    prioridad = pd.Series(3, index=leer.index)
+    prioridad[leer["archivo"].astype(str).str.endswith(PRIORITARIO)] = 2
+    prioridad[en_estado & ~activo] = 1
+    prioridad[~en_estado] = 0
+    leer = (leer.assign(prioridad=prioridad, pendiente=leer["id_inmueble"].isin(pend))
+            .sort_values(["prioridad", "lastmod"], na_position="first", kind="stable").reset_index(drop=True))
+    return leer, igual[~atras]
+
+
+def _resumen(leer: pd.DataFrame) -> str:
+    n = leer["prioridad"].value_counts()
+    return (f"nuevos {n.get(0, 0):,} · vuelven {n.get(1, 0):,} · Valle del Cauca {n.get(2, 0):,} · resto "
+            f"{n.get(3, 0):,}; de ellos, pendientes de otros días {int(leer['pendiente'].sum()):,}")
+
+
 def medir(raiz: str, pausa: float) -> dict[str, pd.DataFrame]:
     sm = sitemaps(raiz, pausa)
     estado, _ = estado_y_columnas(raiz)
     partes = repartir(sm, estado)
-    nuevos = (~partes["leer"]["id_inmueble"].isin(estado["id_inmueble"])).sum()
-    print(f"{raiz}: en el sitemap {len(sm):,} · leer {len(partes['leer']):,} (nuevos {nuevos:,}) · del estado "
-          f"{len(partes['igual']):,} · activos ayer que ya no están {len(partes['ausentes']):,} "
+    leer, igual = ordenar(partes, estado, pendientes(raiz))
+    print(f"{raiz}: en el sitemap {len(sm):,} · leer {len(leer):,} ({_resumen(leer)}) · del estado {len(igual):,} · "
+          f"activos ayer que ya no están {len(partes['ausentes']):,} "
           f"(de {estado['estado_aviso'].eq('activo').sum():,} activos)")
     return partes
 
@@ -177,19 +231,28 @@ def ficha(sesion: requests.Session, url: str) -> dict | None:
     return d if d and d.get("active", True) and not d.get("deleted") else None
 
 
-def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFrame:
+def barrer(raiz: str, pausa: float, max_fichas: int | None = None, minutos: float | None = None,
+           guardar: bool = False) -> pd.DataFrame:
+    """`minutos`: el tope de tiempo desde que empieza (sitemap incluido); `max_fichas`: como mucho N (pruebas). Lo que
+    no se lee se toma del estado de ayer y, con `guardar`, queda en los pendientes de R2 para la noche siguiente."""
     trabajo, _ = carpetas(raiz)
     sesion = requests.Session()
     t0 = time.time()
     sm = sitemaps(raiz, pausa, sesion)
     estado, columnas = estado_y_columnas(raiz)
     partes = repartir(sm, estado)
-    leer = partes["leer"].head(max_fichas) if max_fichas else partes["leer"]
-    print(f"A leer: {len(leer):,} avisos (nuevos, cambiados o que vuelven) · del estado: {len(partes['igual']):,}",
-          flush=True)
+    leer, igual_sm = ordenar(partes, estado, pendientes(raiz))
+    print(f"A leer: {len(leer):,} avisos ({_resumen(leer)}) · del estado: {len(igual_sm):,}"
+          + (f" · tope {minutos:.0f} min" if minutos else ""), flush=True)
 
+    tope = min(len(leer), max_fichas or len(leer))
+    limite = t0 + minutos * 60 if minutos else None
+    hechos = tope
     filas, errores, idos, archivo_de = [], 0, 0, dict(zip(sm["id_inmueble"], sm["archivo"]))
-    for k, a in enumerate(leer.itertuples(), 1):
+    for k, a in enumerate(leer.head(tope).itertuples(), 1):
+        if limite and time.time() > limite:
+            hechos = k - 1
+            break
         try:
             d = ficha(sesion, a.url)
         except Bloqueado:
@@ -205,7 +268,24 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFra
             print(f"   {k:,}/{len(leer):,} leídos · {errores} errores · {(time.time() - t0) / 60:.0f} min", flush=True)
         time.sleep(pausa)
 
-    igual = estado.set_index("id_inmueble").loc[partes["igual"]["id_inmueble"]].reset_index()
+    # Lo que no dio tiempo a leer: los activos ayer, del estado (sin su cambio de hoy) y a pendientes; los nuevos y
+    # los que volvían se dejan para mañana (siguen sin estar o inactivos, así que volverán a tocar)
+    leidos, resto = leer.iloc[:hechos], leer.iloc[hechos:]
+    activos = estado.loc[estado["estado_aviso"].eq("activo"), "id_inmueble"]
+    atrasados = resto[resto["id_inmueble"].isin(activos)]
+    if len(resto):
+        print(f"⏱️  Tope: {len(leidos):,} leídos; quedan {len(resto):,} ({len(atrasados):,} se toman del estado de ayer "
+              f"y quedan pendientes para mañana; {len(resto) - len(atrasados):,} nuevos o que vuelven, mañana)",
+              flush=True)
+    if guardar:
+        try:
+            guardar_pendientes(raiz, set(atrasados["id_inmueble"]))
+        except Exception as e:  # noqa: BLE001 — que no se pierda el barrido; esos cambios se leerían cuando vuelvan a cambiar
+            print(f"⚠️  No pude guardar los pendientes en R2 ({type(e).__name__}): {len(atrasados):,} cambios sin leer "
+                  "no se volverán a pedir", flush=True)
+
+    ids_igual = pd.concat([igual_sm["id_inmueble"], atrasados["id_inmueble"]], ignore_index=True)
+    igual = estado.set_index("id_inmueble").loc[ids_igual].reset_index()
     igual["segmento"] = igual["id_inmueble"].map(archivo_de).map(lambda x: f"sitemap/{x}")
     df = pd.concat([pd.DataFrame(filas), igual[[c for c in columnas if c in igual.columns]]], ignore_index=True)
     df = df[[c for c in columnas if c in df.columns]]
@@ -215,7 +295,7 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFra
                .rename(columns={"archivo": "segmento"}))
     informe["segmento"] = "sitemap/" + informe["segmento"]
     informe["paginas"] = informe["segmento"].map(
-        pd.Series([f"sitemap/{x}" for x in leer["archivo"]]).value_counts()).fillna(0).astype(int)
+        pd.Series([f"sitemap/{x}" for x in leidos["archivo"]]).value_counts()).fillna(0).astype(int)
     informe["avisos"] = informe["unicos"]
     informe["errores"] = 0
     if errores:
@@ -239,8 +319,10 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None) -> pd.DataFra
     informe[["segmento", "declarado", "paginas", "avisos", "unicos", "errores"]].to_csv(trabajo / "informe_0.csv",
                                                                                         index=False)
     (trabajo / "nacional.json").write_text(json.dumps({"total_nacional": nacional, "por_tipo": por_tipo,
-                                                       "contador_general": general, "fecha": hoy(), "fuente": "sitemap"}))
-    print(f"Sitemap {raiz}: {len(df):,} avisos ({len(filas):,} leídos, {len(igual):,} del estado) · {idos:,} ya no "
+                                                       "contador_general": general, "fecha": hoy(), "fuente": "sitemap",
+                                                       "pendientes": len(atrasados)}))
+    print(f"Sitemap {raiz}: {len(df):,} avisos ({len(filas):,} leídos, {len(igual):,} del estado, "
+          f"{len(atrasados):,} de ellos pendientes) · {idos:,} ya no "
           f"publicados · {errores} errores · declarado por tipos {nacional:,} (contador general {general:,}) · "
           f"{(time.time() - t0) / 60:.1f} min")
     return df
@@ -254,8 +336,13 @@ if __name__ == "__main__":
     sub.add_parser("medir")
     b = sub.add_parser("barrer")
     b.add_argument("--max-fichas", type=int, help="leer como mucho N avisos (pruebas)")
+    b.add_argument("--minutos", type=float, help="tope de tiempo: lo que no se lea, del estado de ayer y a pendientes")
+    b.add_argument("--guardar-pendientes", action="store_true", help="dejar en R2 lo no leído (solo el CI)")
     a = p.parse_args()
     try:
-        medir(a.raiz, a.pausa) if a.accion == "medir" else barrer(a.raiz, a.pausa, a.max_fichas)
+        if a.accion == "medir":
+            medir(a.raiz, a.pausa)
+        else:
+            barrer(a.raiz, a.pausa, a.max_fichas, a.minutos, a.guardar_pendientes)
     except Bloqueado as e:
         raise SystemExit(f"❌ FincaRaíz pidió el desafío del cortafuegos también aquí: {e}. No se salta: parar.")
