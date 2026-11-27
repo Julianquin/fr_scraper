@@ -41,7 +41,7 @@ jobs:
     # siguiente eslabón (un workflow_run cancelado cuenta como "completed")
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled'
     runs-on: ubuntu-latest
-    timeout-minutes: 45            # ~280 consultas de totales con 8 tipos (~10 min)
+    timeout-minutes: 60            # ~280 consultas de totales con 8 tipos (~40 min a 7 s; una vez por semana)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,16 +52,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      # Desde el 27-nov el portal limita el ritmo (~15 páginas por minuto; 429 si se pasa): src/metrocuadrado_http.py deja
-      # 5 s entre peticiones (~280 consultas en ~23 min) y el plan se rinde a los 35 min. El plan que sale bien se guarda
-      # en R2; si el de hoy no se puede hacer, se barre con el último (--respaldo)
+      # Desde el 27-nov el portal limita el ritmo (~15 páginas por minuto y un cupo más largo; 429 si se pasa):
+      # src/metrocuadrado_http.py deja 7 s entre peticiones. El plan solo reparte el trabajo: se rehace una vez por semana
+      # (--cada 7; ~280 consultas, ~40 min) y los demás días se usa el último bueno de R2, igual que si falla (--respaldo)
       - name: Unidades por departamento repartidas en 4 grupos
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.metrocuadrado_http plan --grupos 4 --respaldo
+        run: python -m src.metrocuadrado_http plan --grupos 4 --respaldo --cada 7
       - uses: actions/upload-artifact@v4
         with:
           name: m2-plan
