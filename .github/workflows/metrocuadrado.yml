@@ -52,15 +52,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      # Más despacio desde el 27-nov (el portal responde 429 a ~45 páginas por minuto): ~280 consultas en ~16 min. El plan
-      # que sale bien se guarda en R2; si el de hoy no se puede hacer, se barre con el último (--respaldo)
+      # Desde el 27-nov el portal limita el ritmo (~15 páginas por minuto; 429 si se pasa): src/metrocuadrado_http.py deja
+      # 5 s entre peticiones (~280 consultas en ~23 min) y el plan se rinde a los 35 min. El plan que sale bien se guarda
+      # en R2; si el de hoy no se puede hacer, se barre con el último (--respaldo)
       - name: Unidades por departamento repartidas en 4 grupos
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-        run: python -m src.metrocuadrado_http --pausa 2.5 plan --grupos 4 --respaldo
+        run: python -m src.metrocuadrado_http plan --grupos 4 --respaldo
       - uses: actions/upload-artifact@v4
         with:
           name: m2-plan
