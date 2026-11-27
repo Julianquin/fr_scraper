@@ -88,9 +88,10 @@ def _objeto(payload: str, clave: str) -> dict | None:
 # estos segundos, y si aun así sigue, se para (Limitado). No se salta: es el portal pidiendo ir más despacio.
 ESPERAS_429 = (30, 60, 120, 240, 480)
 # Medido el 27-nov con el plan a ~18 páginas por minuto: cada ~14 páginas pide esperar 15–17 s (un límite de ~15 por
-# minuto) y, al insistir, 15 min o más. Así que no se llega: al menos INTERVALO s entre una petición y la siguiente
-# (~12 por minuto; el plan, ~23 min; cada grupo del barrido, ~1,5 h de sus 355 min).
-INTERVALO = 5.0
+# minuto) y, hacia la consulta 150–170, 15 min o más (también a ~12 por minuto, en GitHub): parece haber además un cupo
+# más largo. Así que no se llega: al menos INTERVALO s entre una petición y la siguiente (~8,5 por minuto; cada grupo
+# del barrido, ~2,5 h de sus 355 min) y el plan, que solo reparte el trabajo, se rehace una vez por semana.
+INTERVALO = 7.0
 ESPERA_MAX = 900                     # el plan la baja: mejor rendirse pronto y usar el último plan bueno
 _ULTIMA = [0.0]                      # cuándo salió la última petición (time.monotonic)
 
@@ -301,7 +302,7 @@ class Barrido:
 
 
 # ── 1. Plan ──────────────────────────────────────────────────────────────────
-MINUTOS_PLAN = 35
+MINUTOS_PLAN = 50                    # el job del plan tiene 60
 
 
 def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
@@ -359,6 +360,18 @@ def guardar_plan() -> None:
     trabajo = carpetas(RAIZ)[0]
     for archivo, clave in PLAN_R2.items():
         almacen.subir_archivo(trabajo / archivo, clave)
+
+
+def edad_plan_anterior() -> int | None:
+    """Días que tiene el último plan bueno de R2, o None si no hay."""
+    from src import almacen
+    from datetime import date
+    s3, bucket = almacen._cliente()
+    try:
+        d = json.loads(s3.get_object(Bucket=bucket, Key=PLAN_R2["nacional.json"])["Body"].read())
+    except s3.exceptions.NoSuchKey:
+        return None
+    return (date.fromisoformat(hoy()) - date.fromisoformat(d["fecha"])).days
 
 
 def plan_anterior() -> None:
@@ -433,7 +446,7 @@ def juntar(subir: bool) -> dict:
     return reporte
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Barrido diario de Metrocuadrado (vivienda en venta, todo el país)")
     p.add_argument("--pausa", type=float, default=1.0, help="segundos entre páginas (cortesía)")
     sub = p.add_subparsers(dest="accion", required=True)
@@ -441,14 +454,19 @@ if __name__ == "__main__":
     a.add_argument("--grupos", type=int, default=4)
     a.add_argument("--respaldo", action="store_true",
                    help="guardar en R2 el plan si sale bien y, si no, usar el último que salió bien (el CI)")
+    a.add_argument("--cada", type=int, help="con --respaldo: rehacerlo solo si el último bueno tiene N días o más")
     b = sub.add_parser("barrer")
     b.add_argument("--grupo", type=int, required=True)
     b.add_argument("--solo", type=int, help="solo las N unidades más chicas del grupo (pruebas)")
     j = sub.add_parser("juntar")
     j.add_argument("--subir", action="store_true")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
-    if args.accion == "plan":
+    edad = edad_plan_anterior() if args.accion == "plan" and args.respaldo and args.cada else None
+    if edad is not None and edad < args.cada:
+        plan_anterior()
+        print(f"   (tiene {edad} días: se rehace cada {args.cada}; así se ahorran ~280 consultas al portal)")
+    elif args.accion == "plan":
         try:
             plan(args.grupos, args.pausa)
             if args.respaldo:
@@ -462,3 +480,7 @@ if __name__ == "__main__":
         barrer(args.grupo, args.pausa, args.solo)
     else:
         juntar(args.subir)
+
+
+if __name__ == "__main__":
+    main()
