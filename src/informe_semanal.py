@@ -229,6 +229,7 @@ def datos(ciudad: str = "Cali", fecha: str | None = None, dias: int = 7) -> dict
         "evaluadas": len(ev), "con_comparables": int(ev["nivel_comps"].notna().sum()) if len(ev) else 0,
         "bajo_umbral": int((ev["descuento"] >= UMBRAL).sum()) if len(ev) else 0,
         "sel": sel, "sel_bj": sel_bj,
+        "ev": ev,                               # las nuevas de la semana, calificadas (el embudo de src/contenido.py)
         "captar_n": int(cap["n_total"].iloc[0]) if len(cap) else 0, "captar": cap,
         "captar_comunas": captar_comunas, "viejas": len(viejas),
         # Para las cifras por barrio de src/contenido.py
