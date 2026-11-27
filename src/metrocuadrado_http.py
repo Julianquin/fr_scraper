@@ -83,11 +83,37 @@ def _objeto(payload: str, clave: str) -> dict | None:
     return json.JSONDecoder().raw_decode(payload, payload.find("{", k))[0]   # respeta llaves dentro de textos
 
 
+# Desde el 27-nov el portal responde 429 («Too Many Requests») si se le pide muy seguido (el plan, a ~45 páginas por
+# minuto, lo recibió en menos de un minuto, también desde otra IP): se respeta, esperando lo que diga (Retry-After) o
+# estos segundos, y si aun así sigue, se para (Limitado). No se salta: es el portal pidiendo ir más despacio.
+ESPERAS_429 = (30, 60, 120, 240, 480)
+
+
+class Limitado(RuntimeError):
+    """El portal siguió respondiendo 429 tras todas las esperas."""
+
+
+def _espera_429(r: requests.Response, k: int) -> int:
+    try:
+        return min(max(int(r.headers.get("Retry-After", "")), 1), 900)
+    except ValueError:
+        return ESPERAS_429[k]
+
+
 def pedir(sesion: requests.Session, ruta_url: str, reintentos: int = 3) -> tuple[int, list[dict]]:
     """(total del filtro, avisos de la primera página) de una URL pública de listado."""
-    for intento in range(1, reintentos + 1):
+    intento, limites = 1, 0
+    while True:
         try:
             r = sesion.get(BASE + ruta_url, headers=UA, timeout=60)
+            if r.status_code == 429:
+                if limites == len(ESPERAS_429):
+                    raise Limitado(f"429 tras {limites} esperas en {ruta_url}")
+                espera = _espera_429(r, limites)
+                limites += 1
+                print(f"   ⏳ 429 (el portal pide ir más despacio): espero {espera} s", flush=True)
+                time.sleep(espera)
+                continue
             r.raise_for_status()
             payload = "".join(json.loads('"' + p + '"') for p in _BLOQUE.findall(r.text))
             d = _objeto(payload, "initialResults")
@@ -98,7 +124,7 @@ def pedir(sesion: requests.Session, ruta_url: str, reintentos: int = 3) -> tuple
             if intento == reintentos:
                 raise
             time.sleep(5 * intento)
-    raise RuntimeError("inalcanzable")
+            intento += 1
 
 
 def _caracteristicas(a: dict) -> dict[str, str]:
@@ -306,6 +332,30 @@ def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
     return unidades
 
 
+# El último plan que salió bien, en R2: si el de hoy no se puede hacer (429, 27-nov), se barre con ese. Solo sirve para
+# repartir las unidades entre los grupos y medir la cobertura, y de un día a otro casi no cambia.
+PLAN_R2 = {"plan.csv": f"raw/{RAIZ}_http/plan_ultimo.csv", "nacional.json": f"raw/{RAIZ}_http/plan_ultimo_nacional.json"}
+
+
+def guardar_plan() -> None:
+    from src import almacen
+    trabajo = carpetas(RAIZ)[0]
+    for archivo, clave in PLAN_R2.items():
+        almacen.subir_archivo(trabajo / archivo, clave)
+
+
+def plan_anterior() -> None:
+    from src import almacen
+    s3, bucket = almacen._cliente()
+    trabajo = carpetas(RAIZ)[0]
+    trabajo.mkdir(parents=True, exist_ok=True)
+    for archivo, clave in PLAN_R2.items():
+        s3.download_file(bucket, clave, str(trabajo / archivo))
+    n = len(pd.read_csv(trabajo / "plan.csv", keep_default_na=False))
+    fecha = json.loads((trabajo / "nacional.json").read_text()).get("fecha")
+    print(f"⚠️  Con el último plan que salió bien ({fecha}): {n} unidades")
+
+
 # ── 2. Barrer ────────────────────────────────────────────────────────────────
 def barrer(grupo: int, pausa: float = 1.0, solo: int | None = None) -> pd.DataFrame:
     trabajo, _ = carpetas(RAIZ)
@@ -372,6 +422,8 @@ if __name__ == "__main__":
     sub = p.add_subparsers(dest="accion", required=True)
     a = sub.add_parser("plan")
     a.add_argument("--grupos", type=int, default=4)
+    a.add_argument("--respaldo", action="store_true",
+                   help="guardar en R2 el plan si sale bien y, si no, usar el último que salió bien (el CI)")
     b = sub.add_parser("barrer")
     b.add_argument("--grupo", type=int, required=True)
     b.add_argument("--solo", type=int, help="solo las N unidades más chicas del grupo (pruebas)")
@@ -380,7 +432,15 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     if args.accion == "plan":
-        plan(args.grupos, args.pausa)
+        try:
+            plan(args.grupos, args.pausa)
+            if args.respaldo:
+                guardar_plan()
+        except (Limitado, requests.RequestException, ValueError) as e:
+            if not args.respaldo:
+                raise
+            print(f"⚠️  El plan de hoy no se pudo hacer ({type(e).__name__}: {e})")
+            plan_anterior()
     elif args.accion == "barrer":
         barrer(args.grupo, args.pausa, args.solo)
     else:
