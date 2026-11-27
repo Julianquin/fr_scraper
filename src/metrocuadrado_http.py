@@ -87,6 +87,12 @@ def _objeto(payload: str, clave: str) -> dict | None:
 # minuto, lo recibió en menos de un minuto, también desde otra IP): se respeta, esperando lo que diga (Retry-After) o
 # estos segundos, y si aun así sigue, se para (Limitado). No se salta: es el portal pidiendo ir más despacio.
 ESPERAS_429 = (30, 60, 120, 240, 480)
+# Medido el 27-nov con el plan a ~18 páginas por minuto: cada ~14 páginas pide esperar 15–17 s (un límite de ~15 por
+# minuto) y, al insistir, 15 min o más. Así que no se llega: al menos INTERVALO s entre una petición y la siguiente
+# (~12 por minuto; el plan, ~23 min; cada grupo del barrido, ~1,5 h de sus 355 min).
+INTERVALO = 5.0
+ESPERA_MAX = 900                     # el plan la baja: mejor rendirse pronto y usar el último plan bueno
+_ULTIMA = [0.0]                      # cuándo salió la última petición (time.monotonic)
 
 
 class Limitado(RuntimeError):
@@ -95,9 +101,9 @@ class Limitado(RuntimeError):
 
 def _espera_429(r: requests.Response, k: int) -> int:
     try:
-        return min(max(int(r.headers.get("Retry-After", "")), 1), 900)
+        return min(max(int(r.headers.get("Retry-After", "")), 1), ESPERA_MAX)
     except ValueError:
-        return ESPERAS_429[k]
+        return min(ESPERAS_429[k], ESPERA_MAX)
 
 
 def pedir(sesion: requests.Session, ruta_url: str, reintentos: int = 3) -> tuple[int, list[dict]]:
@@ -105,6 +111,9 @@ def pedir(sesion: requests.Session, ruta_url: str, reintentos: int = 3) -> tuple
     intento, limites = 1, 0
     while True:
         try:
+            if (falta := INTERVALO - (time.monotonic() - _ULTIMA[0])) > 0:
+                time.sleep(falta)
+            _ULTIMA[0] = time.monotonic()
             r = sesion.get(BASE + ruta_url, headers=UA, timeout=60)
             if r.status_code == 429:
                 if limites == len(ESPERAS_429):
@@ -292,12 +301,20 @@ class Barrido:
 
 
 # ── 1. Plan ──────────────────────────────────────────────────────────────────
+MINUTOS_PLAN = 35
+
+
 def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
     """Totales por tipo y departamento (y por habitaciones en los grandes) → unidades repartidas en
     `grupos` de carga parecida. La carga es el total declarado: las páginas le son proporcionales."""
+    global ESPERA_MAX
+    ESPERA_MAX = min(ESPERA_MAX, 120)          # el portal puede pedir 15 min: mejor el último plan bueno
     s = requests.Session()
+    fin = time.monotonic() + MINUTOS_PLAN * 60
 
     def total(r: str) -> int:
+        if time.monotonic() > fin:
+            raise Limitado(f"el plan pasó de {MINUTOS_PLAN} min (el job tiene 45)")
         n, res = pedir(s, r)
         time.sleep(pausa)
         return n if res else 0                     # sin avisos: el servidor relajó el filtro
