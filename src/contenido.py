@@ -452,6 +452,43 @@ def mes(d: dict) -> dict:
 
 
 # ── El mercado de la semana ───────────────────────────────────────────────────────────────────────────────
+def embudo(d: dict) -> dict | None:
+    """Las viviendas nuevas de la semana, filtro a filtro, con los criterios del canal (canal.CRITERIOS): el Reel
+    «El filtro de la semana» (avizor-marca, MARKETING §5.3). Las mismas que evalúa el informe (Cali, Jamundí y Yumbo,
+    los dos portales), sin las republicadas, que no son nuevas. Los pasos: piden ≥20 % menos por m² que sus similares
+    → sin señales de error (área o precio, o tan baratas que hay que verificarlas) → con 15 similares o más en su
+    barrio → el modelo de precios (sin haberlas visto) también las ve ≥10 % baratas."""
+    from src import oportunidades as op
+    from src.canal import CRITERIOS          # aquí y no arriba: canal importa este módulo
+    ev = d.get("ev")
+    if ev is None or not len(ev):
+        return None
+    rep = op.republicados(d["hasta"])
+    if len(rep):
+        ev = ev[~ev["id_inmueble"].astype(str).isin(set(rep.index.astype(str)))]
+    baratas = ev[ev["descuento"] >= CRITERIOS["bajo_similares"]]
+    sin_error = baratas[baratas["motivo_descarte"].isna() & ~baratas["verificar"].fillna(False).astype(bool)]
+    con_similares = sin_error[sin_error["confianza"] == CRITERIOS["confianza"]]
+    modelo = op.con_modelo(con_similares) if len(con_similares) else con_similares.assign(bajo_modelo=np.nan)
+    quedan = modelo[modelo["bajo_modelo"] >= CRITERIOS["bajo_modelo"]]
+    return {
+        "zona": "Cali, Jamundí y Yumbo" if ev["comuna"].isin(zonas.DE_EXTENSION).any() else d["ciudad"],
+        "publicadas": len(ev), "baratas": len(baratas), "sin_error": len(sin_error),
+        "con_similares": len(con_similares), "quedan": len(quedan),
+        "sin_modelo": int(modelo["bajo_modelo"].isna().sum()),       # sin estimado: cuentan como «no las vio baratas»
+        "criterios": {"bajo_similares": CRITERIOS["bajo_similares"], "bajo_modelo": CRITERIOS["bajo_modelo"],
+                      "similares_barrio": 15},
+    }
+
+
+def _embudo(d: dict) -> dict | None:
+    try:                                     # que un fallo aquí no deje sin semana.json a los carruseles
+        return embudo(d)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  El embudo de la semana falló ({type(e).__name__}: {e}): semana.json va sin él")
+        return None
+
+
 def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
     """El mercado de los últimos 7 días en cifras, del mismo cálculo que el informe semanal. `vistos`: los barrios
     de la semana ya elegidos en la ciudad (BARRIOS_SEMANA); si esta semana no tiene, se elige y se anota ahí."""
@@ -494,6 +531,7 @@ def semana(ciudad: str = "Cali", vistos: dict | None = None) -> dict:
             **ciudad_catastro(d),
         },
         "oportunidades": {"evaluadas": d["evaluadas"], "bajo_similares_20": d["bajo_umbral"]},
+        "embudo": _embudo(d),
         "comunas": comunas, "barrios": barrios, "barrio_semana": barrio_semana, "avaluo": ciudad_avaluo(d), "mes": mes(d), "bajadas": bajadas,
         "captacion": captacion, "credito": credito_semana(d),
         "area_metropolitana": area_metropolitana() if ciudad == "Cali" else None,
@@ -546,6 +584,9 @@ def main() -> None:
           f"captación {s['captacion']['piden_de_mas']}/{s['captacion']['viejas']} · {len(s['barrios'])} barrios")
     print(f"   barrio de la semana {b['semana']}: {b['barrio']} ({b['viviendas']} viviendas, puesto {b['puesto_m2']} "
           f"de {b['de']} por m²)" if b else "   sin barrio de la semana")
+    e = s["embudo"]
+    print(f"   embudo ({e['zona']}): {e['publicadas']} nuevas → {e['baratas']} baratas → {e['sin_error']} sin error → "
+          f"{e['con_similares']} con similares → {e['quedan']} quedan" if e else "   sin embudo de la semana")
     c = s["credito"]
     print(f"   crédito al {c['hasta']}: tasa {credito.pct(c['tasa_pesos'])} · {c['creditos']} créditos "
           f"({'fiable' if c['fiable'] else 'no fiable'}) · {len(c['por_comuna'])} comunas con cuota" if c else
