@@ -5,9 +5,8 @@ Ese día el portal empezó a pedir un desafío del cortafuegos de AWS (HTTP 202 
 en sus páginas de resultados a partir de la 2, y el barrido por segmentos (src/scraper_http.py) ya no puede
 recorrerlas. No se salta el desafío: se usa lo que el portal publica para los buscadores.
 
-El sitemap de avisos (cde-sitemap-listings-index.xml, anunciado en su robots.txt) trae un archivo por tipo, operación
-y departamento, rehecho cada madrugada, con la URL de cada aviso publicado y la fecha de su último cambio (lastmod).
-De ahí sale:
+El sitemap de avisos (sitemap.xml, anunciado en su robots.txt) trae la URL de cada aviso publicado y la fecha de su
+último cambio (lastmod), rehecho cada madrugada. De ahí sale:
   - qué avisos siguen publicados. El que no está cuenta una ausencia en `consolidar`, como en el barrido; las bajas
     siguen pidiendo 5 ausencias seguidas;
   - cuáles hay que leer: los nuevos, los que cambiaron desde la última vez que se vieron (lastmod; medido el 20-nov:
@@ -23,6 +22,18 @@ nada. Ahora se lee por orden de prioridad (los nuevos, los que vuelven tras una 
 Jamundí y Yumbo: la alerta, el canal y la fábrica— y el resto, el cambio más antiguo primero) hasta el tope; lo que
 no da tiempo a leer se toma del estado de ayer (no cuenta como ausente) y queda en `sitemap_pendientes.json`, junto
 al estado en R2, para leerse primero la noche siguiente (`--guardar-pendientes`, solo en el CI).
+
+El 28-nov el portal se mudó a Cloudflare y cambió el sitemap: el índice viejo (cde-sitemap-listings-index.xml, un
+archivo por tipo, operación y departamento) dio 404 y el barrido paró sin datos. El nuevo (sitemap.xml → fichas-1 …
+fichas-6, 50.000 avisos cada uno) mezcla venta y arriendo: la operación sale de la URL de cada aviso
+(…/apartamento-en-venta-en-pance-cali/3145829); el lastmod es solo la fecha. Medido ese día frente al estado: los mismos
+id_inmueble y URL (99,4 %), el lastmod es la fecha de actualización del aviso (95 %; el resto cambió después), el
+sitemap trae el 97,6 % del contador de venta (como antes) y los activos que ya no trae son bajas reales (muestra de 12:
+404, redirigen con `addeletedid` o `active: false`). La ficha trae el mismo JSON: `aplanar` no cambia. Los avisos que
+se ofrecen en venta y en arriendo a la vez (~450 activos en cada raíz) el sitemap viejo los ponía en los dos archivos y
+el nuevo una sola vez, con una de las dos operaciones en la URL: siguen en la raíz en la que ya estaban activos. El
+Valle del Cauca (la prioridad del tope) sale ahora del departamento del aviso en el estado. El desafío de Cloudflare
+(`cf-mitigated`) se trata como el de AWS: no se salta, se para.
 
     python -m src.sitemap_fincaraiz [--raiz arriendo] medir                  # cuántos hay que leer, sin leerlos
     python -m src.sitemap_fincaraiz [--raiz arriendo] barrer [--pausa 0.4] [--minutos 240] [--guardar-pendientes]
@@ -42,10 +53,14 @@ from src.config import BASE_DIR
 from src.fincaraiz_http import BASE, UA, _NEXT, aplanar, guardar_parquet, pedir
 from src.scraper_http import carpetas, hoy
 
-INDICE = f"{BASE}/cde-sitemap-listings-index.xml"
-OPERACION = {"venta": "-en-venta-", "arriendo": "-en-alquiler-"}
+INDICE = f"{BASE}/sitemap.xml"
+ARCHIVOS = "/sitemaps/fichas-"       # los archivos de avisos del índice (fichas-1 … fichas-6, 50.000 cada uno)
+# La operación, en la URL del aviso (…/casa-en-venta-en-alcazares-bogota/1277484, …/casa-en-venta-bogota-torca/…,
+# …/proyectos-vivienda/portus-352-apartamentos-en-venta-en-ciudad-los-alamos-cali/…); unos 400 no la llevan (p. ej.
+# oficinas de coworking): solo entran si ya estaban activos en esa raíz
+OPERACION = {"venta": re.compile(r"-en-venta(?:-|$)"), "arriendo": re.compile(r"-en-(?:arriendo|alquiler)(?:-|$)")}
 ESTADO = {"venta": "estado/avisos.parquet", "arriendo": "estado_arriendo/avisos.parquet"}
-PRIORITARIO = "-valle-del-cauca"     # los archivos del sitemap de Cali y su área (…-en-venta-valle-del-cauca)
+PRIORITARIO = "valle del cauca"      # el departamento de Cali y su área, como va en el estado («Valle del cauca»)
 _URL = re.compile(r"<url>(.*?)</url>", re.S)
 _LOC = re.compile(r"<loc>(.*?)</loc>")
 _LASTMOD = re.compile(r"<lastmod>(.*?)</lastmod>")
@@ -72,8 +87,10 @@ def _get(sesion: requests.Session, url: str, reintentos: int = 3) -> requests.Re
                 raise
             time.sleep(5 * intento)
             continue
-        if r.headers.get("x-amzn-waf-action"):
-            raise Bloqueado(f"{r.status_code} {r.headers.get('x-amzn-waf-action')} en {url}")
+        # El desafío del cortafuegos: AWS hasta el 27-nov, Cloudflare desde el 28-nov
+        waf = r.headers.get("x-amzn-waf-action") or r.headers.get("cf-mitigated")
+        if waf:
+            raise Bloqueado(f"{r.status_code} {waf} en {url}")
         if r.status_code in (404, 410):
             return None
         if r.status_code >= 500 and intento < reintentos:
@@ -85,13 +102,17 @@ def _get(sesion: requests.Session, url: str, reintentos: int = 3) -> requests.Re
 
 
 # ── 1. El sitemap ────────────────────────────────────────────────────────────
-def sitemaps(raiz: str, pausa: float, sesion: requests.Session | None = None) -> pd.DataFrame:
-    """(id_inmueble, url, lastmod en UTC, archivo) de cada aviso del sitemap de `raiz`."""
+def sitemaps(raiz: str, pausa: float, sesion: requests.Session | None = None,
+             propios: set[str] | frozenset[str] = frozenset()) -> pd.DataFrame:
+    """(id_inmueble, url, lastmod en UTC, archivo) de cada aviso del sitemap de `raiz`: los que llevan esa operación en
+    la URL y, aunque lleven otra o ninguna, los de `propios` (los activos de esa raíz en el estado)."""
     sesion = sesion or requests.Session()
     indice = _get(sesion, INDICE)
     if indice is None:
         raise RuntimeError(f"No se pudo leer el índice del sitemap ({INDICE})")
-    archivos = [u for u in _LOC.findall(indice.text) if OPERACION[raiz] in u]
+    archivos = [u for u in _LOC.findall(indice.text) if ARCHIVOS in u]
+    if not archivos:     # otro cambio de formato: mejor parar que dar a todos por ausentes
+        raise RuntimeError(f"El índice del sitemap ({INDICE}) no trae archivos de avisos ({ARCHIVOS}…): ¿cambió?")
     filas, fallidos = [], []
 
     def leer(archivo: str) -> bool:
@@ -103,11 +124,11 @@ def sitemaps(raiz: str, pausa: float, sesion: requests.Session | None = None) ->
             r = None
         if r is None or "<urlset" not in r.text:
             return False
-        nombre = archivo.rsplit("cde-sitemap-listings-", 1)[-1].removesuffix(".xml")
+        nombre = archivo.rsplit("/", 1)[-1].removesuffix(".xml").removesuffix("-sitemap")
         for bloque in _URL.findall(r.text):
             loc, lm = _LOC.search(bloque), _LASTMOD.search(bloque)
             m = _ID.search(loc.group(1)) if loc else None
-            if m:
+            if m and (OPERACION[raiz].search(loc.group(1).rstrip("/").rsplit("/", 2)[-2]) or m.group(1) in propios):
                 filas.append((m.group(1), loc.group(1), lm.group(1) if lm else None, nombre))
         return True
 
@@ -153,7 +174,8 @@ def repartir(sm: pd.DataFrame, estado: pd.DataFrame) -> dict[str, pd.DataFrame]:
     en_estado = sm["id_inmueble"].isin(e.index)
     visto = pd.to_datetime(sm["id_inmueble"].map(e["ultima_vez"]), errors="coerce").dt.tz_localize("UTC")
     activo = sm["id_inmueble"].map(e["estado_aviso"]).eq("activo")
-    # Cambió el mismo día que se vio o después (lastmod en UTC; el barrido corría a las 00:00–02:00 de Colombia)
+    # Cambió el mismo día que se vio o después (desde el 28-nov el lastmod es solo la fecha: lo que cambió el día en que
+    # se vio se vuelve a leer)
     cambio = sm["lastmod"].isna() | (sm["lastmod"] >= visto)
     leer = ~en_estado | ~activo | cambio
     activos = estado.loc[estado["estado_aviso"].eq("activo"), "id_inmueble"]
@@ -193,7 +215,7 @@ def ordenar(partes: dict[str, pd.DataFrame], estado: pd.DataFrame, pend: set[str
     en_estado = leer["id_inmueble"].isin(e.index)
     activo = leer["id_inmueble"].map(e["estado_aviso"]).eq("activo")
     prioridad = pd.Series(3, index=leer.index)
-    prioridad[leer["archivo"].astype(str).str.endswith(PRIORITARIO)] = 2
+    prioridad[leer["id_inmueble"].map(e["departamento"]).astype(str).str.strip().str.lower().eq(PRIORITARIO)] = 2
     prioridad[en_estado & ~activo] = 1
     prioridad[~en_estado] = 0
     leer = (leer.assign(prioridad=prioridad, pendiente=leer["id_inmueble"].isin(pend))
@@ -207,9 +229,13 @@ def _resumen(leer: pd.DataFrame) -> str:
             f"{n.get(3, 0):,}; de ellos, pendientes de otros días {int(leer['pendiente'].sum()):,}")
 
 
+def _activos(estado: pd.DataFrame) -> set[str]:
+    return set(estado.loc[estado["estado_aviso"].eq("activo"), "id_inmueble"])
+
+
 def medir(raiz: str, pausa: float) -> dict[str, pd.DataFrame]:
-    sm = sitemaps(raiz, pausa)
     estado, _ = estado_y_columnas(raiz)
+    sm = sitemaps(raiz, pausa, propios=_activos(estado))
     partes = repartir(sm, estado)
     leer, igual = ordenar(partes, estado, pendientes(raiz))
     print(f"{raiz}: en el sitemap {len(sm):,} · leer {len(leer):,} ({_resumen(leer)}) · del estado {len(igual):,} · "
@@ -238,8 +264,8 @@ def barrer(raiz: str, pausa: float, max_fichas: int | None = None, minutos: floa
     trabajo, _ = carpetas(raiz)
     sesion = requests.Session()
     t0 = time.time()
-    sm = sitemaps(raiz, pausa, sesion)
     estado, columnas = estado_y_columnas(raiz)
+    sm = sitemaps(raiz, pausa, sesion, propios=_activos(estado))
     partes = repartir(sm, estado)
     leer, igual_sm = ordenar(partes, estado, pendientes(raiz))
     print(f"A leer: {len(leer):,} avisos ({_resumen(leer)}) · del estado: {len(igual_sm):,}"
