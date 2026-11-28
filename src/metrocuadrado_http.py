@@ -89,9 +89,12 @@ def _objeto(payload: str, clave: str) -> dict | None:
 ESPERAS_429 = (30, 60, 120, 240, 480)
 # Medido el 27-nov con el plan a ~18 páginas por minuto: cada ~14 páginas pide esperar 15–17 s (un límite de ~15 por
 # minuto) y, hacia la consulta 150–170, 15 min o más (también a ~12 por minuto, en GitHub): parece haber además un cupo
-# más largo. Así que no se llega: al menos INTERVALO s entre una petición y la siguiente (~8,5 por minuto; cada grupo
-# del barrido, ~2,5 h de sus 355 min) y el plan, que solo reparte el trabajo, se rehace una vez por semana.
-INTERVALO = 7.0
+# más largo. A 7 s (sin un solo 429 en 174 consultas) volvió a llegar en la ~175: no depende del ritmo sino de cuántas
+# se hacen, unas 175 por IP cada ~30–60 min. Todo el país (~9.100 páginas al día) ya no cabe: desde el 27-nov se barre
+# cada noche solo lo que usa el producto, `dep-cauca` (el portal junta ahí Valle del Cauca y Cauca: ~13.000 avisos,
+# ~680 páginas, ~170 por grupo), a 10 s entre peticiones. El resto del país conserva lo último que se vio
+# (consolidar no cuenta ausencias si se ve mucho menos que lo activo: no hay retiradas falsas).
+INTERVALO = 10.0
 ESPERA_MAX = 900                     # el plan la baja: mejor rendirse pronto y usar el último plan bueno
 _ULTIMA = [0.0]                      # cuándo salió la última petición (time.monotonic)
 
@@ -305,9 +308,26 @@ class Barrido:
 MINUTOS_PLAN = 50                    # el job del plan tiene 60
 
 
-def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
+ZONAS_DIARIAS = ["dep-cauca"]        # Valle del Cauca y Cauca (Cali, Jamundí y Yumbo): lo que usa el producto
+
+
+def repartir(unidades: pd.DataFrame, grupos: int) -> list[int]:
+    """Cada unidad al grupo con menos carga (reparto voraz), de la más grande a la más chica. Devuelve la carga."""
+    unidades.sort_values("declarado", ascending=False, inplace=True)
+    unidades.reset_index(drop=True, inplace=True)
+    carga, asignado = [0] * grupos, []
+    for n in unidades["declarado"]:
+        g = carga.index(min(carga))
+        asignado.append(g)
+        carga[g] += n
+    unidades["grupo"] = asignado
+    return carga
+
+
+def plan(grupos: int, pausa: float = 1.0, zonas: list[str] | None = None) -> pd.DataFrame:
     """Totales por tipo y departamento (y por habitaciones en los grandes) → unidades repartidas en
-    `grupos` de carga parecida. La carga es el total declarado: las páginas le son proporcionales."""
+    `grupos` de carga parecida. La carga es el total declarado: las páginas le son proporcionales. Con `zonas`, solo
+    esas (p. ej. dep-cauca): sin las consultas del total del país, que pasa a ser la suma de sus unidades."""
     global ESPERA_MAX
     ESPERA_MAX = min(ESPERA_MAX, 120)          # el portal puede pedir 15 min: mejor el último plan bueno
     s = requests.Session()
@@ -321,9 +341,11 @@ def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
         return n if res else 0                     # sin avisos: el servidor relajó el filtro
 
     nacional, filas = {}, []
+    deps = [d for d in DEPARTAMENTOS if not zonas or f"dep-{d}" in zonas]
     for tipo in TIPOS:
-        nacional[tipo] = total(ruta(tipo))
-        for d in DEPARTAMENTOS:
+        if not zonas:
+            nacional[tipo] = total(ruta(tipo))
+        for d in deps:
             zona = f"dep-{d}"
             n = total(ruta(tipo, zona))
             if n > GRANDE and tipo in VIVIENDA:
@@ -332,20 +354,17 @@ def plan(grupos: int, pausa: float = 1.0) -> pd.DataFrame:
             elif n:
                 filas.append({"tipo": tipo, "zona": zona, "filtro": "", "declarado": n})
         suma = sum(f["declarado"] for f in filas if f["tipo"] == tipo)
-        print(f"{tipo}: {nacional[tipo]:,} en el país · {suma:,} en las unidades", flush=True)
+        nacional.setdefault(tipo, suma)
+        print(f"{tipo}: {nacional[tipo]:,} {'en las zonas' if zonas else 'en el país'} · {suma:,} en las unidades",
+              flush=True)
     unidades = pd.DataFrame(filas)
-    unidades = unidades[unidades["declarado"] > 0].sort_values("declarado", ascending=False).reset_index(drop=True)
-    carga, asignado = [0] * grupos, []
-    for n in unidades["declarado"]:                    # al grupo con menos carga (reparto voraz)
-        g = carga.index(min(carga))
-        asignado.append(g)
-        carga[g] += n
-    unidades["grupo"] = asignado
+    unidades = unidades[unidades["declarado"] > 0].copy()
+    carga = repartir(unidades, grupos)
     trabajo = carpetas(RAIZ)[0]
     trabajo.mkdir(parents=True, exist_ok=True)
     unidades.to_csv(trabajo / "plan.csv", index=False)
     (trabajo / "nacional.json").write_text(json.dumps(
-        {"total_nacional": sum(nacional.values()), "por_tipo": nacional, "fecha": hoy()}))
+        {"total_nacional": sum(nacional.values()), "por_tipo": nacional, "fecha": hoy(), "zonas": zonas or None}))
     print(f"Plan: {len(unidades)} unidades en {grupos} grupos · avisos por grupo: {carga}")
     return unidades
 
@@ -374,16 +393,26 @@ def edad_plan_anterior() -> int | None:
     return (date.fromisoformat(hoy()) - date.fromisoformat(d["fecha"])).days
 
 
-def plan_anterior() -> None:
+def plan_anterior(zonas: list[str] | None = None, grupos: int = 4) -> None:
+    """El último plan bueno de R2; con `zonas`, solo sus unidades, repartidas otra vez entre los grupos (y el total,
+    la suma de esas unidades)."""
     from src import almacen
     s3, bucket = almacen._cliente()
     trabajo = carpetas(RAIZ)[0]
     trabajo.mkdir(parents=True, exist_ok=True)
     for archivo, clave in PLAN_R2.items():
         s3.download_file(bucket, clave, str(trabajo / archivo))
-    n = len(pd.read_csv(trabajo / "plan.csv", keep_default_na=False))
-    fecha = json.loads((trabajo / "nacional.json").read_text()).get("fecha")
-    print(f"⚠️  Con el último plan que salió bien ({fecha}): {n} unidades")
+    unidades = pd.read_csv(trabajo / "plan.csv", keep_default_na=False)
+    nac = json.loads((trabajo / "nacional.json").read_text())
+    if zonas:
+        unidades = unidades[unidades["zona"].isin(zonas)].copy()
+        repartir(unidades, grupos)
+        unidades.to_csv(trabajo / "plan.csv", index=False)
+        por_tipo = unidades.groupby("tipo")["declarado"].sum().astype(int).to_dict()
+        nac = {**nac, "total_nacional": int(sum(por_tipo.values())), "por_tipo": por_tipo, "zonas": zonas}
+        (trabajo / "nacional.json").write_text(json.dumps(nac))
+    print(f"⚠️  Con el último plan que salió bien ({nac.get('fecha')}): {len(unidades)} unidades"
+          + (f" de {', '.join(zonas)}" if zonas else ""))
 
 
 # ── 2. Barrer ────────────────────────────────────────────────────────────────
@@ -455,6 +484,7 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--respaldo", action="store_true",
                    help="guardar en R2 el plan si sale bien y, si no, usar el último que salió bien (el CI)")
     a.add_argument("--cada", type=int, help="con --respaldo: rehacerlo solo si el último bueno tiene N días o más")
+    a.add_argument("--zonas", nargs="+", help="solo estas zonas (p. ej. dep-cauca: Valle del Cauca y Cauca)")
     b = sub.add_parser("barrer")
     b.add_argument("--grupo", type=int, required=True)
     b.add_argument("--solo", type=int, help="solo las N unidades más chicas del grupo (pruebas)")
@@ -464,18 +494,18 @@ def main(argv: list[str] | None = None) -> None:
 
     edad = edad_plan_anterior() if args.accion == "plan" and args.respaldo and args.cada else None
     if edad is not None and edad < args.cada:
-        plan_anterior()
+        plan_anterior(args.zonas, args.grupos)
         print(f"   (tiene {edad} días: se rehace cada {args.cada}; así se ahorran ~280 consultas al portal)")
     elif args.accion == "plan":
         try:
-            plan(args.grupos, args.pausa)
+            plan(args.grupos, args.pausa, args.zonas)
             if args.respaldo:
                 guardar_plan()
         except (Limitado, requests.RequestException, ValueError) as e:
             if not args.respaldo:
                 raise
             print(f"⚠️  El plan de hoy no se pudo hacer ({type(e).__name__}: {e})")
-            plan_anterior()
+            plan_anterior(args.zonas, args.grupos)
     elif args.accion == "barrer":
         barrer(args.grupo, args.pausa, args.solo)
     else:
